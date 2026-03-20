@@ -111,12 +111,6 @@ Unauthenticated information disclosure (pentest finding 3.2.3, CVSS 5.1). Teleme
 
 🐛 **fix: Update GITHUB_PAT env var on container recreation (#209)**
 
-Container recreation now updates `GITHUB_PAT` to the current system value, and agent restart detects stale PATs to trigger recreation. Previously, PAT was frozen at agent creation time.
-
-- `src/backend/services/agent_service/helpers.py` — Added `check_github_pat_env_matches()` to detect stale PAT
-- `src/backend/services/agent_service/lifecycle.py` — Added PAT check to `needs_recreation` and PAT update to `recreate_container_with_updated_config`
-- `tests/unit/test_github_pat_recreation.py` — 7 unit tests
-
 ---
 
 🔒 **fix(security): Credential injection file path allowlist — block arbitrary file writes (#183)**
@@ -453,6 +447,22 @@ Chat executions (`/api/chat`) now acquire a capacity slot via SlotService in add
 
 - `src/backend/routers/chat.py` — `chat_with_agent()` acquires/releases a slot around the chat execution; `terminate_agent_execution()` releases slot on termination
 - `src/backend/services/agent_service/queue.py` — `force_release_agent_logic()` now also clears capacity slots
+
+---
+
+**feat: 4-tier role model — admin / creator / operator / user (ROLE-001, #143)**
+
+Expands user roles from 2 tiers (admin/user) to 4 tiers with server-side enforcement. New email users default to `creator` (was `user`). Agent creation now requires `creator` or above.
+
+- `src/backend/dependencies.py` — `require_role(min_role)` factory; `ROLE_HIERARCHY = ["user", "operator", "creator", "admin"]`
+- `src/backend/routers/users.py` — NEW: `GET /api/users` (admin-only user list), `PUT /api/users/{username}/role` (admin-only role update)
+- `src/backend/db/users.py` — `update_user_role(username, role)` method
+- `src/backend/database.py` — `update_user_role` delegation
+- `src/backend/db/email_auth.py` — New email users default to `"creator"` instead of `"user"`
+- `src/backend/routers/agents.py` — Agent creation requires `creator`+ via `require_role("creator")`
+- `src/backend/main.py` — Registers users router
+- `src/frontend/src/views/Settings.vue` — New "User Management" section with users table and per-user role dropdowns
+- `tests/test_role_model.py` — NEW: test suite for user listing, role updates, auth requirements
 
 ---
 

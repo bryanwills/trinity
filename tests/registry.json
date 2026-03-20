@@ -117,6 +117,13 @@
       "added": "2026-04-01",
       "categories": ["backend", "api", "subscriptions", "usage-tracking"],
       "description": "Tests for per-subscription usage tracking: GET /api/subscriptions/{id}/usage returns correct structure, zeros for fresh subscriptions, 404 for unknown, auth enforcement, name-based lookup"
+    },
+    {
+      "file": "test_role_model.py",
+      "feature": "Issue #143",
+      "added": "2026-03-20",
+      "categories": ["backend", "api", "auth", "roles"],
+      "description": "Tests for 4-tier role model: list users, update roles, admin-only access, role validation"
     }
   ]
 }
