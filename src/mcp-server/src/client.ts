@@ -877,6 +877,91 @@ export class TrinityClient {
   }
 
   // ============================================================================
+  // Agent Event Subscriptions (EVT-001)
+  // ============================================================================
+
+  /**
+   * Emit an event from an agent
+   */
+  async emitEvent(data: {
+    event_type: string;
+    payload?: Record<string, unknown>;
+  }): Promise<{
+    id: string;
+    source_agent: string;
+    event_type: string;
+    payload?: Record<string, unknown>;
+    subscriptions_triggered: number;
+    created_at: string;
+  }> {
+    return this.request(
+      "POST",
+      "/api/events",
+      data
+    );
+  }
+
+  /**
+   * Create an event subscription
+   */
+  async createEventSubscription(
+    agentName: string,
+    data: {
+      source_agent: string;
+      event_type: string;
+      target_message: string;
+      enabled?: boolean;
+    }
+  ): Promise<{
+    id: string;
+    subscriber_agent: string;
+    source_agent: string;
+    event_type: string;
+    target_message: string;
+    enabled: boolean;
+    created_at: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/event-subscriptions`,
+      data
+    );
+  }
+
+  /**
+   * List event subscriptions for an agent
+   */
+  async listEventSubscriptions(
+    agentName: string,
+    direction: string = "subscriber"
+  ): Promise<{
+    count: number;
+    subscriptions: Array<{
+      id: string;
+      subscriber_agent: string;
+      source_agent: string;
+      event_type: string;
+      target_message: string;
+      enabled: boolean;
+    }>;
+  }> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/event-subscriptions?direction=${direction}`
+    );
+  }
+
+  /**
+   * Delete an event subscription
+   */
+  async deleteEventSubscription(subscriptionId: string): Promise<{ status: string }> {
+    return this.request(
+      "DELETE",
+      `/api/event-subscriptions/${encodeURIComponent(subscriptionId)}`
+    );
+  }
+
+  // ============================================================================
   // Health
   // ============================================================================
 

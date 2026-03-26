@@ -599,6 +599,35 @@ TABLES = {
             created_at TEXT NOT NULL
         )
     """,
+
+    # -------------------------------------------------------------------------
+    # Agent Event Subscription Tables (EVT-001)
+    # -------------------------------------------------------------------------
+    "agent_event_subscriptions": """
+        CREATE TABLE IF NOT EXISTS agent_event_subscriptions (
+            id TEXT PRIMARY KEY,
+            subscriber_agent TEXT NOT NULL,
+            source_agent TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            target_message TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            UNIQUE(subscriber_agent, source_agent, event_type)
+        )
+    """,
+
+    "agent_events": """
+        CREATE TABLE IF NOT EXISTS agent_events (
+            id TEXT PRIMARY KEY,
+            source_agent TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT,
+            subscriptions_triggered INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """,
 }
 
 # =============================================================================
@@ -726,6 +755,13 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_nvm_config_agent ON nevermined_agent_config(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_nvm_payment_log_agent ON nevermined_payment_log(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_nvm_payment_log_execution ON nevermined_payment_log(execution_id)",
+
+    # Agent event subscription indexes (EVT-001)
+    "CREATE INDEX IF NOT EXISTS idx_event_subs_subscriber ON agent_event_subscriptions(subscriber_agent)",
+    "CREATE INDEX IF NOT EXISTS idx_event_subs_source ON agent_event_subscriptions(source_agent)",
+    "CREATE INDEX IF NOT EXISTS idx_event_subs_source_type ON agent_event_subscriptions(source_agent, event_type)",
+    "CREATE INDEX IF NOT EXISTS idx_events_source ON agent_events(source_agent, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_events_type ON agent_events(event_type)",
 ]
 
 

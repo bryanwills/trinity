@@ -1001,3 +1001,57 @@ class NeverminedPaymentLog(BaseModel):
     success: bool
     error: Optional[str] = None
     created_at: str
+
+
+# =========================================================================
+# Agent Event Subscription Models (EVT-001: Agent Event Pub/Sub)
+# =========================================================================
+
+class EventSubscriptionCreate(BaseModel):
+    """Request model for creating an event subscription."""
+    source_agent: str  # Agent to subscribe to events from
+    event_type: str  # Namespaced event type (e.g., "prediction.resolved")
+    target_message: str  # Message template with {{payload.field}} placeholders
+    enabled: bool = True
+
+
+class EventSubscriptionUpdate(BaseModel):
+    """Request model for updating an event subscription."""
+    event_type: Optional[str] = None
+    target_message: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class EventSubscription(BaseModel):
+    """A stored event subscription."""
+    id: str
+    subscriber_agent: str  # Agent that receives the event
+    source_agent: str  # Agent that emits the event
+    event_type: str  # Namespaced event type pattern
+    target_message: str  # Message template
+    enabled: bool = True
+    created_at: str
+    updated_at: str
+    created_by: str
+
+
+class EventSubscriptionList(BaseModel):
+    """Response model for listing event subscriptions."""
+    count: int
+    subscriptions: List[EventSubscription]
+
+
+class AgentEvent(BaseModel):
+    """A persisted agent event."""
+    id: str
+    source_agent: str
+    event_type: str
+    payload: Optional[dict] = None
+    subscriptions_triggered: int = 0
+    created_at: str
+
+
+class AgentEventList(BaseModel):
+    """Response model for listing agent events."""
+    count: int
+    events: List[AgentEvent]

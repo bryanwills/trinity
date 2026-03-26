@@ -305,6 +305,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 | `monitoring.ts` (3) | `get_fleet_health`, `get_agent_health`, `trigger_health_check` | Fleet health monitoring |
 | `nevermined.ts` (4) | `configure_nevermined`, `get_nevermined_config`, `toggle_nevermined`, `get_nevermined_payments` | x402 payment configuration |
 | `notifications.ts` (1) | `send_notification` | Agent-to-platform notifications |
+| `events.ts` (4) | `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription` | Agent event pub/sub (EVT-001) |
 | `docs.ts` (1) | `get_agent_requirements` | Agent documentation |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
@@ -907,6 +908,30 @@ CREATE INDEX idx_shared_folders_consume ON agent_shared_folder_config(consume_en
 - Permission-gated: only agents with permissions (via `agent_permissions`) can mount
 - Container recreation on restart when mount config changes
 - Volume ownership automatically fixed to UID 1000
+
+**agent_event_subscriptions:** (EVT-001 - Agent Event Pub/Sub)
+```sql
+CREATE TABLE agent_event_subscriptions (
+    id TEXT PRIMARY KEY,
+    subscriber_agent TEXT NOT NULL,       -- Agent receiving events
+    source_agent TEXT NOT NULL,           -- Agent emitting events
+    event_type TEXT NOT NULL,             -- Namespaced event type
+    target_message TEXT NOT NULL,         -- Message template with {{payload.field}}
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    UNIQUE(subscriber_agent, source_agent, event_type)
+);
+CREATE TABLE agent_events (
+    id TEXT PRIMARY KEY,
+    source_agent TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT,                         -- JSON
+    subscriptions_triggered INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+```
 
 **slack_workspaces:** (SLACK-002 - Channel Adapters)
 ```sql

@@ -377,6 +377,12 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     except Exception as e:
         logger.warning(f"Failed to delete permissions for agent {agent_name}: {e}")
 
+    # Delete agent event subscriptions (EVT-001)
+    try:
+        db.delete_agent_event_subscriptions(agent_name)
+    except Exception as e:
+        logger.warning(f"Failed to delete event subscriptions for agent {agent_name}: {e}")
+
     # Delete agent skills
     try:
         db.delete_agent_skills(agent_name)

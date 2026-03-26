@@ -1,3 +1,22 @@
+### 2026-03-26
+
+✨ **feat: Agent Event Subscriptions — lightweight pub/sub for inter-agent pipelines (#169)**
+
+Agents can now emit named events and subscribe to events from other agents. When a matching event fires, the subscribing agent receives an async task with the payload interpolated into a message template. Uses existing `agent_permissions` for access control.
+
+- **New MCP tools**: `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription`
+- **New API endpoints**:
+  - `POST /api/agents/{name}/event-subscriptions` — Create subscription
+  - `GET /api/agents/{name}/event-subscriptions` — List subscriptions
+  - `GET/PUT/DELETE /api/event-subscriptions/{id}` — CRUD by ID
+  - `POST /api/events` — Emit event (agent-scoped, from MCP auth context)
+  - `POST /api/agents/{name}/emit-event` — Emit event for specific agent
+  - `GET /api/agents/{name}/events` — Event history
+  - `GET /api/events` — All events
+- **New database tables**: `agent_event_subscriptions`, `agent_events`
+- **New files**: `src/backend/db/event_subscriptions.py`, `src/backend/routers/event_subscriptions.py`, `src/mcp-server/src/tools/events.ts`
+- **Modified**: `database.py` (delegation), `db/schema.py` (tables+indexes), `db_models.py` (models), `main.py` (router registration), `server.ts` (tool registration), `client.ts` (API methods), `routers/agents.py` (cleanup on delete)
+
 ### 2026-03-25
 
 ✨ **Auto-assign subscription to new agents via round-robin (#74)**

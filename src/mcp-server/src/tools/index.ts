@@ -11,3 +11,4 @@ export { createExecutionTools } from "./executions.js";
 export { createSkillsTools } from "./skills.js";
 export { createSubscriptionTools } from "./subscriptions.js";
 export { createNeverminedTools } from "./nevermined.js";
+export { createEventTools } from "./events.js";

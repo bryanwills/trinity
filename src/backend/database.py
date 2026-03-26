@@ -81,6 +81,13 @@ from db_models import (
     SubscriptionCredential,
     SubscriptionWithAgents,
     AgentAuthStatus,
+    # Agent Event Subscriptions (EVT-001)
+    EventSubscriptionCreate,
+    EventSubscriptionUpdate,
+    EventSubscription,
+    EventSubscriptionList,
+    AgentEvent,
+    AgentEventList,
     # Monitoring Models (MON-001)
     AgentHealthStatus,
     HealthCheckType,
@@ -126,6 +133,7 @@ from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
 from db.operator_queue import OperatorQueueOperations
+from db.event_subscriptions import EventSubscriptionOperations
 
 
 def init_database():
@@ -254,6 +262,7 @@ class DatabaseManager:
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
         self._operator_queue_ops = OperatorQueueOperations()
+        self._event_subscription_ops = EventSubscriptionOperations()
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -1347,6 +1356,37 @@ class DatabaseManager:
 
     def operator_queue_item_exists(self, item_id):
         return self._operator_queue_ops.item_exists(item_id)
+
+    # =========================================================================
+    # Agent Event Subscriptions (delegated to db/event_subscriptions.py) - EVT-001
+    # =========================================================================
+
+    def create_event_subscription(self, subscriber_agent, data, created_by):
+        return self._event_subscription_ops.create_subscription(subscriber_agent, data, created_by)
+
+    def get_event_subscription(self, subscription_id):
+        return self._event_subscription_ops.get_subscription(subscription_id)
+
+    def list_event_subscriptions(self, subscriber_agent=None, source_agent=None, enabled_only=False, limit=100):
+        return self._event_subscription_ops.list_subscriptions(subscriber_agent, source_agent, enabled_only, limit)
+
+    def update_event_subscription(self, subscription_id, event_type=None, target_message=None, enabled=None):
+        return self._event_subscription_ops.update_subscription(subscription_id, event_type, target_message, enabled)
+
+    def delete_event_subscription(self, subscription_id):
+        return self._event_subscription_ops.delete_subscription(subscription_id)
+
+    def delete_agent_event_subscriptions(self, agent_name):
+        return self._event_subscription_ops.delete_agent_subscriptions(agent_name)
+
+    def find_matching_event_subscriptions(self, source_agent, event_type):
+        return self._event_subscription_ops.find_matching_subscriptions(source_agent, event_type)
+
+    def create_agent_event(self, source_agent, event_type, payload=None, subscriptions_triggered=0):
+        return self._event_subscription_ops.create_event(source_agent, event_type, payload, subscriptions_triggered)
+
+    def list_agent_events(self, source_agent=None, event_type=None, limit=50):
+        return self._event_subscription_ops.list_events(source_agent, event_type, limit)
 
 
 # Global database manager instance

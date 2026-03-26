@@ -769,17 +769,27 @@ Trinity implements infrastructure for "System 2" AI — Deep Agents that plan, r
 - **Description**: Agent pools with N instances for parallel workloads
 - **Key Concepts**: Pool configuration, load balancing, auto-scaling triggers
 
-### 17.2 Event Bus Infrastructure
-- **Status**: ⏳ Not Started
-- **Priority**: High
-- **Description**: Platform-wide pub/sub for agent event broadcasting
-- **Key Concepts**: Redis Streams, permission-gated subscriptions, event persistence
+### 17.2 Agent Event Subscriptions (EVT-001)
+- **Status**: ✅ Implemented (2026-03-26)
+- **Priority**: High (P1)
+- **Description**: Lightweight SQLite-backed pub/sub for inter-agent event pipelines
+- **Key Features**:
+  - MCP tool `emit_event(event_type, payload)` — agents emit named events with structured data
+  - CRUD API for event subscriptions (source agent, event type, message template)
+  - Subscription trigger: matching event → async task to subscriber with `{{payload.field}}` interpolation
+  - Permission-gated: uses existing `agent_permissions` — subscriber must be permitted to call source
+  - Events persisted to `agent_events` table, subscriptions to `agent_event_subscriptions`
+  - WebSocket broadcast for real-time event visibility
+  - MCP tools: `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription`
+- **GitHub Issue**: #169
+- **Relationship to 17.2 (Redis Streams)**: This is a pragmatic first step. If Redis Streams (#22) lands later, subscriptions can migrate.
 
 ### 17.3 Event Handlers & Reactions
-- **Status**: ⏳ Not Started
+- **Status**: ✅ Partially Implemented via EVT-001 (2026-03-26)
 - **Priority**: High
 - **Description**: Configure automatic agent reactions to events
 - **Key Concepts**: Event matching with filters, debouncing/throttling
+- **Note**: Basic event → task triggering implemented in EVT-001. Advanced filtering, debouncing, and throttling are future enhancements.
 
 ### 17.4 Async MCP Chat Commands
 - **Status**: ✅ Implemented (2026-01-30)
