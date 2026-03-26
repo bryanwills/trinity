@@ -156,7 +156,8 @@ sequenceDiagram
     UI->>Backend: POST /api/agents/{name}/git/pull
     Backend->>Container: POST /api/git/pull
     Container->>Container: git fetch origin
-    Container->>Container: git pull --rebase
+    Container->>Container: _get_pull_branch() → "main" for trinity/* branches
+    Container->>Container: git pull --rebase origin {pull_branch}
     Container->>Backend: Return result
     Backend->>UI: Show notification
 ```
@@ -411,7 +412,7 @@ if not repo_info.exists:
 | `pull_from_github()` | 196-236 | Proxy to agent `/api/git/pull` with conflict handling |
 | `get_agent_git_config()` | 239-241 | Get config from database |
 | `delete_agent_git_config()` | 244-246 | Delete git config when agent is deleted |
-| `initialize_git_in_container()` | 262-399 | Initialize git in agent container |
+| `initialize_git_in_container()` | 262-415 | Initialize git in agent container (preserves remote history via fetch+reset when possible) |
 | `check_git_initialized()` | 402-427 | Check if git exists in container |
 
 ---
@@ -623,14 +624,32 @@ POST /api/agents/{name}/git/sync
 | Dependencies | `src/backend/dependencies.py` | 228-295 | Access control for agent routes |
 | DB Models | `src/backend/db_models.py` | 158-182 | AgentGitConfig and GitSyncResult |
 
+### Working Branch Pull Logic (docker/base-image/agent_server/routers/git.py)
+
+The `_get_pull_branch()` helper (line 17-30) detects `trinity/*` working branches and redirects pull/status operations to `origin/main`:
+
+```python
+def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
+    """For trinity/* working branches, pull from main instead."""
+    if not current_branch.startswith("trinity/"):
+        return current_branch
+    # Verify origin/main exists, fall back to current_branch if not
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "origin/main"], ...
+    )
+    return "main" if result.returncode == 0 else current_branch
+```
+
+**Used in:** `get_git_status()` (ahead/behind count), `pull_from_github()` (all strategies), `sync_to_github()` (`pull_first` strategy). Push operations still use `current_branch` (the working branch).
+
 ### Agent-Server Endpoints (docker/base-image/agent_server/routers/git.py)
 
 | Endpoint | Line Range | Description |
 |----------|------------|-------------|
-| `GET /api/git/status` | 17-139 | Get repository status, branch, changes, ahead/behind |
-| `POST /api/git/sync` | 142-391 | Stage, commit, push with strategy support |
-| `GET /api/git/log` | 394-441 | Get recent commit history |
-| `POST /api/git/pull` | 444-643 | Pull from remote with conflict strategies |
+| `GET /api/git/status` | 33-155 | Get repository status, branch, changes, ahead/behind (uses `_get_pull_branch` for behind count) |
+| `POST /api/git/sync` | 158-407 | Stage, commit, push with strategy support (`pull_first` pulls from `pull_branch`) |
+| `GET /api/git/log` | 410-457 | Get recent commit history |
+| `POST /api/git/pull` | 460-659 | Pull from remote with conflict strategies (targets `pull_branch`) |
 
 ---
 
@@ -647,7 +666,7 @@ POST /api/agents/{name}/git/sync
 
 ## Status
 
-Working - Architecture cleanup (2025-12-31)
+Working - Pull fix for working branches (2026-03-26)
 
 ---
 
@@ -666,6 +685,7 @@ Working - Architecture cleanup (2025-12-31)
 
 | Date | Changes |
 |------|---------|
+| 2026-03-26 | **Fix git pull for working branches** (#195): Added `_get_pull_branch()` helper that detects `trinity/*` branches and redirects pull/status to `origin/main`. Fixed `git fetch --dry-run` → `git fetch origin` in status endpoint. Fixed `initialize_git_in_container()` to preserve remote history via `git fetch + reset` instead of `git init + force push`. Tests in `tests/unit/test_git_pull_branch.py`. |
 | 2026-02-28 | **Git Branch Support** (GIT-002): Added complete data flow documentation with line numbers. URL syntax (`github:owner/repo@branch`) parses branch in crud.py:102-113. MCP types.ts:29 and agents.ts:201-207 expose `source_branch` parameter. template_service.py:22-41 passes branch to git clone. startup.sh:38-45 uses `-b` flag. Added testing checklist from requirements spec. |
 | 2026-02-24 | **Async Docker Operations** (DOCKER-001): `execute_command_in_container()` in docker_service.py now async. All git_service.py calls await this function. `check_git_initialized()` now async. routers/git.py updated to await. |
 | 2026-01-30 | **Git pull permission fix**: `POST /{agent_name}/git/pull` changed from `OwnedAgentByName` to `AuthorizedAgentByName` - shared users can now pull from GitHub. Updated Access Control Dependencies, Endpoint Signatures, and Security Considerations sections. |
