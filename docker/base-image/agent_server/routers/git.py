@@ -273,17 +273,16 @@ async def sync_to_github(request: GitSyncRequest):
 
         # 1. Stage changes
         if request.paths:
-            # Stage specific paths
-            for path in request.paths:
-                add_result = subprocess.run(
-                    ["git", "add", path],
-                    capture_output=True,
-                    text=True,
-                    cwd=str(home_dir),
-                    timeout=30
-                )
-                if add_result.returncode != 0:
-                    logger.warning(f"Failed to add {path}: {add_result.stderr}")
+            # Stage specific paths (single git add call for all paths)
+            add_result = subprocess.run(
+                ["git", "add"] + list(request.paths),
+                capture_output=True,
+                text=True,
+                cwd=str(home_dir),
+                timeout=30
+            )
+            if add_result.returncode != 0:
+                logger.warning(f"Failed to add paths: {add_result.stderr}")
         else:
             # Stage all changes
             add_result = subprocess.run(

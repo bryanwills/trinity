@@ -331,32 +331,32 @@ async def initialize_git_in_container(
         )
 
     # Step 3: Initialize git and try to preserve remote history
-    setup_commands = [
-        'git config --global user.email "trinity@agent.local"',
-        'git config --global user.name "Trinity Agent"',
-        'git config --global init.defaultBranch main',
-        'git init',
-        f'git remote get-url origin >/dev/null 2>&1 && '
-        f'git remote set-url origin https://oauth2:{github_pat}@github.com/{github_repo}.git || '
-        f'git remote add origin https://oauth2:{github_pat}@github.com/{github_repo}.git',
-        'git fetch origin',
+    # Commands marked required=True will abort on failure;
+    # optional commands (like fetch) may fail for empty repos.
+    setup_commands: list[tuple[str, bool]] = [
+        ('git config --global user.email "trinity@agent.local"', True),
+        ('git config --global user.name "Trinity Agent"', True),
+        ('git config --global init.defaultBranch main', True),
+        ('git init', True),
+        (f'git remote get-url origin >/dev/null 2>&1 && '
+         f'git remote set-url origin https://oauth2:{github_pat}@github.com/{github_repo}.git || '
+         f'git remote add origin https://oauth2:{github_pat}@github.com/{github_repo}.git', True),
+        ('git fetch origin', False),  # Optional — remote may be empty
     ]
 
-    for cmd in setup_commands:
+    for cmd, required in setup_commands:
         result = await execute_command_in_container(
             container_name=container_name,
             command=f'bash -c "cd {git_dir} && {cmd}"',
             timeout=60
         )
-        if result.get("exit_code", 0) != 0:
+        if result.get("exit_code", 0) != 0 and required:
             output = result.get("output", "")
-            # git fetch failing is ok — remote may be empty
-            if "git fetch" not in cmd:
-                return GitInitResult(
-                    success=False,
-                    git_dir=git_dir,
-                    error=f"Git command failed: {cmd}\nOutput: {output}"
-                )
+            return GitInitResult(
+                success=False,
+                git_dir=git_dir,
+                error=f"Git command failed: {cmd}\nOutput: {output}"
+            )
 
     # Check if remote has commits on main (to preserve history)
     check_main = await execute_command_in_container(

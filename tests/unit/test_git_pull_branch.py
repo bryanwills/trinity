@@ -7,6 +7,7 @@ endpoints correctly target origin/main for trinity/* working branches.
 Covers fix for GitHub issue #195.
 """
 
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -19,7 +20,7 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
 
     The actual function lives in the agent container image and can't be imported
     directly due to relative imports. This mirror must stay in sync with the
-    source at docker/base-image/agent_server/routers/git.py.
+    source at docker/base-image/agent_server/routers/git.py:17-30.
     """
     if not current_branch.startswith("trinity/"):
         return current_branch
@@ -30,6 +31,19 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
     return "main" if result.returncode == 0 else current_branch
 
 
+def _init_repo_with_remote(local_dir: str, remote_dir: str) -> None:
+    """Initialize a local git repo with a bare remote and an initial commit."""
+    subprocess.run(["git", "init", "--bare"], cwd=remote_dir, capture_output=True, timeout=10)
+    subprocess.run(["git", "init"], cwd=local_dir, capture_output=True, timeout=10)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=local_dir, capture_output=True, timeout=10)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=local_dir, capture_output=True, timeout=10)
+    subprocess.run(["git", "remote", "add", "origin", remote_dir], cwd=local_dir, capture_output=True, timeout=10)
+    Path(local_dir, "README.md").write_text("test")
+    subprocess.run(["git", "add", "."], cwd=local_dir, capture_output=True, timeout=10)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=local_dir, capture_output=True, timeout=10)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=local_dir, capture_output=True, timeout=10)
+
+
 class TestGetPullBranch:
     """Unit tests for _get_pull_branch() helper function."""
 
@@ -37,42 +51,13 @@ class TestGetPullBranch:
         """Create a temporary git repo for each test."""
         self.tmpdir = tempfile.mkdtemp()
         self.home_dir = Path(self.tmpdir)
-
-        # Initialize a bare "remote" repo
         self.remote_dir = tempfile.mkdtemp()
-        subprocess.run(
-            ["git", "init", "--bare"],
-            cwd=self.remote_dir,
-            capture_output=True,
-            timeout=10
-        )
+        _init_repo_with_remote(self.tmpdir, self.remote_dir)
 
-        # Initialize the local repo
-        subprocess.run(["git", "init"], cwd=self.tmpdir, capture_output=True, timeout=10)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=self.tmpdir, capture_output=True, timeout=10
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=self.tmpdir, capture_output=True, timeout=10
-        )
-        subprocess.run(
-            ["git", "remote", "add", "origin", self.remote_dir],
-            cwd=self.tmpdir, capture_output=True, timeout=10
-        )
-
-        # Create initial commit and push to establish origin/main
-        (self.home_dir / "README.md").write_text("test")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True, timeout=10)
-        subprocess.run(
-            ["git", "commit", "-m", "initial"],
-            cwd=self.tmpdir, capture_output=True, timeout=10
-        )
-        subprocess.run(
-            ["git", "push", "-u", "origin", "main"],
-            cwd=self.tmpdir, capture_output=True, timeout=10
-        )
+    def teardown_method(self):
+        """Clean up temporary directories."""
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.remote_dir, ignore_errors=True)
 
     def test_trinity_branch_returns_main(self):
         """trinity/* branch with origin/main should return 'main'."""
@@ -126,8 +111,11 @@ class TestGitPullFromMainEndToEnd:
 
     def setup_method(self):
         """Set up a local repo with remote, mimicking a Trinity agent."""
+        self._temp_dirs: list[str] = []
+
         # Create a bare "remote" (like GitHub)
         self.remote_dir = tempfile.mkdtemp()
+        self._temp_dirs.append(self.remote_dir)
         subprocess.run(
             ["git", "init", "--bare"],
             cwd=self.remote_dir,
@@ -136,6 +124,7 @@ class TestGitPullFromMainEndToEnd:
 
         # Create a "clone" (like the agent container)
         self.agent_dir = tempfile.mkdtemp()
+        self._temp_dirs.append(self.agent_dir)
         subprocess.run(
             ["git", "clone", self.remote_dir, self.agent_dir],
             capture_output=True, timeout=10
@@ -171,10 +160,15 @@ class TestGitPullFromMainEndToEnd:
             cwd=self.agent_dir, capture_output=True, timeout=10
         )
 
+    def teardown_method(self):
+        """Clean up all temporary directories."""
+        for d in self._temp_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
     def _push_commit_to_main(self):
         """Push a new commit to main on the remote (simulating GitHub push)."""
-        # Create a separate clone to push to main
         pusher_dir = tempfile.mkdtemp()
+        self._temp_dirs.append(pusher_dir)
         subprocess.run(
             ["git", "clone", self.remote_dir, pusher_dir],
             capture_output=True, timeout=10
