@@ -633,9 +633,15 @@ async def connect_slack_transport(
             raise HTTPException(status_code=400, detail="transport_mode must be 'socket' or 'webhook'")
         db.set_setting("slack_transport_mode", body.transport_mode.strip())
 
-    # Start new transport first, then stop old one.
-    # Trade-off: brief overlap may cause duplicate messages, but the alternative
-    # (stop-then-start) leaves no connection if the new one fails.
+    # Stop existing transport before starting new one
+    existing = getattr(request.app.state, 'slack_transport', None)
+    if existing:
+        try:
+            await existing.stop()
+        except Exception as e:
+            logger.warning(f"Error stopping existing Slack transport: {e}")
+        request.app.state.slack_transport = None
+
     from services.settings_service import get_slack_app_token, get_slack_transport_mode, get_slack_signing_secret
     from adapters.slack_adapter import SlackAdapter
     from adapters.message_router import message_router
@@ -664,14 +670,6 @@ async def connect_slack_transport(
             # Register webhook transport for the events endpoint
             from routers.slack import set_webhook_transport
             set_webhook_transport(transport)
-
-        # New transport connected — now stop the old one
-        existing = getattr(request.app.state, 'slack_transport', None)
-        if existing:
-            try:
-                await existing.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping previous Slack transport: {e}")
 
         request.app.state.slack_transport = transport
 
