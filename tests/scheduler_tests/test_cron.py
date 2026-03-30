@@ -49,28 +49,60 @@ class TestCronParsing:
             'day_of_week': '*'
         }
 
-    def test_parse_weekly_cron(self):
-        """Test parsing weekly cron (Sunday at midnight)."""
+    def test_parse_weekly_cron_sunday(self):
+        """Test parsing weekly cron: Sunday (cron 0) maps to APScheduler 6."""
         result = self.service._parse_cron("0 0 * * 0")
         assert result == {
             'minute': '0',
             'hour': '0',
             'day': '*',
             'month': '*',
-            'day_of_week': '0'
+            'day_of_week': '6'  # cron 0=Sunday → APScheduler 6=Sunday
+        }
+
+    def test_parse_weekly_cron_monday(self):
+        """Test parsing weekly cron: Monday (cron 1) maps to APScheduler 0."""
+        result = self.service._parse_cron("5 9 * * 1")
+        assert result == {
+            'minute': '5',
+            'hour': '9',
+            'day': '*',
+            'month': '*',
+            'day_of_week': '0'  # cron 1=Monday → APScheduler 0=Monday
+        }
+
+    def test_parse_weekly_cron_sunday_alt(self):
+        """Test parsing weekly cron: Sunday alternative (cron 7) maps to APScheduler 6."""
+        result = self.service._parse_cron("0 0 * * 7")
+        assert result == {
+            'minute': '0',
+            'hour': '0',
+            'day': '*',
+            'month': '*',
+            'day_of_week': '6'  # cron 7=Sunday → APScheduler 6=Sunday
         }
 
     def test_parse_complex_cron(self):
-        """Test parsing complex cron expression."""
-        # 9:30 AM on weekdays
+        """Test parsing complex cron expression with range: left unchanged."""
+        # 9:30 AM on weekdays — range expressions are not converted (complex case)
         result = self.service._parse_cron("30 9 * * 1-5")
         assert result == {
             'minute': '30',
             'hour': '9',
             'day': '*',
             'month': '*',
-            'day_of_week': '1-5'
+            'day_of_week': '1-5'  # ranges left unchanged
         }
+
+    def test_parse_cron_day_wildcard_unchanged(self):
+        """Test that wildcard day_of_week is not converted."""
+        result = self.service._parse_cron("*/15 * * * *")
+        assert result['day_of_week'] == '*'
+
+    def test_parse_cron_day_step_unchanged(self):
+        """Test that */n day_of_week step expressions are not converted."""
+        result = self.service._parse_cron("0 9 * * */2")
+        assert result['day_of_week'] == '*/2'
 
     def test_parse_invalid_cron_too_few_parts(self):
         """Test that invalid cron with too few parts raises error."""
@@ -91,6 +123,41 @@ class TestCronParsing:
         result = self.service._parse_cron("  0  9  *  *  *  ")
         assert result['minute'] == '0'
         assert result['hour'] == '9'
+
+
+class TestCronDayOfWeekFiring:
+    """Integration tests: verify CronTrigger fires on the correct day-of-week."""
+
+    def setup_method(self):
+        self.service = SchedulerService.__new__(SchedulerService)
+
+    def test_monday_cron_fires_on_monday(self):
+        """Cron '5 9 * * 1' (standard: Monday) must fire on Monday, not Tuesday."""
+        from apscheduler.triggers.cron import CronTrigger
+        import pytz
+        tz = pytz.UTC
+        # Saturday March 28, 2026
+        now = datetime(2026, 3, 28, 10, 0, 0, tzinfo=tz)
+        kwargs = self.service._parse_cron("5 9 * * 1")
+        trigger = CronTrigger(timezone=tz, **kwargs)
+        next_fire = trigger.get_next_fire_time(None, now)
+        assert next_fire.strftime("%A") == "Monday", (
+            f"Expected Monday, got {next_fire.strftime('%A %b %d')} — "
+            "day_of_week numbering mismatch between cron and APScheduler"
+        )
+
+    def test_sunday_cron_fires_on_sunday(self):
+        """Cron '0 10 * * 0' (standard: Sunday) must fire on Sunday, not Monday."""
+        from apscheduler.triggers.cron import CronTrigger
+        import pytz
+        tz = pytz.UTC
+        now = datetime(2026, 3, 28, 10, 0, 0, tzinfo=tz)  # Saturday
+        kwargs = self.service._parse_cron("0 10 * * 0")
+        trigger = CronTrigger(timezone=tz, **kwargs)
+        next_fire = trigger.get_next_fire_time(None, now)
+        assert next_fire.strftime("%A") == "Sunday", (
+            f"Expected Sunday, got {next_fire.strftime('%A %b %d')}"
+        )
 
 
 class TestNextRunTime:

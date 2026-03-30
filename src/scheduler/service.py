@@ -264,17 +264,36 @@ class SchedulerService:
           - "0 9 * * *" = Every day at 9:00 AM
           - "*/15 * * * *" = Every 15 minutes
           - "0 0 * * 0" = Every Sunday at midnight
+
+        Note: APScheduler's CronTrigger uses 0=Monday internally, while standard
+        Unix cron uses 0=Sunday. This method converts plain integer day_of_week
+        values from cron convention to APScheduler convention so that schedules
+        fire on the correct day. Named values (mon, tue, etc.) are left unchanged.
         """
         parts = cron_expression.strip().split()
         if len(parts) != 5:
             raise ValueError(f"Invalid cron expression: {cron_expression}. Expected 5 parts.")
+
+        # Convert day_of_week from standard cron convention (0=Sunday, 1=Monday, ..., 7=Sunday)
+        # to APScheduler convention (0=Monday, 1=Tuesday, ..., 6=Sunday).
+        # Only plain integers are converted; wildcards ('*', '*/n') and named days
+        # ('mon', 'tue', etc.) are left untouched.
+        dow_raw = parts[4]
+        dow_converted = dow_raw
+        if dow_raw != '*' and not dow_raw.startswith('*/'):
+            try:
+                dow_num = int(dow_raw)
+                # (0→6, 1→0, 2→1, ..., 7→6)
+                dow_converted = str((dow_num - 1) % 7)
+            except ValueError:
+                pass  # Named day or complex expression — leave unchanged
 
         return {
             'minute': parts[0],
             'hour': parts[1],
             'day': parts[2],
             'month': parts[3],
-            'day_of_week': parts[4]
+            'day_of_week': dow_converted
         }
 
     def _add_job(self, schedule: Schedule):
