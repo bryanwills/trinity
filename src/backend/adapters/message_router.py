@@ -196,13 +196,9 @@ class ChannelMessageRouter:
                 logger.error(f"[ROUTER] Step 9 - task failed: {error_msg}")
                 await adapter.indicate_done(message)
 
-                # User-friendly error messages
-                if result.error_code == "timeout":
-                    response_text = "Sorry, that took too long to process. Try a simpler request or ask me to be more concise."
-                elif "at capacity" in error_msg:
-                    response_text = "I'm busy right now. Please try again in a moment."
-                elif "billing" in error_msg.lower() or "credit" in error_msg.lower():
-                    response_text = "I'm having trouble processing your request. Please try again later."
+                # Reply with the actual error if available, otherwise generic message
+                if error_msg and error_msg != "Unknown error":
+                    response_text = error_msg
                 else:
                     response_text = "Sorry, I encountered an error processing your message."
 
