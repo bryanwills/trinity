@@ -18,7 +18,7 @@ Slot Rules:
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 import redis
 import time
 
@@ -226,12 +226,17 @@ class SlotService:
 
         return result
 
-    async def _cleanup_stale_slots_for_agent(self, agent_name: str, slot_ttl: int = None) -> int:
+    async def _cleanup_stale_slots_for_agent(
+        self, agent_name: str, slot_ttl: int = None
+    ) -> List[str]:
         """Remove slots older than TTL for a single agent.
 
         Args:
             agent_name: Name of the agent
             slot_ttl: Slot TTL in seconds. If None, uses DEFAULT_SLOT_TTL_SECONDS.
+
+        Returns:
+            List of execution IDs whose slots were reclaimed.
         """
         slots_key = self._slots_key(agent_name)
         ttl = slot_ttl if slot_ttl is not None else DEFAULT_SLOT_TTL_SECONDS
@@ -242,7 +247,7 @@ class SlotService:
 
         if stale:
             # Remove stale slots
-            removed = self.redis.zremrangebyscore(slots_key, "-inf", cutoff)
+            self.redis.zremrangebyscore(slots_key, "-inf", cutoff)
 
             # Clean up metadata
             for execution_id in stale:
@@ -250,20 +255,21 @@ class SlotService:
                 self.redis.delete(metadata_key)
 
             logger.warning(
-                f"[Slots] Cleaned up {removed} stale slots for agent '{agent_name}'"
+                f"[Slots] Cleaned up {len(stale)} stale slots for agent '{agent_name}'"
             )
-            return removed
+            return list(stale)
 
-        return 0
+        return []
 
-    async def cleanup_stale_slots(self) -> int:
+    async def cleanup_stale_slots(self) -> Dict[str, List[str]]:
         """
         Remove slots older than TTL for all agents.
 
         Returns:
-            Total number of stale slots removed
+            Dict mapping agent_name to list of reclaimed execution IDs.
+            Empty dict if nothing was cleaned.
         """
-        total_removed = 0
+        reclaimed: Dict[str, List[str]] = {}
 
         # Find all agent slot keys
         pattern = f"{self.slots_prefix}*"
@@ -272,15 +278,17 @@ class SlotService:
             cursor, keys = self.redis.scan(cursor, match=pattern, count=100)
             for key in keys:
                 agent_name = key.replace(self.slots_prefix, "")
-                removed = await self._cleanup_stale_slots_for_agent(agent_name)
-                total_removed += removed
+                stale_ids = await self._cleanup_stale_slots_for_agent(agent_name)
+                if stale_ids:
+                    reclaimed[agent_name] = stale_ids
             if cursor == 0:
                 break
 
-        if total_removed > 0:
-            logger.info(f"[Slots] Cleanup removed {total_removed} stale slots total")
+        total = sum(len(ids) for ids in reclaimed.values())
+        if total > 0:
+            logger.info(f"[Slots] Cleanup removed {total} stale slots total")
 
-        return total_removed
+        return reclaimed
 
     async def get_active_count(self, agent_name: str) -> int:
         """Get count of active slots for an agent."""

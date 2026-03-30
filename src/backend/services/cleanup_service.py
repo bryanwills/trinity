@@ -35,11 +35,13 @@ class CleanupReport:
     orphaned_skipped: int = 0
     stale_activities: int = 0
     stale_slots: int = 0
+    stale_slot_executions: int = 0  # Issue #219: executions failed when their slot was reclaimed
 
     @property
     def total(self) -> int:
         return (self.stale_executions + self.no_session_executions +
-                self.orphaned_skipped + self.stale_activities + self.stale_slots)
+                self.orphaned_skipped + self.stale_activities + self.stale_slots +
+                self.stale_slot_executions)
 
     def to_dict(self) -> Dict:
         return {
@@ -48,6 +50,7 @@ class CleanupReport:
             "orphaned_skipped": self.orphaned_skipped,
             "stale_activities": self.stale_activities,
             "stale_slots": self.stale_slots,
+            "stale_slot_executions": self.stale_slot_executions,
             "total": self.total,
         }
 
@@ -120,11 +123,29 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error marking stale activities: {e}")
 
-        # 3. Cleanup stale Redis slots
+        # 3. Cleanup stale Redis slots and fail corresponding execution records (#219)
         try:
             slot_service = get_slot_service()
-            count = await slot_service.cleanup_stale_slots()
-            report.stale_slots = count
+            reclaimed = await slot_service.cleanup_stale_slots()
+            report.stale_slots = sum(len(ids) for ids in reclaimed.values())
+
+            # Fail execution records whose slots were reclaimed
+            for agent_name, execution_ids in reclaimed.items():
+                for execution_id in execution_ids:
+                    try:
+                        updated = db.fail_stale_slot_execution(
+                            execution_id=execution_id,
+                            error=f"Stale execution — slot TTL expired for agent '{agent_name}', cleaned by cleanup service",
+                        )
+                        if updated:
+                            report.stale_slot_executions += 1
+                            logger.info(
+                                f"[Cleanup] Failed execution {execution_id} for agent '{agent_name}' (slot reclaimed)"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"[Cleanup] Error failing execution {execution_id} after slot reclaim: {e}"
+                        )
         except Exception as e:
             logger.error(f"[Cleanup] Error cleaning stale slots: {e}")
 

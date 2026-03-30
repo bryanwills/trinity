@@ -1100,6 +1100,50 @@ class ScheduleOperations:
             conn.commit()
             return len(no_session_rows)
 
+    def fail_stale_slot_execution(self, execution_id: str, error: str) -> bool:
+        """Mark a single execution as failed if it is still running.
+
+        Used by the cleanup service when a stale Redis slot is reclaimed.
+        The WHERE status='running' guard prevents overwriting executions
+        that have already completed or failed via another path.
+
+        Args:
+            execution_id: The execution to fail.
+            error: Error message describing why the execution was failed.
+
+        Returns:
+            True if the execution was updated, False if it was not found
+            or was no longer in 'running' status.
+        """
+        now = utc_now_iso()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT started_at FROM schedule_executions WHERE id = ? AND status = ?",
+                (execution_id, TaskExecutionStatus.RUNNING),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            completed_at = parse_iso_timestamp(now)
+            started_at = parse_iso_timestamp(row["started_at"])
+            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+
+            cursor.execute("""
+                UPDATE schedule_executions
+                SET status = ?,
+                    completed_at = ?,
+                    duration_ms = ?,
+                    error = ?
+                WHERE id = ? AND status = ?
+            """, (TaskExecutionStatus.FAILED, now, duration_ms, error,
+                  execution_id, TaskExecutionStatus.RUNNING))
+
+            conn.commit()
+            return cursor.rowcount > 0
+
     def finalize_orphaned_skipped_executions(self) -> int:
         """Finalize skipped executions that are missing completed_at.
 

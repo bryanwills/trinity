@@ -34,7 +34,8 @@ Dataclass holding results from a single cleanup cycle:
 - `orphaned_skipped: int` - Skipped executions finalized (Issue #106)
 - `stale_activities: int` - Activities marked failed
 - `stale_slots: int` - Redis slots cleaned
-- `total` property: Sum of all five fields
+- `stale_slot_executions: int` - Execution records failed when their slot was reclaimed (Issue #219)
+- `total` property: Sum of all six fields
 - `to_dict()` method: Serializes for API responses
 
 #### CleanupService class (line 48)
@@ -81,12 +82,17 @@ Five sequential operations, each wrapped in individual try/except:
    ```
    Calls `DatabaseManager.mark_stale_activities_failed()` which delegates to `ActivityOperations.mark_stale_activities_failed()`.
 
-5. **Cleanup stale Redis slots** (lines 116-122)
+5. **Cleanup stale Redis slots and fail execution records** (lines 123-148, Issue #219)
    ```python
    slot_service = get_slot_service()
-   count = await slot_service.cleanup_stale_slots()
+   reclaimed = await slot_service.cleanup_stale_slots()
+   report.stale_slots = sum(len(ids) for ids in reclaimed.values())
+   # Fail execution records whose slots were reclaimed
+   for agent_name, execution_ids in reclaimed.items():
+       for execution_id in execution_ids:
+           db.fail_stale_slot_execution(execution_id, error=...)
    ```
-   Calls `SlotService.cleanup_stale_slots()` which scans all `agent:slots:*` keys and removes entries older than 30 minutes.
+   Calls `SlotService.cleanup_stale_slots()` which scans all `agent:slots:*` keys, removes entries older than TTL, and returns a dict mapping agent names to reclaimed execution IDs. The cleanup service then fails the corresponding `schedule_executions` DB records using a guarded update (`WHERE status = 'running'`) to avoid overwriting executions that completed via another path.
 
 ### Startup Loop (`_cleanup_loop`, lines 114-137)
 
@@ -226,8 +232,32 @@ SET status = 'failed',
 WHERE id = ?
 ```
 
+#### fail_stale_slot_execution (ScheduleOperations) — Issue #219
+**File**: `src/backend/db/schedules.py:1103-1144`
+
+Marks a single execution as failed when its Redis slot is reclaimed. Uses a `WHERE status = 'running'` guard to prevent overwriting executions that already completed or failed via another path.
+
+**SQL** (guarded select):
+```sql
+SELECT started_at FROM schedule_executions WHERE id = ? AND status = 'running'
+```
+
+**SQL** (guarded update):
+```sql
+UPDATE schedule_executions
+SET status = 'failed',
+    completed_at = ?,
+    duration_ms = ?,
+    error = ?
+WHERE id = ? AND status = 'running'
+```
+
+**Delegation chain**:
+- `cleanup_service.run_cleanup()` -> `db.fail_stale_slot_execution(execution_id, error)`
+- `DatabaseManager.fail_stale_slot_execution()` -> `self._schedule_ops.fail_stale_slot_execution()`
+
 #### finalize_orphaned_skipped_executions (ScheduleOperations) — Issue #106
-**File**: `src/backend/db/schedules.py:1057-1075`
+**File**: `src/backend/db/schedules.py:1146-1170`
 
 **SQL** (single update — now sets terminal status, Issue #137):
 ```sql
@@ -268,18 +298,21 @@ WHERE id = ?
 ### Redis Operations
 
 #### cleanup_stale_slots (SlotService)
-**File**: `src/backend/services/slot_service.py:247-271`
+**File**: `src/backend/services/slot_service.py:259-295`
+
+**Returns**: `Dict[str, List[str]]` — mapping of agent_name to list of reclaimed execution IDs (Issue #219).
 
 **Logic**:
 1. Scans all keys matching `agent:slots:*` pattern via `SCAN`
-2. For each agent, calls `_cleanup_stale_slots_for_agent()` (line 223)
-3. Removes ZSET entries with score (timestamp) older than 30 minutes:
+2. For each agent, calls `_cleanup_stale_slots_for_agent()` which returns the reclaimed execution IDs
+3. Removes ZSET entries with score (timestamp) older than TTL:
    ```
    ZREMRANGEBYSCORE agent:slots:{name} -inf {cutoff_timestamp}
    ```
 4. Deletes corresponding metadata keys: `agent:slot:{name}:{execution_id}`
+5. Returns the execution IDs so the caller (cleanup service) can fail corresponding DB records
 
-**TTL**: `SLOT_TTL_SECONDS = 1800` (30 minutes, line 30)
+**TTL**: `DEFAULT_SLOT_TTL_SECONDS = 1200` (20 minutes, line 31)
 
 ## Side Effects
 - **Logging**: Each cleanup cycle logs results at INFO level when resources are cleaned
@@ -369,10 +402,11 @@ This is a purely backend service. The only "UI" is the two admin API endpoints u
 | `src/backend/db/schedules.py:971-1013` | `mark_stale_executions_failed()` |
 | `src/backend/db/schedules.py:570-590` | `mark_execution_dispatched()` — sets sentinel before agent call |
 | `src/backend/db/schedules.py:1036-1076` | `mark_no_session_executions_failed()` (Issue #106) |
-| `src/backend/db/schedules.py:1078-1100` | `finalize_orphaned_skipped_executions()` (Issue #106) |
+| `src/backend/db/schedules.py:1103-1144` | `fail_stale_slot_execution()` (Issue #219) |
+| `src/backend/db/schedules.py:1146-1170` | `finalize_orphaned_skipped_executions()` (Issue #106) |
 | `src/backend/db/activities.py:187-225` | `mark_stale_activities_failed()` |
 | `src/backend/database.py:682-688` | Delegation methods on DatabaseManager |
-| `src/backend/services/slot_service.py:247-271` | `cleanup_stale_slots()` Redis cleanup |
+| `src/backend/services/slot_service.py:259-295` | `cleanup_stale_slots()` Redis cleanup, returns reclaimed IDs (Issue #219) |
 | `src/backend/main.py:86,265-269,300-305` | Import, start in lifespan, stop on shutdown |
 | `src/backend/routers/monitoring.py:455-491` | `/cleanup-status` and `/cleanup-trigger` endpoints |
 | `tests/test_cleanup_service.py` | API integration tests for cleanup (Issue #106) |

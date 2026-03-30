@@ -708,6 +708,10 @@ class DatabaseManager:
         """Mark running executions with no claude_session_id as failed (Issue #106)."""
         return self._schedule_ops.mark_no_session_executions_failed(timeout_seconds)
 
+    def fail_stale_slot_execution(self, execution_id: str, error: str) -> bool:
+        """Mark a running execution as failed when its slot is reclaimed (#219)."""
+        return self._schedule_ops.fail_stale_slot_execution(execution_id, error)
+
     def finalize_orphaned_skipped_executions(self):
         """Finalize skipped executions missing completed_at (Issue #106)."""
         return self._schedule_ops.finalize_orphaned_skipped_executions()
