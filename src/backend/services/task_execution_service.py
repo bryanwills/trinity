@@ -262,6 +262,8 @@ class TaskExecutionService:
             }
 
             start_time = datetime.utcnow()
+            effective_timeout = float(timeout_seconds or 600) + 10
+            logger.info(f"[TaskExecService] Calling agent {agent_name} /api/task (timeout={effective_timeout}s, tools={allowed_tools}, msg_len={len(message)})")
 
             response = await agent_post_with_retry(
                 agent_name,
@@ -269,12 +271,15 @@ class TaskExecutionService:
                 payload,
                 max_retries=3,
                 retry_delay=1.0,
-                timeout=float(timeout_seconds or 600) + 10,
+                timeout=effective_timeout,
             )
+
+            execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            logger.info(f"[TaskExecService] Agent {agent_name} responded: HTTP {response.status_code} ({execution_time_ms}ms)")
+
             response.raise_for_status()
 
             response_data = response.json()
-            execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
             metadata = response_data.get("metadata", {})
 
             # ---- 5. Sanitize + persist -----------------------------------
@@ -335,7 +340,9 @@ class TaskExecutionService:
             )
 
         except httpx.TimeoutException:
+            elapsed = int((datetime.utcnow() - start_time).total_seconds()) if 'start_time' in dir() else 0
             error_msg = f"Task execution timed out after {timeout_seconds} seconds"
+            logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s)")
             # Don't overwrite cancelled executions
             if execution_id:
                 existing = db.get_execution(execution_id)

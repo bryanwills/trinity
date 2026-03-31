@@ -102,7 +102,7 @@ class SlackService:
 
         params = {
             "client_id": get_slack_client_id(),
-            "scope": "im:history,im:read,im:write,chat:write,chat:write.customize,users:read,users:read.email,app_mentions:read,channels:history,channels:read,channels:join,channels:manage,reactions:write",
+            "scope": "im:history,im:read,im:write,chat:write,chat:write.customize,users:read,users:read.email,app_mentions:read,channels:history,channels:read,channels:join,channels:manage,reactions:write,files:read",
             "redirect_uri": redirect_uri,
             "state": state
         }
@@ -473,6 +473,36 @@ class SlackService:
             return f"{base_url}/agents/{agent_name}?tab=sharing&slack=connected"
         else:
             return f"{base_url}/agents/{agent_name}?tab=sharing&slack=error&reason={error or 'unknown'}"
+
+
+    async def download_file(self, bot_token: str, url: str, max_size: int = 10 * 1024 * 1024) -> Optional[bytes]:
+        """
+        Download a file from Slack using the bot token.
+
+        Args:
+            bot_token: Slack bot token for authorization
+            url: url_private_download from Slack file object
+            max_size: Maximum file size in bytes (default 10MB)
+
+        Returns:
+            File bytes, or None on failure.
+        """
+        try:
+            response = await self.client.get(
+                url,
+                headers={"Authorization": f"Bearer {bot_token}"},
+                follow_redirects=True,
+            )
+            if response.status_code != 200:
+                logger.error(f"Slack file download failed: HTTP {response.status_code}")
+                return None
+            if len(response.content) > max_size:
+                logger.warning(f"Slack file too large ({len(response.content)} bytes, max {max_size})")
+                return None
+            return response.content
+        except Exception as e:
+            logger.error(f"Slack file download error: {e}")
+            return None
 
 
 # Singleton instance

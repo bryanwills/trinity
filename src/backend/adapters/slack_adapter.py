@@ -22,7 +22,7 @@ from database import db
 from config import SLACK_AUTO_VERIFY_EMAIL
 from services.slack_service import slack_service
 from services.email_service import email_service
-from adapters.base import ChannelAdapter, NormalizedMessage, ChannelResponse
+from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,14 @@ class SlackAdapter(ChannelAdapter):
                 bot_token, message.channel_id, message.timestamp, "white_check_mark"
             )
 
+    async def download_file(self, file: FileAttachment, message: NormalizedMessage) -> Optional[bytes]:
+        """Download file from Slack using bot token."""
+        bot_token = self.get_bot_token(message.metadata.get("team_id"))
+        if not bot_token:
+            logger.error(f"No bot token for file download: {file.name}")
+            return None
+        return await slack_service.download_file(bot_token, file.url)
+
     async def on_response_sent(self, message: NormalizedMessage, agent_name: str) -> None:
         """Register active thread so subsequent replies don't need @mention."""
         if message.thread_id and message.metadata.get("team_id"):
@@ -166,16 +174,20 @@ class SlackAdapter(ChannelAdapter):
 
         user_id = event.get("user")
         text = event.get("text", "").strip()
+        files = self._extract_files(event)
 
-        if not text or not user_id:
+        if not text and not files:
+            return None
+        if not user_id:
             return None
 
         return NormalizedMessage(
             sender_id=user_id,
-            text=text,
+            text=text or "(file upload)",
             channel_id=event.get("channel"),
             thread_id=event.get("thread_ts"),
             timestamp=event.get("ts", ""),
+            files=files,
             metadata={
                 "team_id": team_id,
                 "is_dm": True,
@@ -189,21 +201,23 @@ class SlackAdapter(ChannelAdapter):
 
         user_id = event.get("user")
         text = event.get("text", "").strip()
+        files = self._extract_files(event)
 
-        if not text or not user_id:
+        if not user_id:
             return None
 
         # Strip the @mention from the text (e.g., "<@U123BOT> hello" → "hello")
         text = re.sub(r'<@[A-Z0-9]+>\s*', '', text).strip()
-        if not text:
+        if not text and not files:
             return None
 
         return NormalizedMessage(
             sender_id=user_id,
-            text=text,
+            text=text or "(file upload)",
             channel_id=event.get("channel"),
             thread_id=event.get("thread_ts") or event.get("ts"),  # Reply in thread
             timestamp=event.get("ts", ""),
+            files=files,
             metadata={
                 "team_id": team_id,
                 "is_dm": False,
@@ -239,21 +253,23 @@ class SlackAdapter(ChannelAdapter):
 
         user_id = event.get("user")
         text = event.get("text", "").strip()
+        files = self._extract_files(event)
 
-        if not text or not user_id:
+        if not user_id:
             return None
 
         # Strip any @mentions (user might still @mention out of habit)
         text = re.sub(r'<@[A-Z0-9]+>\s*', '', text).strip()
-        if not text:
+        if not text and not files:
             return None
 
         return NormalizedMessage(
             sender_id=user_id,
-            text=text,
+            text=text or "(file upload)",
             channel_id=channel_id,
             thread_id=thread_ts,
             timestamp=event.get("ts", ""),
+            files=files,
             metadata={
                 "team_id": team_id,
                 "is_dm": False,
@@ -393,6 +409,23 @@ class SlackAdapter(ChannelAdapter):
     # =========================================================================
     # Helpers
     # =========================================================================
+
+    @staticmethod
+    def _extract_files(event: dict) -> list:
+        """Extract FileAttachment list from a Slack event's files array."""
+        files = []
+        for f in event.get("files", []):
+            url = f.get("url_private_download") or f.get("url_private", "")
+            if not url:
+                continue
+            files.append(FileAttachment(
+                id=f.get("id", ""),
+                name=f.get("name", "unknown"),
+                mimetype=f.get("mimetype", "application/octet-stream"),
+                size=f.get("size", 0),
+                url=url,
+            ))
+        return files
 
     @staticmethod
     def _extract_email(text: str) -> Optional[str]:

@@ -225,6 +225,24 @@ async def container_exec_run(
     return await loop.run_in_executor(_docker_executor, _exec)
 
 
+async def container_put_archive(container, path: str, data: bytes) -> bool:
+    """Write a tar archive into a container without blocking the event loop.
+
+    Args:
+        container: Docker container object
+        path: Destination directory inside the container
+        data: tar archive bytes (use tarfile to create)
+
+    Returns:
+        True on success, False on failure.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _docker_executor,
+        lambda: container.put_archive(path, data)
+    )
+
+
 async def api_exec_create(
     container_id: str,
     cmd: list,

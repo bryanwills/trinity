@@ -15,6 +15,15 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 
+class FileAttachment(BaseModel):
+    """File attached to an incoming message."""
+    id: str                             # Channel-specific file ID
+    name: str                           # Filename (e.g., "report.pdf")
+    mimetype: str                       # MIME type (e.g., "application/pdf")
+    size: int                           # File size in bytes
+    url: str                            # Download URL (may require auth)
+
+
 class NormalizedMessage(BaseModel):
     """Channel-agnostic incoming message."""
     sender_id: str                      # Channel-specific user ID
@@ -22,6 +31,7 @@ class NormalizedMessage(BaseModel):
     channel_id: str                     # Conversation/channel identifier
     thread_id: Optional[str] = None     # Thread ID (Slack thread_ts, Telegram reply_to)
     timestamp: str                      # ISO timestamp
+    files: List[FileAttachment] = []    # Attached files
     metadata: dict = {}                 # Channel-specific extras (team_id, bot_token, etc.)
 
 
@@ -105,6 +115,17 @@ class ChannelAdapter(ABC):
         Default: always verified. Override in concrete adapters.
         """
         return True
+
+    async def download_file(self, file: "FileAttachment", message: NormalizedMessage) -> Optional[bytes]:
+        """
+        Download a file attachment's bytes.
+
+        Each channel implements its own download logic (auth headers, etc.).
+        Returns file bytes, or None on failure.
+
+        Default: not implemented. Override in concrete adapters.
+        """
+        return None
 
     async def on_response_sent(
         self,

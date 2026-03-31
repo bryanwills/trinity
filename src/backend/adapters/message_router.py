@@ -12,7 +12,9 @@ Uses the same execution path as web public chat (EXEC-024) for:
 - Credential sanitization
 """
 
+import io
 import logging
+import tarfile
 import time
 from typing import List, Optional
 from collections import defaultdict
@@ -21,7 +23,8 @@ from database import db
 from services.docker_service import get_agent_container
 from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
-from adapters.base import ChannelAdapter, ChannelResponse, NormalizedMessage
+from services.docker_utils import container_put_archive, container_exec_run
+from adapters.base import ChannelAdapter, ChannelResponse, FileAttachment, NormalizedMessage
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,8 @@ _DEFAULT_RATE_LIMIT_MAX = 30        # messages per window
 _DEFAULT_RATE_LIMIT_WINDOW = 60     # seconds
 _DEFAULT_CHANNEL_TIMEOUT = 120      # seconds
 _DEFAULT_CHANNEL_ALLOWED_TOOLS = "WebSearch,WebFetch"
+_FILE_UPLOAD_RATE_LIMIT_MAX = 5     # file uploads per window
+_FILE_UPLOAD_RATE_LIMIT_WINDOW = 60 # seconds
 
 
 def _get_rate_limit_max() -> int:
@@ -77,12 +82,12 @@ def _prune_stale_buckets() -> None:
         logger.debug(f"[ROUTER] Pruned {len(stale_keys)} stale rate-limit buckets")
 
 
-def _check_rate_limit(key: str) -> bool:
+def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional[int] = None) -> bool:
     """Returns True if allowed, False if rate limited."""
     _prune_stale_buckets()
     now = time.time()
-    window = _get_rate_limit_window()
-    max_msgs = _get_rate_limit_max()
+    window = window or _get_rate_limit_window()
+    max_msgs = max_msgs or _get_rate_limit_max()
     bucket = _rate_limit_buckets[key]
     # Remove expired entries
     _rate_limit_buckets[key] = [t for t in bucket if now - t < window]
@@ -90,6 +95,16 @@ def _check_rate_limit(key: str) -> bool:
         return False
     _rate_limit_buckets[key].append(now)
     return True
+
+
+def _format_file_size(size_bytes: int) -> str:
+    """Format bytes as human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.0f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
 class ChannelMessageRouter:
@@ -133,6 +148,21 @@ class ChannelMessageRouter:
             )
             return
 
+        # 3b. File upload rate limiting (stricter than message rate limit)
+        if message.files:
+            file_rate_key = f"slack-files:{message.metadata.get('team_id')}:{message.sender_id}"
+            if not _check_rate_limit(file_rate_key, max_msgs=_FILE_UPLOAD_RATE_LIMIT_MAX, window=_FILE_UPLOAD_RATE_LIMIT_WINDOW):
+                logger.warning(f"[ROUTER] File upload rate limited: {file_rate_key}")
+                await adapter.send_response(
+                    message.channel_id,
+                    ChannelResponse(
+                        text="You're uploading files too quickly. Please wait a moment.",
+                        metadata={"bot_token": bot_token, "agent_name": agent_name}
+                    ),
+                    thread_id=message.thread_id,
+                )
+                return
+
         # 4. Check agent availability
         container = get_agent_container(agent_name)
         container_status = container.status if container else "not_found"
@@ -167,6 +197,17 @@ class ChannelMessageRouter:
         context_prompt = db.build_public_chat_context(session_id, message.text)
         logger.debug(f"[ROUTER] Step 7 - context built ({len(context_prompt)} chars)")
 
+        # 7b. Handle file uploads — download from Slack, copy into agent container
+        upload_dir = None  # Track for cleanup
+        if message.files:
+            file_descriptions, upload_dir = await self._handle_file_uploads(
+                adapter, message, agent_name, container, session_id
+            )
+            if file_descriptions:
+                file_block = "\n".join(file_descriptions)
+                context_prompt = f"{context_prompt}\n\n[Uploaded files]\n{file_block}"
+                logger.info(f"[ROUTER] Step 7b - {len(file_descriptions)} file(s) copied to agent")
+
         # 8. Show processing indicator (⏳ on Slack, typing on Telegram, etc.)
         await adapter.indicate_processing(message)
 
@@ -178,6 +219,17 @@ class ChannelMessageRouter:
         # No file access (Read exposes .env/credentials), no Bash, no Write/Edit
         # Configurable via settings_service (default: WebSearch, WebFetch)
         public_allowed_tools = _get_channel_allowed_tools()
+
+        # If user uploaded non-image files, agent needs Read to access them.
+        # Images are excluded: Claude Code crashes when reading PNGs with
+        # --allowedTools (API returns 400 "Could not process image" and the
+        # process exits without flushing stdout, hanging the pipe reader).
+        _IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"}
+        has_readable_files = message.files and any(
+            f.mimetype not in _IMAGE_MIMES for f in message.files
+        )
+        if has_readable_files and "Read" not in public_allowed_tools:
+            public_allowed_tools = public_allowed_tools + ["Read"]
 
         try:
             task_execution_service = get_task_execution_service()
@@ -211,6 +263,7 @@ class ChannelMessageRouter:
                     ChannelResponse(text=response_text, metadata={"bot_token": bot_token, "agent_name": agent_name}),
                     thread_id=message.thread_id,
                 )
+                await self._cleanup_uploads(container, upload_dir)
                 return
 
             response_text = result.response or ""
@@ -227,6 +280,7 @@ class ChannelMessageRouter:
                 ),
                 thread_id=message.thread_id,
             )
+            await self._cleanup_uploads(container, upload_dir)
             return
 
         # 10. Done processing — show completion indicator
@@ -248,6 +302,9 @@ class ChannelMessageRouter:
         # 13. Post-response hook (thread tracking, etc.)
         await adapter.on_response_sent(message, agent_name)
 
+        # 14. Clean up uploaded files (per-session directory)
+        await self._cleanup_uploads(container, upload_dir)
+
         logger.info(f"[ROUTER] DONE: {agent_name}, execution_id={result.execution_id}")
 
     # =========================================================================
@@ -260,11 +317,141 @@ class ChannelMessageRouter:
             return adapter.get_bot_token(message.metadata.get("team_id"))
         return None
 
+    @staticmethod
+    async def _cleanup_uploads(container, upload_dir: Optional[str]) -> None:
+        """Remove per-session upload directory from agent container."""
+        if not upload_dir:
+            return
+        try:
+            await container_exec_run(container, f"rm -rf {upload_dir}", user="developer")
+            logger.debug(f"[ROUTER] Cleaned up {upload_dir}")
+        except Exception as e:
+            logger.warning(f"[ROUTER] Upload cleanup failed: {e}")
+
     def _build_session_identifier(self, message: NormalizedMessage) -> str:
         """Build a session identifier: team:user:channel for isolation."""
         team_id = message.metadata.get("team_id", "unknown")
         channel_id = message.channel_id
         return f"{team_id}:{message.sender_id}:{channel_id}"
+
+    async def _handle_file_uploads(
+        self,
+        adapter: ChannelAdapter,
+        message: NormalizedMessage,
+        agent_name: str,
+        container,
+        session_id: str,
+    ) -> tuple:
+        """
+        Download files via adapter and either:
+        - Images: embed as base64 data URI in the prompt (Claude vision)
+        - Other files: copy into per-session dir in agent container
+
+        Returns (descriptions, upload_dir):
+        - descriptions: list of context strings for prompt injection
+        - upload_dir: container path to clean up after execution, or None
+        """
+        import base64
+        import os
+        import re
+
+        MAX_FILE_SIZE = 10 * 1024 * 1024       # 10 MB per file
+        MAX_IMAGE_SIZE = 5 * 1024 * 1024        # 5 MB per image for inline base64
+        MAX_TOTAL_IMAGE_SIZE = 10 * 1024 * 1024 # 10 MB total across all images
+        MAX_FILES = 10                          # Max files per message
+        UNSUPPORTED_MIMES = {"application/pdf", "application/zip", "application/x-tar",
+                             "application/gzip", "application/x-rar-compressed",
+                             "video/", "audio/"}
+
+        UPLOAD_BASE = "/home/developer/uploads"
+        upload_dir = f"{UPLOAD_BASE}/{session_id}"
+        descriptions = []
+        dir_created = False
+        total_image_bytes = 0
+
+        files = message.files
+        for f in files[:MAX_FILES]:
+            is_image = f.mimetype.startswith("image/")
+
+            # Reject unsupported binary formats (PDF, archives, video, audio)
+            if any(f.mimetype.startswith(m) if m.endswith("/") else f.mimetype == m
+                   for m in UNSUPPORTED_MIMES):
+                descriptions.append(f"{f.name} — unsupported format ({f.mimetype}). Text, CSV, JSON, and image files are supported.")
+                continue
+
+            # Sanitize filename: basename only, strip path traversal
+            safe_name = os.path.basename(f.name)
+            safe_name = re.sub(r'[^\w\s.\-()]', '_', safe_name)  # keep alphanumeric, dots, hyphens, parens
+            if not safe_name or safe_name.startswith('.'):
+                safe_name = f"file_{f.id}"
+
+            # Size checks
+            size_limit = MAX_IMAGE_SIZE if is_image else MAX_FILE_SIZE
+            if f.size > size_limit:
+                logger.warning(f"[ROUTER] Skipping {safe_name}: too large ({f.size} bytes)")
+                descriptions.append(f"{safe_name} — skipped (exceeds {_format_file_size(size_limit)} limit)")
+                continue
+
+            # Download via adapter (channel-agnostic)
+            data = await adapter.download_file(f, message)
+            if not data:
+                logger.warning(f"[ROUTER] Failed to download {safe_name} from Slack")
+                descriptions.append(f"{safe_name} — download failed")
+                continue
+
+            size_str = _format_file_size(len(data))
+
+            if is_image:
+                # Check total inline image budget
+                if total_image_bytes + len(data) > MAX_TOTAL_IMAGE_SIZE:
+                    logger.warning(f"[ROUTER] Skipping {safe_name}: total image budget exceeded")
+                    descriptions.append(f"{safe_name} ({size_str}) — skipped (total image size limit reached)")
+                    continue
+
+                total_image_bytes += len(data)
+                b64 = base64.b64encode(data).decode()
+                descriptions.append(f"![{safe_name}](data:{f.mimetype};base64,{b64})")
+                logger.info(f"[ROUTER] Embedded {safe_name} ({size_str}) as base64 for {agent_name}")
+            else:
+                # Create per-session upload directory on first non-image file
+                if not dir_created:
+                    try:
+                        await container_exec_run(container, f"mkdir -p {upload_dir}", user="developer")
+                        dir_created = True
+                    except Exception as e:
+                        logger.error(f"[ROUTER] Failed to create {upload_dir} in {agent_name}: {e}")
+                        descriptions.append(f"{safe_name} — copy to agent failed")
+                        continue
+
+                try:
+                    tar_buf = io.BytesIO()
+                    with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+                        info = tarfile.TarInfo(name=safe_name)
+                        info.size = len(data)
+                        info.uid = 1000  # developer user
+                        info.gid = 1000
+                        info.mode = 0o644
+                        tar.addfile(info, io.BytesIO(data))
+                    tar_buf.seek(0)
+
+                    success = await container_put_archive(container, upload_dir, tar_buf.read())
+                    if not success:
+                        logger.error(f"[ROUTER] Failed to copy {safe_name} into {agent_name}")
+                        descriptions.append(f"{safe_name} — copy to agent failed")
+                        continue
+
+                    dest_path = f"{upload_dir}/{safe_name}"
+                    descriptions.append(f"{safe_name} ({size_str}, {f.mimetype}) → {dest_path}")
+                    logger.info(f"[ROUTER] Copied {safe_name} ({size_str}) to {agent_name}:{dest_path}")
+
+                except Exception as e:
+                    logger.error(f"[ROUTER] Error copying {safe_name} to {agent_name}: {e}")
+                    descriptions.append(f"{safe_name} — copy error")
+
+        if len(files) > MAX_FILES:
+            descriptions.append(f"({len(files) - MAX_FILES} more file(s) skipped — max {MAX_FILES} per message)")
+
+        return descriptions, upload_dir if dir_created else None
 
 
 # Singleton instance
