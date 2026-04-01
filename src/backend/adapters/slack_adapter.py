@@ -138,7 +138,7 @@ class SlackAdapter(ChannelAdapter):
 
     async def download_file(self, file: FileAttachment, message: NormalizedMessage) -> Optional[bytes]:
         """Download file from Slack using bot token."""
-        bot_token = self.get_bot_token(message.metadata.get("team_id"))
+        bot_token = self.get_bot_token(message)
         if not bot_token:
             logger.error(f"No bot token for file download: {file.name}")
             return None
