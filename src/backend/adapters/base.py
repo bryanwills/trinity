@@ -83,6 +83,24 @@ class ChannelAdapter(ABC):
         Returns None to skip the event (bot messages, unsupported types, etc.)
         """
 
+    def format_response(self, text: str) -> str:
+        """
+        Convert standard markdown to the channel's native format.
+
+        Agent responses are always standard markdown. Each channel has its own
+        text format (Slack mrkdwn, Telegram HTML, Discord markdown, etc.).
+        Override in concrete adapters to apply channel-specific conversion.
+
+        Default: passthrough (returns text unchanged).
+
+        NOTE: If formatting needs grow beyond simple text conversion (e.g.
+        structured Block Kit, interactive elements, platform-specific widgets),
+        consider extracting formatters into a separate abstraction layer
+        (e.g. a FormatterRegistry or per-channel Formatter classes) rather
+        than overloading this method.
+        """
+        return text
+
     @abstractmethod
     async def send_response(
         self,

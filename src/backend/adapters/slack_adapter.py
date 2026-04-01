@@ -93,6 +93,18 @@ class SlackAdapter(ChannelAdapter):
 
         return None
 
+    def format_response(self, text: str) -> str:
+        """Convert standard markdown to Slack mrkdwn format."""
+        try:
+            from slackify_markdown.slackify import SlackifyMarkdown
+            return SlackifyMarkdown(text).slackify()
+        except ImportError:
+            logger.warning("slackify-markdown not installed, sending plain text")
+            return text
+        except Exception as e:
+            logger.warning(f"Slack markdown conversion failed, sending plain text: {e}")
+            return text
+
     async def send_response(
         self,
         channel_id: str,
@@ -107,11 +119,12 @@ class SlackAdapter(ChannelAdapter):
 
         agent_name = response.metadata.get("agent_name")
         avatar_url = response.metadata.get("agent_avatar_url")
+        formatted_text = self.format_response(response.text)
 
         await slack_service.send_message(
             bot_token=bot_token,
             channel=channel_id,
-            text=response.text,
+            text=formatted_text,
             username=agent_name,
             icon_url=avatar_url,
             thread_ts=thread_id,
