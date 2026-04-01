@@ -90,13 +90,12 @@ class TestSlackifyMarkdown:
 class TestFormatResponseContract:
     """Test the format_response contract: default is passthrough, Slack overrides."""
 
-    def test_passthrough_default(self):
-        """A channel without format_response override returns text unchanged."""
-        # The base class returns text as-is. Any adapter that doesn't override
-        # format_response will pass markdown through unchanged.
+    @pytest.mark.skipif(not HAS_SLACKIFY, reason="slackify-markdown not installed")
+    def test_slack_does_not_passthrough(self):
+        """Slack's format_response must change the text (not passthrough)."""
         text = "**bold** and [link](https://example.com)"
-        # Simulate base class behavior
-        assert text == text  # passthrough = identity
+        result = slackify(text)
+        assert result != text  # Slack adapter must transform, not passthrough
 
     @pytest.mark.skipif(not HAS_SLACKIFY, reason="slackify-markdown not installed")
     def test_slack_override_converts(self):

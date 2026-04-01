@@ -114,8 +114,9 @@ Priority in `SlackAdapter.get_agent_name()`:
 ### Business Logic
 
 1. **"Connect Slack" flow**: If workspace not connected → OAuth. If connected → `conversations.create` creates `#agent-name` channel → bind in `slack_channel_agents`
-2. **Message routing**: Socket Mode/webhook delivers event → adapter parses → router dispatches to agent via `TaskExecutionService` → adapter sends response with `chat:write.customize` (agent name/avatar)
-3. **Thread continuity**: First @mention → bot responds in thread → registers in `slack_active_threads` → subsequent replies in that thread don't need @mention
+2. **Message routing**: Socket Mode/webhook delivers event → adapter parses → router dispatches to agent via `TaskExecutionService` → adapter formats response via `format_response()` (markdown → Slack mrkdwn) → sends with `chat:write.customize` (agent name/avatar)
+3. **Response formatting**: `SlackAdapter.format_response()` converts standard markdown to Slack mrkdwn via `slackify-markdown` library (`**bold**` → `*bold*`, `[link](url)` → `<url|link>`, headers, lists). Graceful fallback to plain text on failure.
+4. **Thread continuity**: First @mention → bot responds in thread → registers in `slack_active_threads` → subsequent replies in that thread don't need @mention
 
 ### Database Operations
 

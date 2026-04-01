@@ -267,12 +267,12 @@ class TelegramAdapter(ChannelAdapter):
             logger.debug(f"Failed to send chat action: {e}")
 
     # =========================================================================
+    # Message formatting
+    # =========================================================================
+
     def format_response(self, text: str) -> str:
         """Convert standard markdown to Telegram HTML format."""
         return self._markdown_to_html(text)
-
-    # Message formatting
-    # =========================================================================
 
     @staticmethod
     def _markdown_to_html(text: str) -> str:
