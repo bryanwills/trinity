@@ -191,7 +191,7 @@
 | Flow | Document | Description |
 |------|----------|-------------|
 | MCP Orchestration | [mcp-orchestration.md](feature-flows/mcp-orchestration.md) | 62 MCP tools for agent orchestration |
-| Trinity CLI | [cli-tool.md](feature-flows/cli-tool.md) | Python Click CLI mirroring core MCP tools as shell commands |
+| Trinity CLI | [cli-tool.md](feature-flows/cli-tool.md) | Python Click CLI with multi-instance profiles, mirroring core MCP tools as shell commands |
 | Trinity Connect | [trinity-connect.md](feature-flows/trinity-connect.md) | Local-remote agent sync via WebSocket |
 
 ### GitHub Integration

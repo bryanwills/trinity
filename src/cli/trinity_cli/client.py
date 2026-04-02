@@ -3,9 +3,23 @@
 import sys
 from typing import Any, Optional
 
+import click
 import httpx
 
 from .config import get_api_key, get_instance_url
+
+
+def _profile_from_context() -> Optional[str]:
+    """Try to get the --profile value from the current Click context."""
+    try:
+        ctx = click.get_current_context(silent=True)
+        if ctx:
+            root = ctx.find_root()
+            if root.obj and "profile" in root.obj:
+                return root.obj["profile"]
+    except RuntimeError:
+        pass
+    return None
 
 
 class TrinityAPIError(Exception):
@@ -18,9 +32,11 @@ class TrinityAPIError(Exception):
 class TrinityClient:
     """Thin HTTP wrapper around the Trinity FastAPI backend."""
 
-    def __init__(self, base_url: Optional[str] = None, token: Optional[str] = None):
-        self.base_url = base_url or get_instance_url()
-        self.token = token or get_api_key()
+    def __init__(self, base_url: Optional[str] = None, token: Optional[str] = None,
+                 profile: Optional[str] = None):
+        resolved_profile = profile or _profile_from_context()
+        self.base_url = base_url or get_instance_url(resolved_profile)
+        self.token = token or get_api_key(resolved_profile)
         if not self.base_url:
             print("Error: No Trinity instance configured. Run 'trinity init' or 'trinity login' first.", file=sys.stderr)
             sys.exit(1)

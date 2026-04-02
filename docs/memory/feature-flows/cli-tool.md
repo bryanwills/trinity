@@ -12,64 +12,88 @@ Python Click CLI (`trinity`) that provides shell-level access to the Trinity pla
 User/Agent/Script → trinity CLI → HTTP → FastAPI Backend (:8000)
 ```
 
-## Architecture
+## Multi-Instance Profiles
 
+The CLI supports named profiles for managing multiple Trinity instances (local dev, staging, production).
+
+### Config Format
+
+```json
+{
+  "current_profile": "localhost",
+  "profiles": {
+    "localhost": {
+      "instance_url": "http://localhost:8000",
+      "token": "eyJ...",
+      "user": {"email": "admin@example.com"}
+    },
+    "trinity.example.com": {
+      "instance_url": "https://trinity.example.com",
+      "token": "eyJ...",
+      "user": {"email": "user@example.com"}
+    }
+  }
+}
 ```
-src/cli/
-├── pyproject.toml              # Package definition, console_scripts entry
-├── trinity_cli/
-│   ├── __init__.py             # Version
-│   ├── main.py                 # Click group, command registration
-│   ├── client.py               # TrinityClient (httpx wrapper)
-│   ├── config.py               # ~/.trinity/config.json management
-│   ├── output.py               # JSON/table formatting (Rich)
-│   └── commands/
-│       ├── auth.py             # init, login, logout, status
-│       ├── agents.py           # list, get, create, delete, start, stop, rename
-│       ├── chat.py             # chat, history, logs
-│       ├── health.py           # fleet, agent
-│       ├── skills.py           # list, get
-│       ├── schedules.py        # list, trigger
-│       └── tags.py             # list, get
-```
+
+### Profile Commands
+
+| Command | Description |
+|---------|-------------|
+| `trinity profile list` | Show all profiles with active indicator |
+| `trinity profile use <name>` | Switch active profile |
+| `trinity profile remove <name>` | Delete a profile |
+
+### Profile Resolution Priority
+
+1. `TRINITY_URL` / `TRINITY_API_KEY` env vars (always win)
+2. `--profile <name>` global flag
+3. `TRINITY_PROFILE` env var
+4. `current_profile` in config file
+
+### Backwards Compatibility
+
+Legacy flat configs (`{"instance_url": "...", "token": "..."}`) are auto-migrated to a `default` profile on first access.
 
 ## Authentication Flow
 
 ### `trinity init` (onboarding)
 
 ```
-User runs `trinity init`
+User runs `trinity init [--profile name]`
   → Prompt: instance URL
   → GET /api/auth/mode (verify reachable)
+  → Derive profile name from hostname (or use --profile)
   → Prompt: email
   → POST /api/access/request {email}     ← NEW ENDPOINT (auto-whitelist)
   → POST /api/auth/email/request {email} ← existing email auth
   → Prompt: 6-digit code
   → POST /api/auth/email/verify {email, code}
-  → Store JWT + user in ~/.trinity/config.json (0600)
+  → Store JWT + user in profile within ~/.trinity/config.json (0600)
+  → Set as active profile
   → Ready
 ```
 
 ### `trinity login` (returning user)
 
 ```
-User runs `trinity login`
-  → Uses stored instance URL (or --instance flag)
+User runs `trinity login [--profile name]`
+  → Uses stored instance URL from profile (or --instance flag)
   → POST /api/auth/email/request
   → POST /api/auth/email/verify
-  → Update stored JWT
+  → Update stored JWT in profile
 ```
 
 ### Token Resolution
 
 Priority order:
 1. `TRINITY_API_KEY` env var
-2. `~/.trinity/config.json` token field
+2. Active profile's token in `~/.trinity/config.json`
 3. Error: "Run trinity init"
 
 Instance URL:
 1. `TRINITY_URL` env var
-2. `~/.trinity/config.json` instance_url field
+2. Active profile's instance_url in `~/.trinity/config.json`
 3. Error: "Run trinity init"
 
 ## Backend: Access Request Endpoint
@@ -111,6 +135,9 @@ Response: {"success": true, "message": "Access granted", "already_registered": f
 
 | CLI Command | HTTP Method | Backend Endpoint |
 |-------------|-------------|------------------|
+| `trinity profile list` | — | local config |
+| `trinity profile use <name>` | — | local config |
+| `trinity profile remove <name>` | — | local config |
 | `trinity agents list` | GET | `/api/agents` |
 | `trinity agents get <name>` | GET | `/api/agents/{name}` |
 | `trinity agents create <name>` | POST | `/api/agents` |
@@ -137,6 +164,28 @@ pip install -e src/cli/
 ```
 
 Registers `trinity` console script via `pyproject.toml` `[project.scripts]`.
+
+## Architecture
+
+```
+src/cli/
+├── pyproject.toml              # Package definition, console_scripts entry
+├── trinity_cli/
+│   ├── __init__.py             # Version
+│   ├── main.py                 # Click group, --profile global option
+│   ├── client.py               # TrinityClient (httpx wrapper, profile-aware)
+│   ├── config.py               # Profile-based config, legacy migration
+│   ├── output.py               # JSON/table formatting (Rich)
+│   └── commands/
+│       ├── auth.py             # init, login, logout, status (profile-aware)
+│       ├── profiles.py         # list, use, remove
+│       ├── agents.py           # list, get, create, delete, start, stop, rename
+│       ├── chat.py             # chat, history, logs
+│       ├── health.py           # fleet, agent
+│       ├── skills.py           # list, get
+│       ├── schedules.py        # list, trigger
+│       └── tags.py             # list, get
+```
 
 ## Future Phases
 
