@@ -666,16 +666,17 @@ class DatabaseManager:
     # Chat Session and Message Operations (delegated to db/chat.py)
     # =========================================================================
 
-    def get_or_create_chat_session(self, agent_name: str, user_id: int, user_email: str):
-        return self._chat_ops.get_or_create_chat_session(agent_name, user_id, user_email)
+    def get_or_create_chat_session(self, agent_name: str, user_id: int, user_email: str, subscription_id: str = None):
+        return self._chat_ops.get_or_create_chat_session(agent_name, user_id, user_email, subscription_id=subscription_id)
 
     def add_chat_message(self, session_id: str, agent_name: str, user_id: int, user_email: str,
                          role: str, content: str, cost: float = None, context_used: int = None,
                          context_max: int = None, tool_calls: str = None, execution_time_ms: int = None,
-                         source: str = "text"):
+                         source: str = "text", subscription_id: str = None, output_tokens: int = None):
         return self._chat_ops.add_chat_message(session_id, agent_name, user_id, user_email,
                                                role, content, cost, context_used, context_max,
-                                               tool_calls, execution_time_ms, source=source)
+                                               tool_calls, execution_time_ms, source=source,
+                                               subscription_id=subscription_id, output_tokens=output_tokens)
 
     def get_chat_session(self, session_id: str):
         return self._chat_ops.get_chat_session(session_id)
