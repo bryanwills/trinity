@@ -3,6 +3,7 @@
 Usage:
     trinity init                    # Set up and authenticate
     trinity login                   # Log in to an instance
+    trinity deploy .                # Deploy local agent directory
     trinity agents list             # List agents
     trinity chat my-agent "hello"   # Chat with an agent
     trinity logs my-agent           # View agent logs
@@ -16,6 +17,7 @@ from . import __version__
 from .commands.agents import agents
 from .commands.auth import init, login, logout, status
 from .commands.chat import chat_history, chat_with_agent, logs
+from .commands.deploy import deploy
 from .commands.health import health
 from .commands.profiles import profile
 from .commands.schedules import schedules
@@ -57,6 +59,9 @@ cli.add_command(status)
 
 # Profile management
 cli.add_command(profile)
+
+# Deploy command (top-level)
+cli.add_command(deploy)
 
 # Resource commands (groups)
 cli.add_command(agents)

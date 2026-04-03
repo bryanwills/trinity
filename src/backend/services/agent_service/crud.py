@@ -89,6 +89,19 @@ async def create_agent_internal(
     if get_agent_by_name(config.name) or db.get_agent_owner(config.name):
         raise HTTPException(status_code=409, detail="Agent already exists")
 
+    # Agent quota enforcement: limit agents per user
+    max_agents = int(db.get_setting_value("max_agents_per_user", "3"))
+    if max_agents > 0:
+        owned = db.get_agents_by_owner(current_user.username)
+        # System agents don't count toward user quota
+        non_system = [a for a in owned if not (db.get_agent_owner(a) or {}).get("is_system")]
+        if len(non_system) >= max_agents:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Agent quota exceeded. Maximum {max_agents} agents per user. "
+                       f"Delete an agent to create a new one."
+            )
+
     # SEC-172: Validate base image against allowlist before any Docker operations
     validate_base_image(config.base_image)
 

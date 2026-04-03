@@ -25,7 +25,6 @@ from .crud import (
 from .deploy import (
     deploy_local_agent_logic,
     MAX_ARCHIVE_SIZE,
-    MAX_CREDENTIALS,
     MAX_FILES,
 )
 from .terminal import (
@@ -100,7 +99,6 @@ __all__ = [
     # Deploy
     "deploy_local_agent_logic",
     "MAX_ARCHIVE_SIZE",
-    "MAX_CREDENTIALS",
     "MAX_FILES",
     # Terminal
     "TerminalSessionManager",

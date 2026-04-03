@@ -1,12 +1,73 @@
 """Authentication commands: login, logout, status, init."""
 
+import json
+from pathlib import Path
+
 import click
 
 from ..client import TrinityClient, TrinityAPIError
 from ..config import (
     clear_auth, get_instance_url, get_user, load_config,
-    profile_name_from_url, set_auth, _resolve_profile_name,
+    profile_name_from_url, set_auth, set_profile_key, _resolve_profile_name,
 )
+
+
+def _provision_mcp_key(client: TrinityClient, profile_name: str):
+    """Ensure the user has an MCP API key and store it in the profile."""
+    try:
+        result = client.post("/api/mcp/keys/ensure-default")
+        if result and result.get("api_key"):
+            set_profile_key("mcp_api_key", result["api_key"], profile_name)
+            click.echo(f"MCP API key provisioned and saved to profile")
+            return result["api_key"]
+    except TrinityAPIError:
+        # Non-fatal — user can still use JWT auth
+        pass
+    return None
+
+
+def _write_mcp_json(instance_url: str, mcp_api_key: str):
+    """Write or merge Trinity MCP server config into .mcp.json in current directory."""
+    mcp_path = Path.cwd() / ".mcp.json"
+    config = {}
+    if mcp_path.exists():
+        try:
+            config = json.loads(mcp_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    servers = config.setdefault("mcpServers", {})
+    # Derive MCP endpoint from instance URL (replace backend port with MCP port)
+    mcp_url = instance_url.rstrip("/")
+    if mcp_url.endswith(":8000"):
+        mcp_url = mcp_url.replace(":8000", ":8080")
+    elif ":" not in mcp_url.split("//")[-1]:
+        # No port specified — assume /mcp path on same host
+        mcp_url = mcp_url + ":8080"
+
+    servers["trinity"] = {
+        "type": "streamable-http",
+        "url": f"{mcp_url}/mcp",
+        "headers": {
+            "Authorization": f"Bearer {mcp_api_key}"
+        }
+    }
+
+    mcp_path.write_text(json.dumps(config, indent=2) + "\n")
+    click.echo(f"MCP server config written to {mcp_path}")
+
+    # Add .mcp.json to .gitignore if in a git repo (contains API key)
+    cwd = Path.cwd()
+    if (cwd / ".git").exists():
+        gitignore = cwd / ".gitignore"
+        marker = ".mcp.json"
+        if gitignore.exists():
+            content = gitignore.read_text()
+            if marker not in content:
+                with open(gitignore, "a") as f:
+                    f.write(f"\n{marker}\n")
+        else:
+            gitignore.write_text(f"{marker}\n")
 
 
 def _get_profile_name(ctx: click.Context) -> str | None:
@@ -60,6 +121,10 @@ def login(ctx, instance, profile_opt):
     set_auth(url, token, user, profile_name=target_profile)
     name = user.get("name") or user.get("email") or user.get("username") if user else email
     click.echo(f"Logged in as {name} [profile: {target_profile}]")
+
+    # Auto-provision MCP API key
+    authed_client = TrinityClient(base_url=url, token=token)
+    _provision_mcp_key(authed_client, target_profile)
 
 
 @click.command()
@@ -174,4 +239,11 @@ def init(ctx, profile_opt):
     set_auth(url, token, user, profile_name=profile_name)
     name = user.get("name") or user.get("email") or user.get("username") if user else email
     click.echo(f"Logged in as {name} [profile: {profile_name}]")
+
+    # Auto-provision MCP API key and write .mcp.json
+    authed_client = TrinityClient(base_url=url, token=token)
+    mcp_key = _provision_mcp_key(authed_client, profile_name)
+    if mcp_key:
+        _write_mcp_json(url, mcp_key)
+
     click.echo(f"\nTrinity CLI is ready. Try 'trinity agents list'.")

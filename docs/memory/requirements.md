@@ -1671,6 +1671,25 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 - **Key Features**: `trinity profile list|use|remove`, `--profile` global flag, `TRINITY_PROFILE` env var, legacy flat config auto-migration to `default` profile
 - **Location**: `src/cli/trinity_cli/config.py`, `src/cli/trinity_cli/commands/profiles.py`
 
+### 30.6 CLI Deploy Command (CLI-006)
+- **Status**: ✅ Implemented
+- **Description**: Deploy local agent directories to Trinity with `trinity deploy .`
+- **Key Features**: Tar+base64 archive, POST to `/api/agents/deploy-local`, `.trinity-remote.yaml` tracking for idempotent redeploys, `--name` override, `--repo` for GitHub-based deploy, `.gitignore`-aware archiving, instance mismatch warning on redeploy
+- **Location**: `src/cli/trinity_cli/commands/deploy.py`
+- **Tracking file**: `.trinity-remote.yaml` (auto-added to `.gitignore`)
+
+### 30.7 CLI MCP Key Auto-Provisioning (CLI-007)
+- **Status**: ✅ Implemented
+- **Description**: After `trinity init` or `trinity login`, automatically provision an MCP API key and store it in the profile
+- **Key Features**: Calls `POST /api/mcp/keys/ensure-default`, stores `mcp_api_key` in profile, `trinity init` also writes `.mcp.json` with Trinity MCP server config
+- **Location**: `src/cli/trinity_cli/commands/auth.py`
+
+### 30.8 Agent Quota Enforcement (QUOTA-001)
+- **Status**: ✅ Implemented
+- **Description**: Per-user agent creation limit (default 3) to prevent resource exhaustion
+- **Key Features**: Enforced in both `create_agent_internal()` and `deploy_local_agent_logic()`, configurable via `max_agents_per_user` setting, system agents excluded from count, redeploys of existing agents bypass quota, HTTP 429 on exceed
+- **Location**: `src/backend/services/agent_service/crud.py`, `src/backend/services/agent_service/deploy.py`
+
 ---
 
 ## Out of Scope

@@ -135,6 +135,15 @@ def set_auth(instance_url: str, token: str, user: Optional[dict] = None,
     save_config(config)
 
 
+def set_profile_key(key: str, value, profile_name: Optional[str] = None):
+    """Set an arbitrary key in a profile."""
+    config = load_config()
+    name = _resolve_profile_name(profile_name)
+    profile = config.setdefault("profiles", {}).setdefault(name, {})
+    profile[key] = value
+    save_config(config)
+
+
 def clear_auth(profile_name: Optional[str] = None):
     """Clear token and user from a profile."""
     config = load_config()

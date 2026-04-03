@@ -14,6 +14,7 @@ As a developer working with a Trinity-compatible local agent, I want to deploy i
 
 ## Entry Points
 
+- **CLI**: `trinity deploy .` — packages and uploads local directory (`src/cli/trinity_cli/commands/deploy.py`)
 - **MCP Tool**: `deploy_local_agent` via Trinity MCP server
 - **API**: `POST /api/agents/deploy-local`
 
@@ -172,16 +173,23 @@ class DeployLocalResponse(BaseModel):
    - Use body.name override or template.yaml name
    - Sanitize with `sanitize_agent_name()`
 
-6. **Version Handling**
+6. **Agent Quota Enforcement** (added in #259)
+   - Check if existing versions are owned by current user (`get_agents_by_prefix` + `get_agents_by_owner`)
+   - Skip quota for redeploys of user-owned agents
+   - For new agents: enforce `max_agents_per_user` setting (default: 3)
+   - System agents excluded from count
+   - Returns HTTP 429 with `QUOTA_EXCEEDED` code on limit
+
+7. **Version Handling**
    - `get_next_version_name()` finds next available version
    - Pattern: `my-agent` -> `my-agent-2` -> `my-agent-3`
    - Stops previous version if running
 
-7. **Template Copy**
+8. **Template Copy**
    - Try `/agent-configs/templates` first (with write test)
    - Fall back to `./config/agent-templates/{version_name}/`
 
-8. **Agent Creation**
+9. **Agent Creation**
     - Extract runtime config from template
     - Call `create_agent_fn()` (injected `create_agent_internal`) with local template
     - Agent container starts with all files from the archive (including `.env`)

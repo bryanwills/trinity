@@ -21,6 +21,7 @@ from models import (
     DeployLocalResponse,
     VersioningInfo,
 )
+from database import db
 from services.template_service import is_trinity_compatible
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop
@@ -275,6 +276,24 @@ async def deploy_local_agent_logic(
             )
 
         base_name = sanitize_agent_name(base_name)
+
+        # 6b. Agent quota enforcement (skip for redeploys of existing agents owned by this user)
+        existing_versions = get_agents_by_prefix(base_name)
+        owned = db.get_agents_by_owner(current_user.username)
+        is_redeploy = any(v.name in owned for v in existing_versions)
+        if not is_redeploy:
+            max_agents = int(db.get_setting_value("max_agents_per_user", "3"))
+            if max_agents > 0:
+                non_system = [a for a in owned if not (db.get_agent_owner(a) or {}).get("is_system")]
+                if len(non_system) >= max_agents:
+                    raise HTTPException(
+                        status_code=429,
+                        detail={
+                            "error": f"Agent quota exceeded. Maximum {max_agents} agents per user. "
+                                     f"Delete an agent to create a new one.",
+                            "code": "QUOTA_EXCEEDED"
+                        }
+                    )
 
         # 7. Version handling
         version_name = get_next_version_name(base_name)
