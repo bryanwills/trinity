@@ -273,28 +273,20 @@ curl -X POST http://localhost:8000/api/agents \
 | Repository | Description |
 |------------|-------------|
 | [abilityai/trinity](https://github.com/abilityai/trinity) | This repository - Autonomous Agent Orchestration Platform |
-| [abilityai/abilities](https://github.com/abilityai/abilities) | **System of record for Trinity skills & plugins** - All onboarding, management, and workflow skills |
+| [abilityai/abilities](https://github.com/abilityai/abilities) | **Canonical agent development toolkit** — plugins for the full autonomous agent lifecycle (scaffolding, onboarding, deployment, scheduling, ops) |
 
-### Trinity Onboarding (abilities repo)
+### Abilities (agent development toolkit)
 
-The `abilities` repo contains **all Trinity skills** bundled in the `trinity-onboard` plugin:
-
-| Skill | Purpose |
-|-------|---------|
-| `onboard` | Zero-friction agent deployment to Trinity |
-| `trinity-adopt` | Convert any agent to Trinity-compatible format |
-| `trinity-compatibility` | Audit agent structure for requirements |
-| `trinity-remote` | Remote agent operations (exec, run, notify) |
-| `trinity-sync` | Git-based synchronization with remote |
-| `trinity-schedules` | Manage scheduled autonomous executions |
+The **[abilities](https://github.com/abilityai/abilities)** repo is the canonical development workflow for building and managing autonomous agents with Claude Code. It provides plugins covering agent scaffolding, Trinity onboarding, structured playbooks, dev methodology, ops workflows, and more.
 
 **Installation:**
 ```bash
 /plugin marketplace add abilityai/abilities
 ```
 
-**Onboarding a new agent:**
+**Onboarding an agent to Trinity:**
 ```bash
+/plugin install trinity-onboard@abilityai
 /trinity-onboard:onboard
 ```
 
@@ -309,4 +301,4 @@ The `abilities` repo contains **all Trinity skills** bundled in the `trinity-onb
 - **Recent Changes**: `git log --oneline --since="2 weeks ago"`
 - **Agent Guide**: `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
 - **Agent Network Demo**: `docs/AGENT_NETWORK_DEMO.md`
-- **Claude Code Plugins**: https://github.com/abilityai/abilities
+- **Agent Development Toolkit**: https://github.com/abilityai/abilities

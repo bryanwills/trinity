@@ -168,10 +168,25 @@ Response: {"success": true, "message": "Access granted", "already_registered": f
 ## Installation
 
 ```bash
+# PyPI (recommended)
+pip install trinity-cli
+
+# Homebrew (macOS/Linux)
+brew install abilityai/tap/trinity-cli
+
+# From source (development)
 pip install -e src/cli/
 ```
 
-Registers `trinity` console script via `pyproject.toml` `[project.scripts]`.
+Published via GitHub Actions (`publish-cli.yml`) triggered by `cli-v*` tags. Uses PyPI Trusted Publishing (OIDC, no API tokens).
+
+### Distribution Channels
+
+| Channel | Command | Source |
+|---------|---------|--------|
+| PyPI | `pip install trinity-cli` | `src/cli/` built on tag push |
+| Homebrew | `brew install abilityai/tap/trinity-cli` | Formula in `abilityai/homebrew-tap` |
+| Source | `pip install -e src/cli/` | Local development |
 
 ## Architecture
 

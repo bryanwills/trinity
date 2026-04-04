@@ -10,6 +10,7 @@
     <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python">
     <img src="https://img.shields.io/badge/vue-3.x-green.svg" alt="Vue">
     <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
+    <a href="https://pypi.org/project/trinity-cli/"><img src="https://img.shields.io/pypi/v/trinity-cli?label=CLI&color=blue" alt="PyPI"></a>
   </p>
 
   <p>
@@ -106,6 +107,29 @@ permissions:
 Deploy via MCP: `mcp__trinity__deploy_system(manifest="...")`
 
 See the [Multi-Agent System Guide](docs/MULTI_AGENT_SYSTEM_GUIDE.md) for patterns.
+
+### 4. Use the CLI
+
+**You have:** A Trinity instance running
+**You want:** Manage agents from your terminal
+
+```bash
+# Install
+pip install trinity-cli
+
+# Or via Homebrew
+brew install abilityai/tap/trinity-cli
+
+# Connect to your instance
+trinity init
+
+# Manage agents
+trinity agents list
+trinity chat my-agent "Hello, what can you do?"
+trinity health fleet
+```
+
+See the [CLI documentation](docs/CLI.md) for the full command reference.
 
 ---
 
@@ -356,20 +380,37 @@ These agents demonstrate:
 
 **Note**: You'll need to configure a `GITHUB_PAT` environment variable in `.env` to use GitHub templates.
 
-## Trinity Onboard Plugin
+## Abilities — The Agent Development Toolkit
 
-> See [Ways to Use Trinity](#ways-to-use-trinity) for the quick start guide.
+> **[abilityai/abilities](https://github.com/abilityai/abilities)** is the canonical development workflow for building and managing autonomous agents with Claude Code.
 
-The Trinity Onboard Plugin enables zero-friction deployment of any Claude Code agent to Trinity. After onboarding, you get management skills for ongoing operations:
+It provides a curated collection of plugins covering the full agent lifecycle — from scaffolding and onboarding to deployment, scheduling, and ongoing operations:
+
+| Plugin | What it does |
+|--------|-------------|
+| **trinity-onboard** | Deploy any Claude Code agent to Trinity, sync code, manage schedules |
+| **agent-builder** | Scaffold a new agent from scratch on any topic |
+| **playbook-builder** | Create structured skills and playbooks with state management |
+| **dev-methodology** | Documentation-driven development, code review, and validation |
+| **utilities** | Ops workflows — deployment, incident response, Docker management |
+| **website-builder** | Scaffold and deploy Next.js sites |
+| **project-planner** | Plan and execute multi-session projects |
+| **workspace-kit** | Manage multi-project workspaces and sessions |
 
 ```bash
-# Example post-onboarding workflow
-/trinity-sync push                    # Push local changes to remote
-/trinity-remote exec "Run my task"    # Execute on remote agent
-/trinity-schedules list               # View scheduled tasks
+# Install the abilities marketplace (one-time)
+/plugin marketplace add abilityai/abilities
+
+# Example: onboard an agent to Trinity
+/plugin install trinity-onboard@abilityai
+/trinity-onboard:onboard
+
+# Example: scaffold a new agent
+/plugin install agent-builder@abilityai
+/create-agent
 ```
 
-For detailed plugin documentation, see the [abilities repository](https://github.com/abilityai/abilities).
+See the **[abilities repository](https://github.com/abilityai/abilities)** for full plugin documentation and installation instructions.
 
 ## MCP Integration
 

@@ -59,7 +59,9 @@
       "websocket_authentication",
       "internal_api_shared_secret",
       "agent_access_control_chat",
-      "dompurify_xss_protection"
+      "dompurify_xss_protection",
+      "cli_tool",
+      "pypi_publishing"
     ],
     "in_progress": [
       "github_native_agents"
