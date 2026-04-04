@@ -138,8 +138,12 @@ class TestAgentQuotaEnforcement:
             name2 = f"quota-test-{uuid.uuid4().hex[:6]}"
             resp2 = api_client.post("/api/agents", json={"name": name2})
             assert_status(resp2, 429)
-            detail = resp2.json().get("detail", "")
-            assert "quota" in detail.lower() or "maximum" in detail.lower()
+            data = resp2.json()
+            detail = data.get("detail", {})
+            if isinstance(detail, dict):
+                assert detail.get("code") == "QUOTA_EXCEEDED"
+            else:
+                assert "quota" in str(detail).lower()
 
         finally:
             api_client.delete("/api/settings/max_agents_per_user")
@@ -210,8 +214,9 @@ class TestAgentQuotaEnforcement:
             name2 = f"quota-msg-{uuid.uuid4().hex[:6]}"
             resp2 = api_client.post("/api/agents", json={"name": name2})
             assert_status(resp2, 429)
-            detail = str(resp2.json().get("detail", ""))
-            assert str(quota) in detail  # Quota limit appears in message
+            detail = resp2.json().get("detail", {})
+            error_msg = detail.get("error", "") if isinstance(detail, dict) else str(detail)
+            assert str(quota) in error_msg  # Quota limit appears in message
 
         finally:
             api_client.delete("/api/settings/max_agents_per_user")

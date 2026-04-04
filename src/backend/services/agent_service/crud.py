@@ -98,8 +98,11 @@ async def create_agent_internal(
         if len(non_system) >= max_agents:
             raise HTTPException(
                 status_code=429,
-                detail=f"Agent quota exceeded. Maximum {max_agents} agents per user. "
-                       f"Delete an agent to create a new one."
+                detail={
+                    "error": f"Agent quota exceeded. Maximum {max_agents} agents per user. "
+                             f"Delete an agent to create a new one.",
+                    "code": "QUOTA_EXCEEDED"
+                }
             )
 
     # SEC-172: Validate base image against allowlist before any Docker operations
