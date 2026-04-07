@@ -166,7 +166,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `docker_utils.py` - Docker utility helpers
 - `template_service.py` - GitHub template cloning and processing
 - `agent_client.py` - HTTP client for agent container communication (chat, session, injection)
-- `settings_service.py` - Centralized settings retrieval (API keys, ops config)
+- `settings_service.py` - Centralized settings retrieval (API keys, ops config, agent quotas)
 
 *Execution & Scheduling:*
 - `task_execution_service.py` - Unified task execution lifecycle (slot mgmt, activity tracking, sanitization) (EXEC-024)

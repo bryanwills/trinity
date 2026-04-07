@@ -1701,9 +1701,9 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 
 ### 30.8 Agent Quota Enforcement (QUOTA-001)
 - **Status**: ✅ Implemented
-- **Description**: Per-user agent creation limit (default 3) to prevent resource exhaustion
-- **Key Features**: Enforced in both `create_agent_internal()` and `deploy_local_agent_logic()`, configurable via `max_agents_per_user` setting, system agents excluded from count, redeploys of existing agents bypass quota, HTTP 429 on exceed
-- **Location**: `src/backend/services/agent_service/crud.py`, `src/backend/services/agent_service/deploy.py`
+- **Description**: Per-role agent creation limits with admin exemption. Configurable per role via Settings UI.
+- **Key Features**: Admin users exempt (unlimited), per-role defaults (creator=10, operator=3, user=1), configurable via `GET/PUT /api/settings/agent-quotas`, legacy `max_agents_per_user` fallback, system agents excluded from count, redeploys bypass quota, 429 response includes current/limit counts
+- **Location**: `src/backend/services/settings_service.py` (`get_agent_quota_for_role`), `src/backend/services/agent_service/crud.py`, `src/backend/services/agent_service/deploy.py`, `src/backend/routers/settings.py`, `src/frontend/src/views/Settings.vue`
 
 ---
 
