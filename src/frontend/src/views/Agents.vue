@@ -60,6 +60,18 @@
             </option>
           </select>
 
+          <!-- Owner filter dropdown -->
+          <select
+            v-if="availableOwners.length > 1"
+            v-model="selectedOwner"
+            class="block rounded-md border-gray-300 dark:border-gray-600 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm py-2 px-3 bg-white dark:bg-gray-700 dark:text-gray-200 border"
+          >
+            <option value="">All Owners</option>
+            <option v-for="owner in availableOwners" :key="owner.name || '__unassigned__'" :value="owner.name || '__unassigned__'">
+              {{ owner.name || 'Unassigned' }} ({{ owner.count }})
+            </option>
+          </select>
+
           <!-- Clear all filters -->
           <button
             v-if="hasActiveFilters"
@@ -718,6 +730,7 @@ const initialFilterTag = legacyTag || (legacyTags ? JSON.parse(legacyTags)[0] ||
 if (legacyTag) localStorage.removeItem('trinity-agents-filter-tag')
 if (legacyTags) localStorage.removeItem('trinity-agents-filter-tags')
 const selectedFilterTagDropdown = ref(initialFilterTag)
+const selectedOwner = ref(localStorage.getItem('trinity-agents-filter-owner') || '')
 const selectedAgents = ref([])
 const showBulkAddTag = ref(false)
 const showBulkRemoveTag = ref(false)
@@ -748,14 +761,40 @@ watch(selectedFilterTagDropdown, (val) => {
   }
 })
 
+watch(selectedOwner, (val) => {
+  if (val) {
+    localStorage.setItem('trinity-agents-filter-owner', val)
+  } else {
+    localStorage.removeItem('trinity-agents-filter-owner')
+  }
+})
+
+// Derive distinct owners from the full (unfiltered) agent list
+const availableOwners = computed(() => {
+  const agents = isAdmin.value ? agentsStore.sortedAgentsWithSystem : agentsStore.sortedAgents
+  const counts = {}
+  for (const agent of agents) {
+    const owner = agent.owner || null
+    counts[owner] = (counts[owner] || 0) + 1
+  }
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name: name === 'null' ? null : name, count }))
+    .sort((a, b) => {
+      if (a.name === null) return 1
+      if (b.name === null) return -1
+      return a.name.localeCompare(b.name)
+    })
+})
+
 const hasActiveFilters = computed(() => {
-  return filterName.value.trim() !== '' || filterStatus.value !== 'all' || selectedFilterTagDropdown.value !== ''
+  return filterName.value.trim() !== '' || filterStatus.value !== 'all' || selectedFilterTagDropdown.value !== '' || selectedOwner.value !== ''
 })
 
 function clearAllFilters() {
   filterName.value = ''
   filterStatus.value = 'all'
   selectedFilterTagDropdown.value = ''
+  selectedOwner.value = ''
 }
 
 // Total agent count before filtering (for "Showing X of Y")
@@ -787,6 +826,15 @@ const displayAgents = computed(() => {
       const tags = agentTags.value[agent.name] || []
       return tags.includes(selectedFilterTagDropdown.value)
     })
+  }
+
+  // Filter by owner
+  if (selectedOwner.value) {
+    if (selectedOwner.value === '__unassigned__') {
+      agents = agents.filter(agent => !agent.owner)
+    } else {
+      agents = agents.filter(agent => agent.owner === selectedOwner.value)
+    }
   }
 
   return agents

@@ -120,7 +120,20 @@
                 <span>Clouds</span>
               </button>
 
-              <span v-if="availableTags.length > 0" class="text-gray-300 dark:text-gray-600">|</span>
+              <!-- Owner filter dropdown -->
+              <select
+                v-if="availableOwners.length > 1"
+                v-model="selectedOwner"
+                @change="onOwnerFilterChange"
+                class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="">All Owners</option>
+                <option v-for="owner in availableOwners" :key="owner.name || '__unassigned__'" :value="owner.name || '__unassigned__'">
+                  {{ owner.name || 'Unassigned' }} ({{ owner.count }})
+                </option>
+              </select>
+
+              <span v-if="availableTags.length > 0 || availableOwners.length > 1" class="text-gray-300 dark:text-gray-600">|</span>
 
               <!-- Mode Toggle -->
               <div class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700">
@@ -536,6 +549,30 @@ const availableTags = ref([])
 const savedQuickTags = localStorage.getItem('trinity-dashboard-quick-tags')
 const selectedQuickTags = ref(savedQuickTags ? JSON.parse(savedQuickTags) : [])
 const showTagDropdown = ref(false)
+
+// Owner filter state (persisted to localStorage, synced with network store)
+const selectedOwner = ref(networkStore.filterOwner || '')
+
+// Derive distinct owners from the full (unfiltered) agent list
+const availableOwners = computed(() => {
+  const allAgents = agents.value
+  const counts = {}
+  for (const agent of allAgents) {
+    const owner = agent.owner || null
+    counts[owner] = (counts[owner] || 0) + 1
+  }
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name: name === 'null' ? null : name, count }))
+    .sort((a, b) => {
+      if (a.name === null) return 1
+      if (b.name === null) return -1
+      return a.name.localeCompare(b.name)
+    })
+})
+
+function onOwnerFilterChange() {
+  networkStore.setFilterOwner(selectedOwner.value)
+}
 
 // Computed: First 5 tags for inline display
 const displayedTags = computed(() => availableTags.value.slice(0, 5))

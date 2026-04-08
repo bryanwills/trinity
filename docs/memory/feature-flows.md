@@ -11,6 +11,7 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-04-08 | #69 | Owner filter dropdown on Dashboard and Agents pages | [agents-page-ui-improvements.md](feature-flows/agents-page-ui-improvements.md), [agent-network.md](feature-flows/agent-network.md) |
 | 2026-04-06 | QUOTA-001 | Per-role agent creation quotas with admin exemption | [agent-quotas.md](feature-flows/agent-quotas.md) |
 | 2026-04-04 | DASH-001 | Dashboard reliability: DB-persisted cache, retry backoff, partial YAML tolerance, decoupled tab visibility | [dynamic-dashboards.md](feature-flows/dynamic-dashboards.md) |
 | 2026-04-04 | CLI-001 | CLI UX: URL normalization + retry, table default output, tag-driven auto-versioning | [cli-tool.md](feature-flows/cli-tool.md) |

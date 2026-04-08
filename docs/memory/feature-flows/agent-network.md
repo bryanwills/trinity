@@ -1,6 +1,8 @@
 # Feature: Agent Network
 
-> **Last Updated**: 2026-03-20 - Canonical edge deduplication: bidirectional agent connections now render as ONE line with arrowheads on appropriate ends, instead of TWO overlapping lines. New `getCanonicalEdgePair(x, y)` helper (line 128) returns alphabetically sorted pair. `fetchPermissionEdges()`, `createHistoricalEdges()`, `animateEdge()`, `clearEdgeAnimation()`, and `resetAllEdges()` all use canonical IDs and track `hasForward`/`hasReverse` in edge data for direction-aware `markerStart`/`markerEnd` arrowheads.
+> **Last Updated**: 2026-04-08 - Owner filter (#69): Added owner dropdown to Dashboard header controls. Network store gains `filterOwner` ref (persisted to localStorage) and `setFilterOwner()` action. On change, agents are filtered client-side before `convertAgentsToNodes()` — graph shows only selected owner's agents. Dropdown hidden when ≤1 distinct owner.
+>
+> **Previous (2026-03-20)** - Canonical edge deduplication: bidirectional agent connections now render as ONE line with arrowheads on appropriate ends, instead of TWO overlapping lines. New `getCanonicalEdgePair(x, y)` helper (line 128) returns alphabetically sorted pair. `fetchPermissionEdges()`, `createHistoricalEdges()`, `animateEdge()`, `clearEdgeAnimation()`, and `resetAllEdges()` all use canonical IDs and track `hasForward`/`hasReverse` in edge data for direction-aware `markerStart`/`markerEnd` arrowheads.
 >
 > **Previous (2026-03-18)** - Graph edges simplified to permission-only: `edges` computed now returns `permissionEdges.value` directly (old merge logic combining collaborationEdges + permissionEdges removed). `collaborationEdges` still exists in state and is populated by WebSocket events for live animation purposes, but is NOT rendered in the graph.
 >

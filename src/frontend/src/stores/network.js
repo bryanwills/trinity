@@ -102,11 +102,27 @@ export const useNetworkStore = defineStore('network', () => {
 
   // Filter tags for system views
   const filterTags = ref([])
+  // Filter by owner
+  const filterOwner = ref(localStorage.getItem('trinity-dashboard-filter-owner') || '')
 
   // Actions
   function setFilterTags(tags) {
     filterTags.value = tags || []
     fetchAgents() // Refetch when filter changes
+  }
+
+  function setFilterOwner(owner) {
+    filterOwner.value = owner || ''
+    if (owner) {
+      localStorage.setItem('trinity-dashboard-filter-owner', owner)
+    } else {
+      localStorage.removeItem('trinity-dashboard-filter-owner')
+    }
+    // Re-convert agents to nodes with owner filter applied
+    const filtered = filterOwner.value
+      ? agents.value.filter(a => (a.owner || null) === (filterOwner.value === '__unassigned__' ? null : filterOwner.value))
+      : agents.value
+    convertAgentsToNodes(filtered)
   }
 
   async function fetchAgents() {
@@ -117,7 +133,11 @@ export const useNetworkStore = defineStore('network', () => {
       }
       const response = await axios.get('/api/agents', { params })
       agents.value = response.data
-      convertAgentsToNodes(response.data)
+      // Apply client-side owner filter before converting to nodes
+      const filtered = filterOwner.value
+        ? response.data.filter(a => (a.owner || null) === (filterOwner.value === '__unassigned__' ? null : filterOwner.value))
+        : response.data
+      convertAgentsToNodes(filtered)
       await fetchPermissionEdges()
     } catch (error) {
       console.error('Failed to fetch agents:', error)
@@ -1635,6 +1655,7 @@ export const useNetworkStore = defineStore('network', () => {
     slotStats,
     schedules,
     filterTags,
+    filterOwner,
     // View mode / Replay state
     isTimelineMode,
     isPlaying,
@@ -1657,6 +1678,7 @@ export const useNetworkStore = defineStore('network', () => {
     fetchAgents,
     fetchPermissionEdges,
     setFilterTags,
+    setFilterOwner,
     fetchHistoricalCollaborations,
     fetchHistoricalCommunications: fetchHistoricalCollaborations, // Alias for new terminology
     createHistoricalEdges,

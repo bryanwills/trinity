@@ -1,8 +1,8 @@
 # Feature: Agents Page UI Improvements
 
-> **Status**: Implemented (2025-12-07, Enhanced 2026-01-09, System Agent Consolidation 2026-01-13, Toggle UX 2026-01-26, Component Standardization 2026-02-12, Horizontal Row Tiles 2026-03-03, Two-Row Tiles + Persistent Filter 2026-03-03, Full Filtering 2026-03-03, Success Rate Bar 2026-03-03, Capacity Meter + Fixed Grid 2026-03-03, Agent Avatars 2026-03-07)
+> **Status**: Implemented (2025-12-07, Enhanced 2026-01-09, System Agent Consolidation 2026-01-13, Toggle UX 2026-01-26, Component Standardization 2026-02-12, Horizontal Row Tiles 2026-03-03, Two-Row Tiles + Persistent Filter 2026-03-03, Full Filtering 2026-03-03, Success Rate Bar 2026-03-03, Capacity Meter + Fixed Grid 2026-03-03, Agent Avatars 2026-03-07, Owner Filter 2026-04-08)
 > **Tested**: All features verified working
-> **Last Updated**: 2026-03-07 - Agent Avatars: Added `AgentAvatar` component (from `../components/AgentAvatar.vue`) to all three view modes (desktop, tablet, mobile) in Agents.vue. Each renders `<AgentAvatar :name="agent.name" :avatar-url="agent.avatar_url" size="sm" />` next to the agent name. Desktop: line 272, Tablet: line 442, Mobile: line 585.
+> **Last Updated**: 2026-04-08 - Owner Filter (#69): Added owner dropdown filter to Agents page header bar. Derives distinct owners from full agent list, filters with AND logic alongside name/status/tag filters. Hidden when ≤1 distinct owner. Persisted to localStorage (`trinity-agents-filter-owner`). Supports "Unassigned" option for orphaned agents.
 >
 > **Previous (2026-03-03)** - Capacity Meter + Fixed Grid Columns: Added CapacityMeter component to desktop and tablet layouts. Desktop: flex sibling alongside two-row content block (height=48, width=6), default fallback active=0/max=3. Tablet: between success bar and stats (height=28, width=10), conditional on slot data. Fixed grid column widths: Activity column 56px, Stats column 200px with `overflow-hidden` to prevent layout shifts from varying stats content.
 >
