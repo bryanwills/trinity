@@ -399,6 +399,15 @@ class TaskExecutionService:
                 except Exception as switch_err:
                     logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
 
+            # #285: Classify the startup-watchdog 503 as an AUTH error so
+            # downstream handlers (UI, subscription auto-switch) can react
+            # to it specifically. The agent-server's startup watchdog emits
+            # a 503 with "did not produce any output" in the detail when
+            # Claude Code hangs on an expired OAuth token.
+            error_code_value: Optional[TaskExecutionErrorCode] = None
+            if agent_status_code == 503 and "did not produce any output" in error_msg:
+                error_code_value = TaskExecutionErrorCode.AUTH
+
             if execution_id:
                 existing = db.get_execution(execution_id)
                 if not existing or existing.status != TaskExecutionStatus.CANCELLED:
@@ -418,6 +427,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 response="",
                 error=error_msg,
+                error_code=error_code_value,
             )
 
         except Exception as e:

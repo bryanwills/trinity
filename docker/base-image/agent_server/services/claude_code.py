@@ -5,6 +5,7 @@ Now implements AgentRuntime interface for multi-provider support.
 """
 import os
 import json
+import threading
 import uuid
 import asyncio
 import subprocess
@@ -37,6 +38,69 @@ _executor = ThreadPoolExecutor(max_workers=1)
 # Asyncio lock for execution serialization (safety net for parallel request prevention)
 # The platform-level execution queue is the primary protection, but this is defense-in-depth
 _execution_lock = asyncio.Lock()
+
+
+# Startup watchdog (#285): how long to wait for the `claude` subprocess to
+# produce ANY output before assuming it has hung (typically on expired OAuth
+# tokens, where Claude Code sometimes retries silently instead of exiting).
+# Healthy agents emit the init message in <5s even with MCP cold starts;
+# 60s gives a huge safety margin before converting a hang into a fast failure.
+# Configurable via CLAUDE_STARTUP_TIMEOUT env var for MCP-heavy deployments.
+STARTUP_TIMEOUT_SECONDS = int(os.environ.get("CLAUDE_STARTUP_TIMEOUT", "60"))
+
+
+def _spawn_startup_watchdog(
+    process: subprocess.Popen,
+    started_event: threading.Event,
+    watchdog_fired: threading.Event,
+    timeout_seconds: int,
+    task_id: str,
+) -> threading.Thread:
+    """
+    Spawn a thread that kills `process` if `started_event` isn't set within
+    `timeout_seconds`. Sets `watchdog_fired` before killing so callers can
+    distinguish a watchdog kill from a normal non-zero exit.
+
+    The thread exits quietly if `started_event` fires first — no action,
+    no cost on the happy path.
+    """
+    def _watch():
+        if started_event.wait(timeout_seconds):
+            # Healthy start — watchdog is a no-op.
+            return
+        if process.poll() is not None:
+            # Process already exited on its own before the threshold.
+            # No need to intervene.
+            return
+        logger.error(
+            f"[startup-watchdog] Claude Code produced no output within "
+            f"{timeout_seconds}s for task={task_id}. Killing process — "
+            f"this typically means the subscription token is expired or "
+            f"Claude Code is hanging on OAuth refresh."
+        )
+        watchdog_fired.set()
+        try:
+            process.kill()
+        except Exception as e:
+            logger.error(f"[startup-watchdog] Failed to kill process: {e}")
+
+    thread = threading.Thread(
+        target=_watch,
+        name=f"claude-startup-watchdog-{task_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+# Error message returned when the watchdog fires. Kept as a module constant
+# so tests can assert against it and docs can reference it.
+STARTUP_TIMEOUT_ERROR_MESSAGE = (
+    "Claude Code did not produce any output within {timeout}s of startup. "
+    "This usually means the subscription token is expired or revoked. "
+    "Regenerate the token with 'claude setup-token' in an agent shell, "
+    "or assign a different subscription in Settings → Subscriptions."
+)
 
 
 class ClaudeCodeRuntime(AgentRuntime):
@@ -539,6 +603,22 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         process.stdin.write(prompt)
         process.stdin.close()
 
+        # #285: Startup watchdog — kill the subprocess if it produces no
+        # output within STARTUP_TIMEOUT_SECONDS. Catches the case where
+        # Claude Code hangs silently on expired OAuth tokens.
+        # Note: chat path watches stdout only (stderr is read after exit).
+        # Claude Code emits its init message on stdout within ~1s in healthy
+        # conditions, so stdout-only is sufficient here.
+        started_event = threading.Event()
+        watchdog_fired = threading.Event()
+        _spawn_startup_watchdog(
+            process=process,
+            started_event=started_event,
+            watchdog_fired=watchdog_fired,
+            timeout_seconds=STARTUP_TIMEOUT_SECONDS,
+            task_id=execution_id,
+        )
+
         # Helper function that reads subprocess output (runs in thread pool)
         def read_subprocess_output():
             """Blocking function to read subprocess output line by line"""
@@ -546,6 +626,8 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                 for line in iter(process.stdout.readline, ''):
                     if not line:
                         break
+                    # Signal the watchdog that output has arrived.
+                    started_event.set()
                     # Capture raw JSON for full execution log (same as execute_headless_task)
                     try:
                         raw_msg = json.loads(line.strip())
@@ -578,6 +660,18 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         loop = asyncio.get_event_loop()
         try:
             stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+
+            # #285: If the startup watchdog fired, the process was killed
+            # before producing any stdout. Convert that into a 503 with an
+            # actionable message instead of a generic 500.
+            if watchdog_fired.is_set():
+                error_detail = STARTUP_TIMEOUT_ERROR_MESSAGE.format(
+                    timeout=STARTUP_TIMEOUT_SECONDS
+                )
+                logger.error(
+                    f"[Chat] Startup watchdog fired for execution {execution_id}: {error_detail}"
+                )
+                raise HTTPException(status_code=503, detail=error_detail)
 
             # Check for rate limit detected during stream parsing (takes priority)
             if metadata.error_type == "rate_limit":
@@ -858,17 +952,32 @@ async def execute_headless_task(
         process.stdin.write(prompt)
         process.stdin.close()
 
+        # #285: Startup watchdog — kill the subprocess if it produces no
+        # output within STARTUP_TIMEOUT_SECONDS. Catches the case where
+        # Claude Code hangs silently on expired OAuth tokens.
+        started_event = threading.Event()
+        watchdog_fired = threading.Event()
+        _spawn_startup_watchdog(
+            process=process,
+            started_event=started_event,
+            watchdog_fired=watchdog_fired,
+            timeout_seconds=STARTUP_TIMEOUT_SECONDS,
+            task_id=task_session_id,
+        )
+
         # Helper function that reads subprocess output (runs in thread pool)
         def read_subprocess_output_with_timeout():
             """Blocking function to read subprocess output line by line with timeout"""
-            import threading
-
             # Read stderr in separate thread (verbose output with thinking/tool calls)
             def read_stderr():
                 try:
                     for line in iter(process.stderr.readline, ''):
                         if not line:
                             break
+                        # Any stderr line counts as "startup complete" for the
+                        # watchdog — MCP-heavy agents often write stderr before
+                        # the stdout init message arrives.
+                        started_event.set()
                         verbose_output_lines.append(line.rstrip('\n'))
                 except Exception as e:
                     logger.error(f"[Headless Task] Error reading stderr: {e}")
@@ -881,6 +990,8 @@ async def execute_headless_task(
                 for line in iter(process.stdout.readline, ''):
                     if not line:
                         break
+                    # Signal the watchdog that output has arrived.
+                    started_event.set()
                     # Capture raw JSON for full execution log
                     try:
                         raw_msg = json.loads(line.strip())
@@ -957,6 +1068,18 @@ async def execute_headless_task(
                         detail=str(e)
                     )
                 raise
+
+            # #285: If the startup watchdog fired, the process was killed
+            # before producing any output. Convert that into a 503 with an
+            # actionable message instead of a generic 500.
+            if watchdog_fired.is_set():
+                error_detail = STARTUP_TIMEOUT_ERROR_MESSAGE.format(
+                    timeout=STARTUP_TIMEOUT_SECONDS
+                )
+                logger.error(
+                    f"[Headless Task] Task {task_session_id} startup watchdog fired: {error_detail}"
+                )
+                raise HTTPException(status_code=503, detail=error_detail)
 
             # Build verbose transcript from stderr (the human-readable execution log)
             # SECURITY: Sanitize stderr output
