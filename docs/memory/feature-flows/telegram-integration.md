@@ -1,7 +1,7 @@
-# Feature: Telegram Bot Integration (TELEGRAM-001)
+# Feature: Telegram Bot Integration (TELEGRAM-001, TGRAM-GROUP)
 
 ## Overview
-Per-agent Telegram bots with 1:1 agent-to-bot mapping, enabling users to chat with Trinity agents via Telegram text, photos, and documents. Agents are shareable via `t.me/BotUsername` links.
+Per-agent Telegram bots with 1:1 agent-to-bot mapping, enabling users to chat with Trinity agents via Telegram DMs and group chats. Agents are shareable via `t.me/BotUsername` links. In groups, agents respond to @mentions and direct replies.
 
 ## User Story
 As an agent owner, I want to connect a Telegram bot to my agent so that external users can interact with it via Telegram without needing a Trinity account.
@@ -9,9 +9,12 @@ As an agent owner, I want to connect a Telegram bot to my agent so that external
 ## Entry Points
 - **API (configure)**: `PUT /api/agents/{name}/telegram` — bind a bot token to an agent
 - **API (webhook)**: `POST /api/telegram/webhook/{webhook_secret}` — receive Telegram updates (public, no JWT)
-- **API (status)**: `GET /api/agents/{name}/telegram` — check binding status
+- **API (status)**: `GET /api/agents/{name}/telegram` — check binding status (includes group_count)
 - **API (delete)**: `DELETE /api/agents/{name}/telegram` — remove bot binding
 - **API (test)**: `POST /api/agents/{name}/telegram/test` — send test message or verify bot
+- **API (groups)**: `GET /api/agents/{name}/telegram/groups` — list group configs (TGRAM-GROUP)
+- **API (group update)**: `PUT /api/agents/{name}/telegram/groups/{id}` — update trigger mode / welcome settings
+- **API (group delete)**: `DELETE /api/agents/{name}/telegram/groups/{id}` — deactivate group config
 
 ## Architecture
 
@@ -104,8 +107,8 @@ Two routers are registered in `main.py:523-524`:
 - `_process_update(update, binding)` (line 79) — Commands are handled directly; regular messages go through `on_event()` → adapter → router pipeline.
 
 **Webhook lifecycle functions** (module-level):
-- `register_webhook(agent_name, public_url)` (line 120) — Calls Telegram `setWebhook` with URL + secret_token + `allowed_updates: ["message"]`. Updates `webhook_url` in DB on success.
-- `delete_webhook(agent_name)` (line 165) — Calls Telegram `deleteWebhook`.
+- `register_webhook(agent_name, public_url)` — Calls Telegram `setWebhook` with URL + secret_token + `allowed_updates: ["message", "my_chat_member", "chat_member"]`. Updates `webhook_url` in DB on success.
+- `delete_webhook(agent_name)` — Calls Telegram `deleteWebhook`.
 
 ### Adapter: `src/backend/adapters/telegram_adapter.py`
 
@@ -370,6 +373,113 @@ TelegramChannelPanel is imported and rendered between the Slack and Public Links
 <div class="border-t ..."></div>
 <PublicLinksPanel :agent-name="agentName" />
 ```
+
+## Group Chat Support (TGRAM-GROUP)
+
+### Overview
+
+Agents can participate in Telegram group chats. Bots respond to @mentions and direct replies in groups. Per-group configuration controls trigger mode and welcome messages. Added 2026-04-11.
+
+### Group Message Flow
+
+```
+Telegram Group Chat
+    |
+    v (HTTP POST — message update)
+TelegramWebhookTransport.handle_webhook()
+    |
+    v (inject _bot_id, _bot_username, _agent_name)
+TelegramWebhookTransport._process_update()
+    |  - Member events (my_chat_member, chat_member) → adapter.handle_member_event()
+    |  - Commands with @botname suffix → adapter.handle_command()
+    |  - Regular messages → on_event(update)
+    v
+TelegramAdapter.parse_message(update)
+    |  - Detect group vs private (chat.type in {"group", "supergroup"})
+    |  - Check @mention in entities → _is_bot_mentioned()
+    |  - Check reply_to_message → _is_reply_to_bot()
+    |  - If neither and trigger_mode != "all" → return None (skip)
+    |  - Strip @mention from text for cleaner agent input
+    v
+ChannelMessageRouter.handle_message()
+    |  - Rate limit with per-group key (telegram:{bot_id}:group:{chat_id})
+    |  - Silent drop on rate limit (no public error message in group)
+    |  - Fresh context per message (no prior session history — prevents context bleed)
+    |  - Execute via TaskExecutionService
+    v
+TelegramAdapter.send_response()
+    |  - Reply to triggering message via reply_parameters (threaded in group)
+    v
+User sees response as reply in group
+```
+
+### Trigger Rules
+
+| Condition | trigger_mode=mention | trigger_mode=all |
+|-----------|---------------------|-----------------|
+| @mention in entities | ✅ Process | ✅ Process |
+| Reply to bot's message | ✅ Process | ✅ Process |
+| Regular message (no mention) | ❌ Skip | ✅ Process |
+
+### Member Events
+
+**`my_chat_member`** — Bot's own status changes (no admin required):
+- Bot added to group (`left/kicked → member/administrator`) → `get_or_create_group_config()` with auto-activate
+- Bot removed from group (`member/administrator → left/kicked`) → `deactivate_group_config()`
+
+**`chat_member`** — Other users' status changes (requires bot admin):
+- User joins group → send welcome message if `welcome_enabled` and `welcome_text` set
+- Welcome text supports `{name}` placeholder for user's first name
+
+### Database: `telegram_group_configs`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PK | Auto-increment |
+| binding_id | INTEGER FK | References `telegram_bindings(id)` |
+| chat_id | TEXT | Telegram chat ID (negative for groups) |
+| chat_title | TEXT | Group name (updated on each interaction) |
+| chat_type | TEXT | `"group"` or `"supergroup"` |
+| trigger_mode | TEXT | `"mention"` (default) or `"all"` |
+| welcome_enabled | INTEGER | 0 or 1 |
+| welcome_text | TEXT | Welcome message template |
+| is_active | INTEGER | 1=active, 0=deactivated (bot removed) |
+| created_at | TEXT | ISO timestamp |
+| updated_at | TEXT | ISO timestamp |
+
+Unique constraint: `(binding_id, chat_id)`
+
+### Group Config API
+
+All endpoints require JWT + `OwnedAgentByName` (agent owner only):
+
+- `GET /api/agents/{name}/telegram/groups` — List active group configs
+- `PUT /api/agents/{name}/telegram/groups/{id}` — Update trigger_mode, welcome_enabled, welcome_text (ownership verified)
+- `DELETE /api/agents/{name}/telegram/groups/{id}` — Deactivate group config
+
+### Frontend: Group Config UI
+
+The `TelegramChannelPanel.vue` component shows group configurations when the bot is connected:
+
+- Group list with chat title and type badge
+- Trigger mode radio buttons (mention-only / all messages)
+- Welcome message toggle with text input (`{name}` placeholder)
+- Remove button per group (deactivates, doesn't delete)
+
+### Security Notes
+
+- **No new attack surface**: Group messages use the same webhook endpoint with the same dual-layer auth
+- **IDOR prevention**: Group config update verifies the config ID belongs to the requesting agent's binding
+- **Context bleed prevention**: Group messages get fresh context (no prior session history) — agent replies in a public group cannot leak prior DM conversation context
+- **Bot loop prevention**: Inherited from DM support — `parse_message()` skips messages from bots (`is_bot` check)
+- **Silent rate limiting**: Rate limit errors are not sent to groups (would be visible to all members)
+- **Membership not verified per message**: Telegram doesn't provide a cheap per-message membership check; this is standard bot behavior and is documented
+
+### Known Limitations
+
+- **"All messages" trigger mode requires BotFather privacy mode change**: By default, Telegram privacy mode is ON and bots only receive @mentions/replies. The "all messages" mode works if the bot admin disables privacy mode via BotFather (`/setprivacy` → Disable). This is a manual step not automatable via the Bot API.
+- **`chat_member` events require bot admin**: Welcome messages for user joins only work if the bot has admin rights in the group AND `chat_member` is in `allowed_updates`. If the bot isn't admin, events simply don't arrive — graceful degradation.
+- **No `edited_message` handling**: Edited messages in groups are not processed. In mention-only mode this is rare.
 
 ## Related Flows
 - [slack-integration.md](slack-integration.md) — Slack equivalent (SLACK-001)

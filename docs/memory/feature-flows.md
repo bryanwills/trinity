@@ -11,6 +11,7 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-04-11 | #297 | Telegram group chat support — @mention triggers, welcome messages, per-group config | [telegram-integration.md](feature-flows/telegram-integration.md) |
 | 2026-04-10 | #296 | Telegram bot connection UI — TelegramChannelPanel in Agent Detail Sharing page | [telegram-integration.md](feature-flows/telegram-integration.md) |
 | 2026-04-08 | #69 | Owner filter dropdown on Dashboard and Agents pages | [agents-page-ui-improvements.md](feature-flows/agents-page-ui-improvements.md), [agent-network.md](feature-flows/agent-network.md) |
 | 2026-04-06 | QUOTA-001 | Per-role agent creation quotas with admin exemption | [agent-quotas.md](feature-flows/agent-quotas.md) |
@@ -178,7 +179,7 @@
 | Slack Integration | [slack-integration.md](feature-flows/slack-integration.md) | Slack as delivery channel for public links (SLACK-001) |
 | Slack Channel Routing | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) | Channel adapter abstraction + multi-agent Slack routing (SLACK-002) |
 | Slack File Sharing | [slack-file-sharing.md](feature-flows/slack-file-sharing.md) | Inbound file uploads: images via vision, text via container (SLACK-FILES) |
-| Telegram Integration | [telegram-integration.md](feature-flows/telegram-integration.md) | Per-agent Telegram bots with webhook transport (TELEGRAM-001) |
+| Telegram Integration | [telegram-integration.md](feature-flows/telegram-integration.md) | Per-agent Telegram bots with webhook transport, group chat support (TELEGRAM-001, TGRAM-GROUP) |
 | Nevermined x402 Payments | [nevermined-payments.md](feature-flows/nevermined-payments.md) | Per-agent paid API via x402 payment protocol (NVM-001) |
 
 ### Mobile & PWA
