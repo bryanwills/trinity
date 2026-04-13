@@ -356,6 +356,13 @@ async def create_agent_internal(
         'AGENT_RUNTIME_MODEL': config.runtime_model or ''
     }
 
+    # GUARD-001: per-agent guardrails overrides (empty by default; baseline
+    # is always applied inside the container).
+    _guardrails = db.get_guardrails_config(config.name)
+    if _guardrails:
+        import json as _json
+        env_vars['AGENT_GUARDRAILS'] = _json.dumps(_guardrails)
+
     # Auto-assign subscription (round-robin) — #74
     auto_assigned_subscription_id = None
     try:

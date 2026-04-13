@@ -21,7 +21,7 @@ from services.docker_utils import (
 from services.agent_service.helpers import validate_base_image
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches
 from .read_only import inject_read_only_hooks
 
 logger = logging.getLogger(__name__)
@@ -193,7 +193,8 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_api_key_env_matches(container, agent_name) or
         not check_github_pat_env_matches(container, agent_name) or
         not check_resource_limits_match(container, agent_name) or
-        not check_full_capabilities_match(container, agent_name)
+        not check_full_capabilities_match(container, agent_name) or
+        not check_guardrails_env_matches(container, agent_name)
     )
 
     if needs_recreation:
@@ -286,6 +287,15 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
         current_pat = get_github_pat()
         if current_pat:
             env_vars['GITHUB_PAT'] = current_pat
+
+    # GUARD-001: re-serialise guardrails overrides into env so startup.sh
+    # can render the runtime config with the latest values.
+    guardrails_override = db.get_guardrails_config(agent_name)
+    if guardrails_override:
+        import json as _json
+        env_vars['AGENT_GUARDRAILS'] = _json.dumps(guardrails_override)
+    else:
+        env_vars.pop('AGENT_GUARDRAILS', None)
 
     # Get port from labels
     ssh_port = int(labels.get("trinity.ssh-port", 2222))

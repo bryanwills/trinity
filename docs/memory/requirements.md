@@ -1541,14 +1541,14 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 ## 28. Agent Guardrails (GUARD-001)
 
 ### 28.1 Overview
-- **Status**: ⏳ Not Started
+- **Status**: 🚧 In Progress (Phase 1 implemented — #140)
 - **Requirement ID**: GUARD-001
 - **Priority**: HIGH
 - **Description**: Deterministic safety guardrails for autonomous agent execution. Prevents costly mistakes (destructive commands, credential leaks, runaway loops, unauthorized network access) through layered enforcement baked into the base image and agent-server.py — not relying on model compliance alone.
 - **Design Principle**: Trinity controls the base image, the agent server, and the deployment pipeline. Guardrails are injected infrastructure-level, not advisory. Agents cannot opt out.
 
 ### 28.2 Claude Code Hooks Injection (GUARD-002)
-- **Status**: ⏳ Not Started
+- **Status**: ✅ Implemented (#140)
 - **Requirement ID**: GUARD-002
 - **Priority**: HIGH
 - **Description**: Pre-configure Claude Code hooks in the base image (`~/.claude/settings.json`) that all agents inherit. Hooks fire deterministically on every tool call — including in `--dangerously-skip-permissions` mode.
@@ -1571,7 +1571,7 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   - `~/.claude/settings.json` — Hook registration (baked into Dockerfile)
 
 ### 28.3 CLI Budget & Scope Controls (GUARD-003)
-- **Status**: ⏳ Not Started
+- **Status**: 🚧 Partially Implemented — `--max-turns` + `--disallowedTools` shipped in #140; chat-mode wall-clock timeout tracked in #313
 - **Requirement ID**: GUARD-003
 - **Priority**: HIGH
 - **Description**: Enforce execution limits on every Claude Code invocation via CLI flags in agent-server.py. Prevents runaway cost, infinite loops, and excessive tool access.

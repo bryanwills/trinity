@@ -68,6 +68,7 @@ TABLES = {
             is_default_avatar INTEGER DEFAULT 0,
             require_email INTEGER DEFAULT 0,
             open_access INTEGER DEFAULT 0,
+            guardrails_config TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
         )

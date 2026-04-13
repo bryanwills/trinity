@@ -82,6 +82,27 @@ RUN python3 -m pip install --user --upgrade pip && \
 
 RUN mkdir -p /home/developer/.claude-agent
 
+# Install Trinity guardrail hooks (GUARD-001/002/003).
+# Hooks live in /opt/trinity/hooks/ (root-owned) so the agent cannot modify
+# them at runtime. ~/.claude/settings.json registers them for Claude Code.
+USER root
+RUN mkdir -p /opt/trinity/hooks
+COPY ./hooks/lib.py /opt/trinity/hooks/lib.py
+COPY ./hooks/bash-guardrail.py /opt/trinity/hooks/bash-guardrail.py
+COPY ./hooks/file-guardrail.py /opt/trinity/hooks/file-guardrail.py
+COPY ./hooks/output-scanner.py /opt/trinity/hooks/output-scanner.py
+COPY ./hooks/write-runtime-config.py /opt/trinity/hooks/write-runtime-config.py
+COPY ./hooks/guardrails-baseline.json /opt/trinity/guardrails-baseline.json
+RUN chmod 0555 /opt/trinity/hooks/*.py && \
+    chmod 0444 /opt/trinity/guardrails-baseline.json && \
+    chown -R root:root /opt/trinity
+
+RUN mkdir -p /home/developer/.claude && \
+    chown developer:developer /home/developer/.claude
+COPY --chown=developer:developer ./hooks/claude-settings.json /home/developer/.claude/settings.json
+RUN chmod 0644 /home/developer/.claude/settings.json
+USER developer
+
 # Copy agent server code to /app (outside persistent volume)
 # This ensures code updates reach agents without volume conflicts
 USER root

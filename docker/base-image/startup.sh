@@ -2,6 +2,16 @@
 
 echo "Starting Trinity Agent (Secure Mode)..."
 
+# === Guardrails: render runtime config (GUARD-002/003) ===
+# Merge the image-baked baseline with the AGENT_GUARDRAILS env var (if set)
+# and write the result to /opt/trinity/guardrails-runtime.json as root, 0444.
+# The agent user cannot rewrite this file at runtime, so hook rules cannot
+# be disabled by the agent itself.
+if [ -f /opt/trinity/hooks/write-runtime-config.py ]; then
+    sudo -E /usr/bin/python3 /opt/trinity/hooks/write-runtime-config.py || \
+        echo "Warning: failed to render guardrails-runtime.json (hooks will fall back to baseline)"
+fi
+
 # Initialize from GitHub repository if specified
 if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
     echo "Initializing agent from GitHub repository: ${GITHUB_REPO}"

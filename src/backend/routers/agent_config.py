@@ -485,3 +485,111 @@ async def set_agent_timeout(
         "execution_timeout_seconds": timeout_seconds,
         "execution_timeout_minutes": timeout_seconds // 60,
     }
+
+
+# ============================================================================
+# Guardrails (GUARD-001)
+# ============================================================================
+
+_GUARDRAILS_NUMBER_BOUNDS = {
+    "max_turns_chat": (1, 500),
+    "max_turns_task": (1, 500),
+    "execution_timeout_sec": (60, 7200),
+}
+_GUARDRAILS_LIST_FIELDS = ("extra_bash_deny", "extra_path_deny", "disallowed_tools")
+_GUARDRAILS_MAX_LIST = 50
+_GUARDRAILS_MAX_STRING = 256
+
+
+def _validate_guardrails_payload(body: dict) -> dict:
+    """Whitelist + sanitise guardrails override payload.
+
+    Per-agent overrides are intentionally narrow: numeric caps and literal
+    substring lists only. Regex patterns and credential scanners stay in the
+    platform baseline — agents cannot extend them. Returns the cleaned dict
+    (empty dict means "clear overrides, inherit baseline").
+    """
+    if body is None:
+        return {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    cleaned: dict = {}
+    for field, (lo, hi) in _GUARDRAILS_NUMBER_BOUNDS.items():
+        if field not in body:
+            continue
+        value = body[field]
+        if not isinstance(value, int) or isinstance(value, bool) or not (lo <= value <= hi):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} must be an integer between {lo} and {hi}",
+            )
+        cleaned[field] = value
+
+    for field in _GUARDRAILS_LIST_FIELDS:
+        if field not in body:
+            continue
+        value = body[field]
+        if not isinstance(value, list):
+            raise HTTPException(status_code=400, detail=f"{field} must be a list of strings")
+        if len(value) > _GUARDRAILS_MAX_LIST:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field} exceeds maximum of {_GUARDRAILS_MAX_LIST} entries",
+            )
+        for item in value:
+            if not isinstance(item, str) or not item or len(item) > _GUARDRAILS_MAX_STRING:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field} entries must be non-empty strings up to {_GUARDRAILS_MAX_STRING} chars",
+                )
+        cleaned[field] = value
+
+    return cleaned
+
+
+@router.get("/{agent_name}/guardrails")
+async def get_agent_guardrails(
+    agent_name: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Return per-agent guardrails overrides (empty object if none configured)."""
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    return {
+        "agent_name": agent_name,
+        "guardrails": db.get_guardrails_config(agent_name),
+    }
+
+
+@router.put("/{agent_name}/guardrails")
+async def set_agent_guardrails(
+    agent_name: str,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+):
+    """Set per-agent guardrails overrides. Owner-only. Requires container
+    recreation to take effect (the runtime config file is written during
+    startup). An empty object clears all overrides."""
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(
+            status_code=403,
+            detail="Only agent owners can change guardrails settings",
+        )
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    cleaned = _validate_guardrails_payload(body)
+    success = db.set_guardrails_config(agent_name, cleaned or None)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update guardrails")
+
+    return {
+        "message": "Guardrails updated (restart agent to apply)",
+        "agent_name": agent_name,
+        "guardrails": cleaned,
+    }

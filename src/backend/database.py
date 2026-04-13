@@ -439,6 +439,16 @@ class DatabaseManager:
         return self._agent_ops.set_read_only_mode(agent_name, enabled, config)
 
     # =========================================================================
+    # Agent Guardrails (GUARD-001)
+    # =========================================================================
+
+    def get_guardrails_config(self, agent_name: str) -> dict:
+        return self._agent_ops.get_guardrails_config(agent_name)
+
+    def set_guardrails_config(self, agent_name: str, config: dict = None) -> bool:
+        return self._agent_ops.set_guardrails_config(agent_name, config)
+
+    # =========================================================================
     # Parallel Capacity (delegated to db/agents.py) - CAPACITY-001
     # =========================================================================
 

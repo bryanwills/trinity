@@ -819,6 +819,20 @@ def _migrate_chat_messages_source_column(cursor, conn):
         pass  # Column already exists
 
 
+def _migrate_agent_ownership_guardrails(cursor, conn):
+    """Add guardrails_config column to agent_ownership (GUARD-001).
+
+    Stores per-agent guardrail overrides (max_turns, disallowed_tools,
+    extra_bash_deny, extra_path_deny) as a JSON blob. NULL means "use
+    platform baseline only".
+    """
+    cursor.execute("PRAGMA table_info(agent_ownership)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "guardrails_config" not in columns:
+        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN guardrails_config TEXT")
+        conn.commit()
+
+
 def _migrate_agent_ownership_voice_prompt(cursor, conn):
     """Add voice_system_prompt column to agent_ownership (VOICE-005).
 
@@ -1146,4 +1160,5 @@ MIGRATIONS = [
     ("telegram_group_configs", _migrate_telegram_group_configs),
     ("access_control", _migrate_access_control),
     ("public_link_require_email_unified", _migrate_public_link_require_email_unified),
+    ("agent_ownership_guardrails", _migrate_agent_ownership_guardrails),
 ]

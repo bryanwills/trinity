@@ -39,6 +39,29 @@ _executor = ThreadPoolExecutor(max_workers=1)
 _execution_lock = asyncio.Lock()
 
 
+# GUARD-003: CLI budget & scope controls.
+# Guardrails runtime config is written by startup.sh via
+# /opt/trinity/hooks/write-runtime-config.py and is root-owned 0444 so the
+# agent cannot rewrite it. We read it on every Claude Code invocation so
+# backend-initiated config updates (via container recreation) take effect
+# without restarting the agent-server process.
+_GUARDRAILS_RUNTIME_PATH = "/opt/trinity/guardrails-runtime.json"
+_GUARDRAILS_BASELINE_PATH = "/opt/trinity/guardrails-baseline.json"
+_DEFAULT_MAX_TURNS_CHAT = 50
+_DEFAULT_MAX_TURNS_TASK = 20
+
+
+def _load_guardrails() -> dict:
+    """Load guardrails config, falling back to baseline, then {}."""
+    for path in (_GUARDRAILS_RUNTIME_PATH, _GUARDRAILS_BASELINE_PATH):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (IOError, json.JSONDecodeError):
+            continue
+    return {}
+
+
 class ClaudeCodeRuntime(AgentRuntime):
     """Claude Code implementation of AgentRuntime interface."""
 
@@ -482,6 +505,16 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # Use stream-json for detailed execution log (requires --verbose)
         cmd = ["claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
 
+        # GUARD-003: apply turn cap + disallowed tools from guardrails config.
+        guardrails = _load_guardrails()
+        max_turns_chat = int(guardrails.get("max_turns_chat") or _DEFAULT_MAX_TURNS_CHAT)
+        cmd.extend(["--max-turns", str(max_turns_chat)])
+        logger.info(f"[Chat] Limiting to {max_turns_chat} agentic turns")
+        disallowed_tools = guardrails.get("disallowed_tools") or []
+        if disallowed_tools:
+            cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
+            logger.info(f"[Chat] Guardrails disallow tools: {disallowed_tools}")
+
         # Add MCP config if .mcp.json exists (for agent-to-agent collaboration via Trinity MCP)
         mcp_config_path = Path.home() / ".mcp.json"
         if mcp_config_path.exists():
@@ -814,15 +847,25 @@ async def execute_headless_task(
             cmd.extend(["--allowedTools", tools_str])
             logger.info(f"[Headless Task] Restricting tools to: {tools_str}")
 
+        # GUARD-003: merge disallowed tools from guardrails config.
+        guardrails = _load_guardrails()
+        disallowed_tools = guardrails.get("disallowed_tools") or []
+        if disallowed_tools:
+            cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
+            logger.info(f"[Headless Task] Guardrails disallow tools: {disallowed_tools}")
+
         # Add system prompt if specified
         if system_prompt:
             cmd.extend(["--append-system-prompt", system_prompt])
             logger.info(f"[Headless Task] Appending system prompt ({len(system_prompt)} chars)")
 
-        # Add max turns limit for runaway prevention
-        if max_turns is not None:
-            cmd.extend(["--max-turns", str(max_turns)])
-            logger.info(f"[Headless Task] Limiting to {max_turns} agentic turns")
+        # GUARD-003: max-turns limit for runaway prevention.
+        # Caller value wins; otherwise fall back to guardrails config, then hardcoded default.
+        effective_max_turns = max_turns
+        if effective_max_turns is None:
+            effective_max_turns = int(guardrails.get("max_turns_task") or _DEFAULT_MAX_TURNS_TASK)
+        cmd.extend(["--max-turns", str(effective_max_turns)])
+        logger.info(f"[Headless Task] Limiting to {effective_max_turns} agentic turns")
 
         # Initialize tracking structures
         execution_log: List[ExecutionLogEntry] = []

@@ -1,9 +1,11 @@
 """
 Agent security settings database operations.
 
-Handles full capabilities (container security) and read-only mode.
+Handles full capabilities (container security), read-only mode, and
+guardrails configuration (GUARD-001).
 """
 
+import json
 from typing import Optional
 
 from db.connection import get_db_connection
@@ -105,11 +107,42 @@ class SecurityMixin:
         """
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            import json
             config_json = json.dumps(config) if config else None
             cursor.execute("""
                 UPDATE agent_ownership SET read_only_mode = ?, read_only_config = ?
                 WHERE agent_name = ?
             """, (1 if enabled else 0, config_json, agent_name))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    # =========================================================================
+    # Guardrails (GUARD-001)
+    # =========================================================================
+
+    def get_guardrails_config(self, agent_name: str) -> dict:
+        """Return per-agent guardrails overrides, or {} if none set."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT guardrails_config FROM agent_ownership WHERE agent_name = ?",
+                (agent_name,),
+            )
+            row = cursor.fetchone()
+            if row and row["guardrails_config"]:
+                try:
+                    return json.loads(row["guardrails_config"])
+                except json.JSONDecodeError:
+                    return {}
+            return {}
+
+    def set_guardrails_config(self, agent_name: str, config: Optional[dict]) -> bool:
+        """Store per-agent guardrails overrides as a JSON blob. None clears."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            payload = json.dumps(config) if config else None
+            cursor.execute(
+                "UPDATE agent_ownership SET guardrails_config = ? WHERE agent_name = ?",
+                (payload, agent_name),
+            )
             conn.commit()
             return cursor.rowcount > 0

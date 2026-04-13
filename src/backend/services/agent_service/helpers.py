@@ -405,6 +405,31 @@ def check_api_key_env_matches(container, agent_name: str) -> bool:
         return not has_api_key and not has_oauth_token
 
 
+def check_guardrails_env_matches(container, agent_name: str) -> bool:
+    """
+    GUARD-001: Verify the container's AGENT_GUARDRAILS env var matches the
+    per-agent override stored in the database. Returns False when the user
+    has updated guardrails via PUT /api/agents/{name}/guardrails but the
+    container is still running with stale config — signals that start_agent
+    should recreate the container so startup.sh re-renders the runtime JSON.
+    """
+    import json as _json
+
+    env_list = container.attrs.get("Config", {}).get("Env", [])
+    env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+    current = env_dict.get("AGENT_GUARDRAILS", "")
+
+    desired = db.get_guardrails_config(agent_name) or {}
+    expected = _json.dumps(desired) if desired else ""
+
+    if not desired and not current:
+        return True
+    try:
+        return _json.loads(current or "{}") == desired
+    except (_json.JSONDecodeError, ValueError):
+        return False
+
+
 def check_github_pat_env_matches(container, agent_name: str) -> bool:
     """
     Check if container's GITHUB_PAT env var matches the current system setting.
