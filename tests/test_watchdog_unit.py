@@ -403,12 +403,13 @@ class TestReconcileOrphanedExecutions:
         # Mock _get_agent_running_ids to return None (unreachable)
         service._get_agent_running_ids = AsyncMock(return_value=None)
 
-        orphaned, terminated = asyncio.run(
+        orphaned, terminated, confirmed_running = asyncio.run(
             service._reconcile_orphaned_executions()
         )
 
         assert orphaned == 0
         assert terminated == 0
+        assert confirmed_running == set()
         mock_db.mark_execution_failed_by_watchdog.assert_not_called()
 
     @patch("services.cleanup_service.httpx.AsyncClient")
@@ -434,12 +435,13 @@ class TestReconcileOrphanedExecutions:
         service._get_agent_running_ids = AsyncMock(return_value=set())
         service._broadcast_watchdog_event = AsyncMock()
 
-        orphaned, terminated = asyncio.run(
+        orphaned, terminated, confirmed_running = asyncio.run(
             service._reconcile_orphaned_executions()
         )
 
         assert orphaned == 1
         assert terminated == 0
+        assert confirmed_running == set()
         mock_db.mark_execution_failed_by_watchdog.assert_called_once()
         mock_slot.release_slot.assert_called_once_with("agent-a", "exec-1")
         # Atomic conditional release — no TOCTOU race
@@ -461,12 +463,14 @@ class TestReconcileOrphanedExecutions:
         service = self._make_service()
         service._get_agent_running_ids = AsyncMock(return_value={"exec-1"})
 
-        orphaned, terminated = asyncio.run(
+        orphaned, terminated, confirmed_running = asyncio.run(
             service._reconcile_orphaned_executions()
         )
 
         assert orphaned == 0
         assert terminated == 0
+        # #226: Execution confirmed as still running within timeout
+        assert confirmed_running == {"exec-1"}
         mock_db.mark_execution_failed_by_watchdog.assert_not_called()
 
     @patch("services.cleanup_service.httpx.AsyncClient")
@@ -493,12 +497,13 @@ class TestReconcileOrphanedExecutions:
         service._terminate_on_agent = AsyncMock(return_value=True)
         service._broadcast_watchdog_event = AsyncMock()
 
-        orphaned, terminated = asyncio.run(
+        orphaned, terminated, confirmed_running = asyncio.run(
             service._reconcile_orphaned_executions()
         )
 
         assert orphaned == 0
         assert terminated == 1
+        assert confirmed_running == set()  # Over timeout, so not confirmed
         service._terminate_on_agent.assert_called_once_with(ANY, "agent-a", "exec-1")
         mock_db.mark_execution_failed_by_watchdog.assert_called_once()
 
@@ -525,12 +530,13 @@ class TestReconcileOrphanedExecutions:
         service._terminate_on_agent = AsyncMock(return_value=False)
         service._broadcast_watchdog_event = AsyncMock()
 
-        orphaned, terminated = asyncio.run(
+        orphaned, terminated, confirmed_running = asyncio.run(
             service._reconcile_orphaned_executions()
         )
 
         # Terminate failed — should NOT mark as failed or release resources
         assert terminated == 0
+        assert confirmed_running == set()
         mock_db.mark_execution_failed_by_watchdog.assert_not_called()
         mock_slot.release_slot.assert_not_called()
 
@@ -557,11 +563,12 @@ class TestReconcileOrphanedExecutions:
         service._get_agent_running_ids = AsyncMock(return_value=set())
         service._broadcast_watchdog_event = AsyncMock()
 
-        orphaned, terminated = asyncio.run(
+        orphaned, terminated, confirmed_running = asyncio.run(
             service._reconcile_orphaned_executions()
         )
 
         assert orphaned == 0
+        assert confirmed_running == set()
         mock_slot.release_slot.assert_not_called()
         mock_q.force_release_if_matches.assert_not_called()
 
@@ -593,11 +600,12 @@ class TestReconcileOrphanedExecutions:
         service._get_agent_running_ids = AsyncMock(return_value=set())
         service._broadcast_watchdog_event = AsyncMock()
 
-        orphaned, terminated = asyncio.run(
+        orphaned, terminated, confirmed_running = asyncio.run(
             service._reconcile_orphaned_executions()
         )
 
         assert orphaned == 1
+        assert confirmed_running == set()
         assert mock_db.mark_execution_failed_by_watchdog.call_count == 2
 
 

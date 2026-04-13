@@ -64,11 +64,11 @@ Singleton pattern via global `cleanup_service` instance (line 141).
 
 Seven sequential operations, each wrapped in individual try/except. Watchdog runs FIRST to release resources before passive cleanup:
 
-0. **Watchdog: reconcile DB vs agent process registries** (Issue #129)
+0. **Watchdog: reconcile DB vs agent process registries** (Issue #129, #226)
    ```python
-   orphaned, terminated = await self._reconcile_orphaned_executions()
+   orphaned, terminated, confirmed_running_ids = await self._reconcile_orphaned_executions()
    ```
-   Runs first so it can release capacity slots and queue state before the stale cleanup marks executions failed without resource cleanup. See [Watchdog Reconciliation](#watchdog-reconciliation-issue-129) below.
+   Runs first so it can release capacity slots and queue state before the stale cleanup marks executions failed without resource cleanup. Also returns `confirmed_running_ids` (#226) — executions verified as still running on agents within their timeout — so slot cleanup doesn't falsely fail them. See [Watchdog Reconciliation](#watchdog-reconciliation-issue-129) below.
 
 1. **Mark stale executions as failed** (safety net for agent-unreachable cases)
    ```python
@@ -94,23 +94,26 @@ Seven sequential operations, each wrapped in individual try/except. Watchdog run
    ```
    Calls `DatabaseManager.mark_stale_activities_failed()` which delegates to `ActivityOperations.mark_stale_activities_failed()`.
 
-5. **Cleanup stale Redis slots and fail execution records** (lines 123-148, Issue #219)
+5. **Cleanup stale Redis slots and fail execution records** (lines 123-148, Issue #219, #226)
    ```python
    slot_service = get_slot_service()
-   reclaimed = await slot_service.cleanup_stale_slots()
+   agent_timeouts = db.get_all_execution_timeouts()  # #226: per-agent TTL
+   reclaimed = await slot_service.cleanup_stale_slots(agent_timeouts=agent_timeouts)
    report.stale_slots = sum(len(ids) for ids in reclaimed.values())
-   # Fail execution records whose slots were reclaimed
+   # Fail execution records whose slots were reclaimed, skip confirmed running (#226)
    for agent_name, execution_ids in reclaimed.items():
        for execution_id in execution_ids:
+           if execution_id in confirmed_running_ids:
+               continue  # Watchdog verified still running
            db.fail_stale_slot_execution(execution_id, error=...)
    ```
-   Calls `SlotService.cleanup_stale_slots()` which scans all `agent:slots:*` keys, removes entries older than TTL, and returns a dict mapping agent names to reclaimed execution IDs. The cleanup service then fails the corresponding `schedule_executions` DB records using a guarded update (`WHERE status = 'running'`) to avoid overwriting executions that completed via another path.
+   Calls `SlotService.cleanup_stale_slots()` with per-agent timeouts (#226). The service scans all `agent:slots:*` keys, computes each agent's TTL as `timeout_seconds + 5 min buffer` (or default 20 min if no timeout configured), removes entries older than that TTL, and returns a dict mapping agent names to reclaimed execution IDs. The cleanup service then fails the corresponding `schedule_executions` DB records using a guarded update (`WHERE status = 'running'`), skipping any IDs the watchdog confirmed as still running.
 
 ### Watchdog Reconciliation (Issue #129)
 
 Active reconciliation of DB execution state against agent process registries. Replaces the passive "detect-and-report" model with active remediation.
 
-#### `_reconcile_orphaned_executions()` → `tuple[int, int]`
+#### `_reconcile_orphaned_executions()` → `tuple[int, int, set]`
 1. Query `db.get_running_executions_with_agent_info()` — LEFT JOINs `schedule_executions` with `agent_schedules` and `agent_ownership` for timeout resolution: `COALESCE(schedule.timeout, agent.timeout, 900)`
 2. Group executions by `agent_name`
 3. Parallel fan-out: `asyncio.gather` queries all agents concurrently via shared `httpx.AsyncClient`
@@ -122,13 +125,14 @@ Active reconciliation of DB execution state against agent process registries. Re
 | No (ConnectError/Timeout) | — | — | **SKIP** (retry next cycle) |
 | Yes | No | Age < 60s | **SKIP** (dispatch grace window) |
 | Yes | No | Age >= 60s | **ORPHAN RECOVERY** |
-| Yes | Yes | No | **NO ACTION** |
+| Yes | Yes | No | **CONFIRMED RUNNING** (#226) |
 | Yes | Yes | Yes, terminate succeeds | **AUTO-TERMINATE** |
 | Yes | Yes | Yes, terminate fails | **SKIP** (defer to 120-min stale cleanup) |
 
 6. **Per-execution error isolation**: each recovery in its own try/except
 7. **Systemic failure detection**: warns if >50% of actual recovery attempts fail in a cycle (only counts orphan/terminate attempts, not healthy executions checked)
 8. **Concurrency guard**: `asyncio.Lock` prevents overlapping cleanup cycles from background loop + manual trigger
+9. **Returns third element** (#226): `confirmed_running` set — execution IDs verified as still running on agent within their timeout. Slot cleanup uses this to avoid falsely failing executions that are legitimately running.
 
 #### `_recover_execution(execution_id, agent_name, error_msg, action)` → `bool`
 Shared DRY helper for both orphan recovery and auto-terminate:
@@ -362,7 +366,7 @@ WHERE id = ?
 4. Deletes corresponding metadata keys: `agent:slot:{name}:{execution_id}`
 5. Returns the execution IDs so the caller (cleanup service) can fail corresponding DB records
 
-**TTL**: `DEFAULT_SLOT_TTL_SECONDS = 1200` (20 minutes, line 31)
+**TTL** (#226): Per-agent, computed as `execution_timeout_seconds + SLOT_TTL_BUFFER (5 min)`. Falls back to `DEFAULT_SLOT_TTL_SECONDS = 1200` (20 minutes) if no agent timeout is configured. This prevents premature slot reclamation for agents with long-running tasks (e.g., 60-120 min timeouts).
 
 ## Side Effects
 - **Logging**: Each cleanup cycle logs results at INFO level when resources are cleaned
