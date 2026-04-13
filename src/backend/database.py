@@ -915,8 +915,13 @@ class DatabaseManager:
     def is_email_whitelisted(self, email: str):
         return self._email_auth_ops.is_email_whitelisted(email)
 
-    def add_to_whitelist(self, email: str, added_by: str, source: str = "manual"):
-        return self._email_auth_ops.add_to_whitelist(email, added_by, source)
+    def add_to_whitelist(self, email: str, added_by: str, source: str, *, default_role: str):
+        return self._email_auth_ops.add_to_whitelist(
+            email, added_by, source, default_role=default_role
+        )
+
+    def get_whitelist_default_role(self, email: str):
+        return self._email_auth_ops.get_whitelist_default_role(email)
 
     def remove_from_whitelist(self, email: str):
         return self._email_auth_ops.remove_from_whitelist(email)
