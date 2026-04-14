@@ -35,6 +35,7 @@ Migration Order (as of 2026-02-28):
 28. public_user_memory_table - MEM-001 per-user persistent memory for public link agents
 29. subscription_rate_limit_tracking - SUB-003 rate-limit event tracking for auto-switch
 30. execution_fan_out_id - FANOUT-001 fan-out operation linkage
+31. scheduler_retry_support - RETRY-001 scheduler retry mechanism
 """
 import logging
 import sqlite3
@@ -1164,6 +1165,49 @@ def _migrate_backlog_support(cursor, conn):
     conn.commit()
 
 
+def _migrate_scheduler_retry_support(cursor, conn):
+    """RETRY-001: Scheduler retry mechanism for failed executions.
+
+    Adds:
+    - agent_schedules.max_retries: max retry attempts (0=disabled, default 1 for new, 0 for existing)
+    - agent_schedules.retry_delay_seconds: delay between retries (default 60, range 30-600)
+    - schedule_executions.attempt_number: which attempt this is (1 = first try)
+    - schedule_executions.retry_of_execution_id: links retry to original execution
+    - schedule_executions.retry_scheduled_at: when retry is scheduled (for restart recovery)
+
+    Note: Existing schedules get max_retries=0 (opt-in) to avoid surprising behavior changes.
+    New schedules default to max_retries=1 (resilient by default).
+    """
+    # agent_schedules columns
+    cursor.execute("PRAGMA table_info(agent_schedules)")
+    as_cols = {row[1] for row in cursor.fetchall()}
+
+    if "max_retries" not in as_cols:
+        # Default 0 for existing schedules (opt-in), schema default 1 for new
+        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN max_retries INTEGER DEFAULT 0")
+    if "retry_delay_seconds" not in as_cols:
+        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN retry_delay_seconds INTEGER DEFAULT 60")
+
+    # schedule_executions columns
+    cursor.execute("PRAGMA table_info(schedule_executions)")
+    se_cols = {row[1] for row in cursor.fetchall()}
+
+    if "attempt_number" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN attempt_number INTEGER DEFAULT 1")
+    if "retry_of_execution_id" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN retry_of_execution_id TEXT")
+    if "retry_scheduled_at" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN retry_scheduled_at TEXT")
+
+    # Index for finding pending retries on startup
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_pending_retry "
+        "ON schedule_executions(retry_scheduled_at) "
+        "WHERE retry_scheduled_at IS NOT NULL AND status = 'pending_retry'"
+    )
+    conn.commit()
+
+
 # Ordered list of all migrations. Defined at module level (after all _migrate_* functions)
 # so run_all_migrations and the health check can both reference it.
 # IMPORTANT: append-only — never reorder or remove entries.
@@ -1208,4 +1252,5 @@ MIGRATIONS = [
     ("public_link_require_email_unified", _migrate_public_link_require_email_unified),
     ("email_whitelist_default_role", _migrate_email_whitelist_default_role),
     ("backlog_support", _migrate_backlog_support),
+    ("scheduler_retry_support", _migrate_scheduler_retry_support),
 ]

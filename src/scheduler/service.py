@@ -9,7 +9,7 @@ import asyncio
 import logging
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -141,6 +141,9 @@ class SchedulerService:
         logger.info(f"Instance ID: {self._instance_id}")
         logger.info(f"Schedule sync interval: {config.schedule_reload_interval}s")
         logger.info(f"Misfire grace time: {config.misfire_grace_time}s")
+
+        # RETRY-001: Recover any pending retries from before restart
+        self._recover_pending_retries()
 
     def _get_missed_schedules(self, schedules: List[Schedule]) -> List[Schedule]:
         """
@@ -1045,6 +1048,12 @@ class SchedulerService:
                     "error": error_msg
                 })
 
+                # RETRY-001: Check if retry is eligible and schedule it
+                await self._maybe_schedule_retry(
+                    execution=execution,
+                    error_msg=error_msg
+                )
+
         except asyncio.CancelledError:
             logger.info(f"Background poll for execution {execution_id} cancelled (shutdown)")
             raise
@@ -1064,6 +1073,223 @@ class SchedulerService:
                     f"Execution {execution_id} may be stuck in 'running' state — "
                     "cleanup service will recover within 5 minutes"
                 )
+
+    # =========================================================================
+    # Retry Management (RETRY-001)
+    # =========================================================================
+
+    async def _maybe_schedule_retry(
+        self,
+        execution: ScheduleExecution,
+        error_msg: str = None
+    ):
+        """Check if a failed execution is eligible for retry and schedule it.
+
+        Called after _poll_and_finalize detects a failure.
+        """
+        if not execution:
+            return
+
+        # Don't retry skipped or cancelled executions
+        if execution.status in (ExecutionStatus.SKIPPED, ExecutionStatus.CANCELLED):
+            logger.debug(f"Execution {execution.id} status '{execution.status}' is not retriable")
+            return
+
+        # Get the schedule to check retry configuration
+        schedule = self.db.get_schedule(execution.schedule_id)
+        if not schedule:
+            logger.debug(f"Schedule {execution.schedule_id} not found, skipping retry")
+            return
+
+        # Check if retries are enabled
+        max_retries = schedule.max_retries
+        if max_retries <= 0:
+            logger.debug(f"Schedule {schedule.id} has max_retries=0, skipping retry")
+            return
+
+        # Check if we've exceeded retry limit
+        current_attempt = execution.attempt_number or 1
+        if current_attempt > max_retries:
+            logger.info(
+                f"Execution {execution.id} attempt {current_attempt} exceeds max_retries={max_retries}, "
+                "no more retries"
+            )
+            return
+
+        # Calculate retry delay
+        retry_delay = schedule.retry_delay_seconds
+
+        # Check for rate limit (429) in error - use 2x delay, capped at 300s
+        if error_msg:
+            error_lower = error_msg.lower()
+            if "429" in error_lower or "rate limit" in error_lower or "too many requests" in error_lower:
+                retry_delay = min(300, retry_delay * 2)
+                logger.info(f"Rate limit detected, using 2x delay: {retry_delay}s")
+
+        # Schedule the retry
+        retry_at = datetime.utcnow() + timedelta(seconds=retry_delay)
+
+        logger.info(
+            f"Scheduling retry for execution {execution.id} "
+            f"(attempt {current_attempt + 1}/{max_retries + 1}) at {retry_at.isoformat()}"
+        )
+
+        # Persist retry intent to DB (survives restart)
+        self.db.schedule_retry(execution.id, retry_at)
+
+        # Schedule APScheduler date trigger
+        self._schedule_retry_job(
+            execution=execution,
+            schedule=schedule,
+            retry_at=retry_at,
+            next_attempt_number=current_attempt + 1
+        )
+
+    def _schedule_retry_job(
+        self,
+        execution: ScheduleExecution,
+        schedule: Schedule,
+        retry_at: datetime,
+        next_attempt_number: int
+    ):
+        """Schedule an APScheduler date trigger for retry."""
+        from apscheduler.triggers.date import DateTrigger
+
+        # Find the original execution ID for linking
+        original_id = self.db.get_original_execution_id(execution.id)
+
+        job_id = f"retry_{execution.id}"
+
+        # Remove any existing retry job for this execution
+        try:
+            self.scheduler.remove_job(job_id)
+        except Exception:
+            pass
+
+        self.scheduler.add_job(
+            self._execute_retry,
+            trigger=DateTrigger(run_date=retry_at),
+            id=job_id,
+            kwargs={
+                "original_execution_id": original_id,
+                "failed_execution_id": execution.id,
+                "schedule_id": schedule.id,
+                "agent_name": schedule.agent_name,
+                "message": schedule.message,
+                "timeout_seconds": schedule.timeout_seconds,
+                "model": schedule.model,
+                "allowed_tools": schedule.allowed_tools,
+                "next_attempt_number": next_attempt_number,
+            },
+            replace_existing=True
+        )
+
+    async def _execute_retry(
+        self,
+        original_execution_id: str,
+        failed_execution_id: str,
+        schedule_id: str,
+        agent_name: str,
+        message: str,
+        timeout_seconds: int,
+        model: str,
+        allowed_tools: list,
+        next_attempt_number: int
+    ):
+        """Execute a scheduled retry.
+
+        Called by APScheduler when the date trigger fires.
+        """
+        logger.info(
+            f"Executing retry for schedule {schedule_id}, agent {agent_name}, "
+            f"attempt {next_attempt_number}"
+        )
+
+        # Clear the retry_scheduled_at from the failed execution
+        self.db.clear_retry_scheduled(failed_execution_id)
+
+        # Check if agent still exists (in case it was deleted while retry was pending)
+        schedule = self.db.get_schedule(schedule_id)
+        if not schedule or not schedule.enabled:
+            logger.warning(
+                f"Schedule {schedule_id} no longer exists or is disabled, "
+                "skipping retry execution"
+            )
+            return
+
+        # Create a new execution record for the retry
+        retry_execution = self.db.create_execution(
+            schedule_id=schedule_id,
+            agent_name=agent_name,
+            message=message,
+            triggered_by="retry",
+            model_used=model,
+            attempt_number=next_attempt_number,
+            retry_of_execution_id=original_execution_id
+        )
+
+        if not retry_execution:
+            logger.error(f"Failed to create retry execution record for schedule {schedule_id}")
+            return
+
+        # Execute the task via the backend
+        try:
+            await self._call_backend_execute_task(
+                agent_name=agent_name,
+                message=message,
+                triggered_by="retry",
+                timeout_seconds=timeout_seconds,
+                model=model,
+                allowed_tools=allowed_tools,
+                execution_id=retry_execution.id
+            )
+        except Exception as e:
+            logger.error(f"Retry execution failed for {retry_execution.id}: {e}")
+            self.db.update_execution_status(
+                execution_id=retry_execution.id,
+                status=ExecutionStatus.FAILED,
+                error=str(e)[:2000]
+            )
+
+    def _recover_pending_retries(self):
+        """Recover pending retries after scheduler restart.
+
+        Called during initialization to reschedule any retries that were
+        pending when the scheduler shut down.
+        """
+        pending = self.db.get_pending_retries()
+        if not pending:
+            return
+
+        logger.info(f"Recovering {len(pending)} pending retries after restart")
+
+        now = datetime.utcnow()
+        for execution in pending:
+            schedule = self.db.get_schedule(execution.schedule_id)
+            if not schedule or not schedule.enabled:
+                # Schedule deleted or disabled, clear the retry
+                logger.info(
+                    f"Schedule {execution.schedule_id} no longer valid, "
+                    f"clearing retry for execution {execution.id}"
+                )
+                self.db.clear_retry_scheduled(execution.id)
+                continue
+
+            retry_at = execution.retry_scheduled_at
+            if retry_at < now:
+                # Retry time has passed, execute immediately
+                retry_at = now + timedelta(seconds=5)
+                logger.info(
+                    f"Retry for execution {execution.id} was scheduled for "
+                    f"{execution.retry_scheduled_at}, executing in 5s"
+                )
+
+            self._schedule_retry_job(
+                execution=execution,
+                schedule=schedule,
+                retry_at=retry_at,
+                next_attempt_number=(execution.attempt_number or 1) + 1
+            )
 
     # =========================================================================
     # Schedule Management (for runtime updates)

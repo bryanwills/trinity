@@ -89,7 +89,10 @@ class ScheduleOperations:
             next_run_at=parse_iso_timestamp(row["next_run_at"]) if row["next_run_at"] else None,
             timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys and row["timeout_seconds"] else 900,
             allowed_tools=allowed_tools,
-            model=row["model"] if "model" in row_keys else None
+            model=row["model"] if "model" in row_keys else None,
+            # Retry configuration (RETRY-001)
+            max_retries=row["max_retries"] if "max_retries" in row_keys and row["max_retries"] is not None else 1,
+            retry_delay_seconds=row["retry_delay_seconds"] if "retry_delay_seconds" in row_keys and row["retry_delay_seconds"] is not None else 60
         )
 
     @staticmethod
@@ -132,6 +135,11 @@ class ScheduleOperations:
             queued_at=parse_iso_timestamp(row["queued_at"])
                 if "queued_at" in row_keys and row["queued_at"] else None,
             backlog_metadata=row["backlog_metadata"] if "backlog_metadata" in row_keys else None,
+            # Retry tracking (RETRY-001)
+            attempt_number=row["attempt_number"] if "attempt_number" in row_keys and row["attempt_number"] else 1,
+            retry_of_execution_id=row["retry_of_execution_id"] if "retry_of_execution_id" in row_keys else None,
+            retry_scheduled_at=parse_iso_timestamp(row["retry_scheduled_at"])
+                if "retry_scheduled_at" in row_keys and row["retry_scheduled_at"] else None,
         )
 
     @staticmethod
@@ -190,12 +198,16 @@ class ScheduleOperations:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             try:
+                # Clamp retry values to valid ranges (RETRY-001)
+                max_retries = max(0, min(5, schedule_data.max_retries))
+                retry_delay_seconds = max(30, min(600, schedule_data.retry_delay_seconds))
+
                 cursor.execute("""
                     INSERT INTO agent_schedules (
                         id, agent_name, name, cron_expression, message, enabled,
                         timezone, description, owner_id, created_at, updated_at, next_run_at,
-                        timeout_seconds, allowed_tools, model
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        timeout_seconds, allowed_tools, model, max_retries, retry_delay_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     schedule_id,
                     agent_name,
@@ -211,7 +223,9 @@ class ScheduleOperations:
                     next_run_at_iso,
                     schedule_data.timeout_seconds,
                     allowed_tools_json,
-                    schedule_data.model
+                    schedule_data.model,
+                    max_retries,
+                    retry_delay_seconds
                 ))
                 conn.commit()
 
@@ -230,7 +244,9 @@ class ScheduleOperations:
                     next_run_at=next_run_at,
                     timeout_seconds=schedule_data.timeout_seconds,
                     allowed_tools=schedule_data.allowed_tools,
-                    model=schedule_data.model
+                    model=schedule_data.model,
+                    max_retries=max_retries,
+                    retry_delay_seconds=retry_delay_seconds
                 )
             except sqlite3.IntegrityError:
                 return None
@@ -302,7 +318,11 @@ class ScheduleOperations:
 
             set_clauses = []
             params = []
-            allowed_fields = ["name", "cron_expression", "message", "enabled", "timezone", "description", "timeout_seconds", "allowed_tools", "model"]
+            allowed_fields = [
+                "name", "cron_expression", "message", "enabled", "timezone",
+                "description", "timeout_seconds", "allowed_tools", "model",
+                "max_retries", "retry_delay_seconds"  # RETRY-001
+            ]
 
             for key, value in updates.items():
                 if key in allowed_fields:
@@ -311,6 +331,12 @@ class ScheduleOperations:
                     elif key == "allowed_tools":
                         # Serialize allowed_tools to JSON
                         value = json.dumps(value) if value is not None else None
+                    elif key == "max_retries":
+                        # Clamp to valid range (RETRY-001)
+                        value = max(0, min(5, int(value)))
+                    elif key == "retry_delay_seconds":
+                        # Clamp to valid range (RETRY-001)
+                        value = max(30, min(600, int(value)))
                     set_clauses.append(f"{key} = ?")
                     params.append(value)
 

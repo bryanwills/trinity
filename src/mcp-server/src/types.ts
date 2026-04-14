@@ -165,6 +165,9 @@ export interface ScheduleCreate {
   timeout_seconds?: number;
   allowed_tools?: string[];
   model?: string;
+  // RETRY-001: Retry configuration
+  max_retries?: number;
+  retry_delay_seconds?: number;
 }
 
 export interface ScheduleUpdate {
@@ -177,20 +180,23 @@ export interface ScheduleUpdate {
   timeout_seconds?: number;
   allowed_tools?: string[];
   model?: string;
+  // RETRY-001: Retry configuration
+  max_retries?: number;
+  retry_delay_seconds?: number;
 }
 
 export interface ScheduleExecution {
   id: string;
   schedule_id: string;
   agent_name: string;
-  status: "pending" | "running" | "success" | "failed" | "cancelled";
+  status: "pending" | "running" | "success" | "failed" | "cancelled" | "skipped" | "pending_retry";
   started_at: string;
   completed_at?: string;
   duration_ms?: number;
   message: string;
   response?: string;
   error?: string;
-  triggered_by: "schedule" | "manual" | "mcp";
+  triggered_by: "schedule" | "manual" | "mcp" | "retry";
   context_used?: number;
   context_max?: number;
   cost?: number;
@@ -200,6 +206,10 @@ export interface ScheduleExecution {
   claude_session_id?: string;
   source_agent_name?: string;
   source_user_email?: string;
+  // RETRY-001: Retry tracking
+  attempt_number?: number;
+  retry_of_execution_id?: string;
+  retry_scheduled_at?: string;
 }
 
 // Execution Query Types (MCP-007)

@@ -116,6 +116,39 @@
               </div>
             </div>
 
+            <!-- Retry Configuration (RETRY-001) -->
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Max Retries</label>
+                <select
+                  v-model="formData.max_retries"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option :value="0">Disabled</option>
+                  <option :value="1">1 retry (default)</option>
+                  <option :value="2">2 retries</option>
+                  <option :value="3">3 retries</option>
+                  <option :value="5">5 retries</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Retry Delay</label>
+                <select
+                  v-model="formData.retry_delay_seconds"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option :value="30">30 seconds</option>
+                  <option :value="60">1 minute (default)</option>
+                  <option :value="120">2 minutes</option>
+                  <option :value="300">5 minutes</option>
+                  <option :value="600">10 minutes</option>
+                </select>
+              </div>
+            </div>
+            <p class="text-xs text-gray-500 dark:text-gray-400 -mt-2">
+              Auto-retry failed executions. Rate-limited (429) failures use 2x delay.
+            </p>
+
             <!-- Allowed Tools Section -->
             <div>
               <div class="flex items-center justify-between mb-2">
@@ -264,6 +297,13 @@
                 </svg>
                 {{ schedule.model }}
               </span>
+              <!-- RETRY-001: Retry configuration badge -->
+              <span v-if="schedule.max_retries > 0" class="flex items-center" :title="`Retry: ${schedule.max_retries}x, ${schedule.retry_delay_seconds}s delay`">
+                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {{ schedule.max_retries }}x retry
+              </span>
               <span v-if="schedule.next_run_at" class="flex items-center text-indigo-600 dark:text-indigo-400">
                 <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
@@ -410,10 +450,10 @@
                 <span
                   :class="[
                     'font-medium',
-                    exec.status === 'success' ? 'text-green-600' : exec.status === 'failed' ? 'text-red-600' : exec.status === 'skipped' ? 'text-purple-600' : 'text-yellow-600'
+                    exec.status === 'success' ? 'text-green-600' : exec.status === 'failed' ? 'text-red-600' : exec.status === 'skipped' ? 'text-purple-600' : exec.status === 'pending_retry' ? 'text-orange-600' : 'text-yellow-600'
                   ]"
                 >
-                  {{ exec.status }}
+                  {{ exec.status === 'pending_retry' ? 'retrying' : exec.status }}
                 </span>
               </div>
             </div>
@@ -623,7 +663,10 @@ const formData = ref({
   enabled: true,
   timeout_seconds: 900,
   allowed_tools: null,  // null = all tools allowed
-  model: 'claude-opus-4-5-20251101'  // MODEL-001
+  model: 'claude-opus-4-5-20251101',  // MODEL-001
+  // RETRY-001: Retry configuration
+  max_retries: 1,  // 0 = disabled, 1-5 range
+  retry_delay_seconds: 60  // Seconds between retries (30-600 range)
 })
 
 // Tool categories for allowed tools selection
@@ -749,7 +792,10 @@ function closeForm() {
     enabled: true,
     timeout_seconds: 900,
     allowed_tools: null,
-    model: 'claude-opus-4-5-20251101'
+    model: 'claude-opus-4-5-20251101',
+    // RETRY-001
+    max_retries: 1,
+    retry_delay_seconds: 60
   }
 }
 
@@ -765,7 +811,10 @@ function editSchedule(schedule) {
     enabled: schedule.enabled,
     timeout_seconds: schedule.timeout_seconds || 900,
     allowed_tools: schedule.allowed_tools || null,
-    model: schedule.model || 'claude-opus-4-6'
+    model: schedule.model || 'claude-opus-4-6',
+    // RETRY-001
+    max_retries: schedule.max_retries ?? 1,
+    retry_delay_seconds: schedule.retry_delay_seconds ?? 60
   }
 }
 

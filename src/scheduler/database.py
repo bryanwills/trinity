@@ -75,7 +75,10 @@ class SchedulerDatabase:
             next_run_at=datetime.fromisoformat(row["next_run_at"]) if row["next_run_at"] else None,
             timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys and row["timeout_seconds"] else 900,
             allowed_tools=allowed_tools,
-            model=row["model"] if "model" in row_keys else None
+            model=row["model"] if "model" in row_keys else None,
+            # Retry configuration (RETRY-001)
+            max_retries=row["max_retries"] if "max_retries" in row_keys and row["max_retries"] is not None else 1,
+            retry_delay_seconds=row["retry_delay_seconds"] if "retry_delay_seconds" in row_keys and row["retry_delay_seconds"] is not None else 60
         )
 
     @staticmethod
@@ -104,7 +107,12 @@ class SchedulerDatabase:
             source_user_email=row["source_user_email"] if "source_user_email" in row_keys else None,
             source_agent_name=row["source_agent_name"] if "source_agent_name" in row_keys else None,
             source_mcp_key_id=row["source_mcp_key_id"] if "source_mcp_key_id" in row_keys else None,
-            source_mcp_key_name=row["source_mcp_key_name"] if "source_mcp_key_name" in row_keys else None
+            source_mcp_key_name=row["source_mcp_key_name"] if "source_mcp_key_name" in row_keys else None,
+            # Retry tracking (RETRY-001)
+            attempt_number=row["attempt_number"] if "attempt_number" in row_keys and row["attempt_number"] else 1,
+            retry_of_execution_id=row["retry_of_execution_id"] if "retry_of_execution_id" in row_keys else None,
+            retry_scheduled_at=datetime.fromisoformat(row["retry_scheduled_at"])
+                if "retry_scheduled_at" in row_keys and row["retry_scheduled_at"] else None
         )
 
     # =========================================================================
@@ -199,9 +207,21 @@ class SchedulerDatabase:
         agent_name: str,
         message: str,
         triggered_by: str = "schedule",
-        model_used: str = None
+        model_used: str = None,
+        attempt_number: int = 1,
+        retry_of_execution_id: str = None
     ) -> Optional[ScheduleExecution]:
-        """Create a new execution record."""
+        """Create a new execution record.
+
+        Args:
+            schedule_id: Schedule ID
+            agent_name: Agent name
+            message: Task message
+            triggered_by: Trigger source ("schedule", "manual", "retry")
+            model_used: Model override
+            attempt_number: Which attempt this is (1 = first try, RETRY-001)
+            retry_of_execution_id: Original execution ID for retries (RETRY-001)
+        """
         execution_id = self._generate_id()
         now = datetime.utcnow().isoformat()
 
@@ -210,8 +230,8 @@ class SchedulerDatabase:
             cursor.execute("""
                 INSERT INTO schedule_executions (
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
-                    model_used
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    model_used, attempt_number, retry_of_execution_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -220,7 +240,9 @@ class SchedulerDatabase:
                 now,
                 message,
                 triggered_by,
-                model_used
+                model_used,
+                attempt_number,
+                retry_of_execution_id
             ))
             conn.commit()
 
@@ -231,7 +253,9 @@ class SchedulerDatabase:
                 status=ExecutionStatus.RUNNING,
                 started_at=datetime.fromisoformat(now),
                 message=message,
-                triggered_by=triggered_by
+                triggered_by=triggered_by,
+                attempt_number=attempt_number,
+                retry_of_execution_id=retry_of_execution_id
             )
 
     def create_skipped_execution(
@@ -368,6 +392,97 @@ class SchedulerDatabase:
                 LIMIT ?
             """, (limit,))
             return [self._row_to_execution(row) for row in cursor.fetchall()]
+
+    # =========================================================================
+    # Retry Operations (RETRY-001)
+    # =========================================================================
+
+    def schedule_retry(
+        self,
+        original_execution_id: str,
+        retry_scheduled_at: datetime
+    ) -> bool:
+        """Mark an execution as pending retry.
+
+        Updates the execution status to 'pending_retry' and records when the retry
+        is scheduled to fire. This persists the retry intent so it survives scheduler restart.
+
+        Args:
+            original_execution_id: The failed execution ID
+            retry_scheduled_at: When the retry is scheduled to fire
+
+        Returns:
+            True if update succeeded
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE schedule_executions
+                SET status = ?, retry_scheduled_at = ?
+                WHERE id = ?
+            """, (
+                ExecutionStatus.PENDING_RETRY,
+                retry_scheduled_at.isoformat(),
+                original_execution_id
+            ))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_pending_retries(self) -> List[ScheduleExecution]:
+        """Get all executions with pending retries (for startup recovery).
+
+        Returns executions where:
+        - status = 'pending_retry'
+        - retry_scheduled_at is not null
+
+        The caller should reschedule APScheduler date triggers for these.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM schedule_executions
+                WHERE status = ? AND retry_scheduled_at IS NOT NULL
+                ORDER BY retry_scheduled_at ASC
+            """, (ExecutionStatus.PENDING_RETRY,))
+            return [self._row_to_execution(row) for row in cursor.fetchall()]
+
+    def clear_retry_scheduled(self, execution_id: str) -> bool:
+        """Clear the retry_scheduled_at after retry fires.
+
+        Called when the retry actually executes. The new execution record
+        will have its own status tracking.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE schedule_executions
+                SET retry_scheduled_at = NULL
+                WHERE id = ?
+            """, (execution_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_original_execution_id(self, execution_id: str) -> Optional[str]:
+        """Traverse retry chain to find the original execution ID.
+
+        For grouping retry attempts in the UI.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            current_id = execution_id
+
+            # Follow the chain (max 5 hops to prevent infinite loops)
+            for _ in range(5):
+                cursor.execute(
+                    "SELECT retry_of_execution_id FROM schedule_executions WHERE id = ?",
+                    (current_id,)
+                )
+                row = cursor.fetchone()
+                if not row or not row["retry_of_execution_id"]:
+                    return current_id
+                current_id = row["retry_of_execution_id"]
+
+            return current_id
 
     # =========================================================================
     # Process Schedule Operations

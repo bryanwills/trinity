@@ -115,6 +115,9 @@ class ScheduleCreate(BaseModel):
     timeout_seconds: int = 900  # Default 15 minutes
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
+    # Retry configuration (RETRY-001)
+    max_retries: int = 1  # 0 = disabled, 1-5 range. Default 1 for resilience.
+    retry_delay_seconds: int = 60  # Seconds between retries (30-600 range)
 
 
 class Schedule(BaseModel):
@@ -135,6 +138,9 @@ class Schedule(BaseModel):
     timeout_seconds: int = 900  # Default 15 minutes
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
+    # Retry configuration (RETRY-001)
+    max_retries: int = 1  # 0 = disabled, 1-5 range
+    retry_delay_seconds: int = 60  # Seconds between retries (30-600 range)
 
 
 class ScheduleExecution(BaseModel):
@@ -173,6 +179,10 @@ class ScheduleExecution(BaseModel):
     # Persistent backlog (BACKLOG-001)
     queued_at: Optional[datetime] = None       # ISO timestamp for FIFO ordering when status=queued
     backlog_metadata: Optional[str] = None     # JSON blob of the full ParallelTaskRequest context
+    # Retry tracking (RETRY-001)
+    attempt_number: int = 1                    # Which attempt this is (1 = first try)
+    retry_of_execution_id: Optional[str] = None  # Links retry to original execution
+    retry_scheduled_at: Optional[datetime] = None  # When retry is scheduled (for restart recovery)
 
 
 # =========================================================================

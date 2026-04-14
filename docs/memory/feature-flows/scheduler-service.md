@@ -677,6 +677,69 @@ def _on_job_max_instances(self, event: JobExecutionEvent):
 
 ---
 
+## Flow 10: Automatic Retry (RETRY-001)
+
+**Location**: `src/scheduler/service.py:1074-1132`
+
+Failed scheduled executions can be automatically retried with configurable delay.
+
+### Configuration
+
+| Field | Default | Range | Description |
+|-------|---------|-------|-------------|
+| `max_retries` | 1 | 0-5 | Max retry attempts (0=disabled) |
+| `retry_delay_seconds` | 60 | 30-600 | Delay between retries |
+
+New schedules default to 1 retry. Existing schedules migrated with 0 (opt-in).
+
+### Retry Flow
+
+```
+Execution fails → _maybe_schedule_retry()
+    ├─ Check schedule.max_retries > 0
+    ├─ Check attempt_number <= max_retries
+    ├─ Calculate delay (2x for 429/rate-limit, capped at 300s)
+    ├─ Persist: DB schedule_retry(execution_id, retry_scheduled_at)
+    └─ Schedule: APScheduler DateTrigger → _execute_retry()
+
+_execute_retry() fires:
+    ├─ Clear retry_scheduled_at from original execution
+    ├─ Verify schedule still exists and enabled
+    ├─ Create new execution record (triggered_by="retry", attempt_number=N+1)
+    └─ Call _call_backend_execute_task()
+```
+
+### Execution Record Fields
+
+| Field | Purpose |
+|-------|---------|
+| `attempt_number` | Which attempt (1=first try, 2=first retry) |
+| `retry_of_execution_id` | Links to original execution for grouping |
+| `retry_scheduled_at` | When retry fires (for restart recovery) |
+
+### Restart Recovery
+
+On startup, `_recover_pending_retries()` queries executions with `status='pending_retry'` and reschedules their APScheduler jobs.
+
+### Statuses
+
+| Status | Meaning |
+|--------|---------|
+| `pending_retry` | Failed, retry scheduled but not yet fired |
+| Retry → `running` | Retry in progress |
+| Retry → `success/failed` | Retry outcome |
+
+### Database Operations
+
+| Method | Purpose |
+|--------|---------|
+| `schedule_retry()` | Mark execution as pending_retry |
+| `get_pending_retries()` | List executions awaiting retry |
+| `clear_retry_scheduled()` | Clear after retry fires |
+| `get_original_execution_id()` | Traverse chain for UI grouping |
+
+---
+
 ## Database Operations
 
 **Location**: `src/scheduler/database.py`
@@ -1008,6 +1071,7 @@ The embedded scheduler (`src/backend/services/scheduler_service.py`) has been co
 
 | Date | Change |
 |------|--------|
+| 2026-04-14 | **Automatic Retry (RETRY-001)**: Added Flow 10 documenting configurable retry mechanism for failed executions. New fields: max_retries, retry_delay_seconds, attempt_number, retry_of_execution_id, retry_scheduled_at. New status: pending_retry. |
 | 2026-03-26 | **Line number refresh + Process Schedules documentation**: Updated all line numbers to match current code. Added Flow 3 (Process Schedule Execution), process schedule sync documentation, process schedule database operations, and full service method reference table. |
 | 2026-03-13 | **Schedule Update Nullable Field Fix**: Changed `schedules.py:270` from `if v is not None` filter to `model_dump(exclude_unset=True)`. |
 | 2026-03-11 | **Async Fire-and-Forget with DB Polling (SCHED-ASYNC-001, Issue #101)**: Replaced blocking HTTP call with async dispatch + DB polling. |

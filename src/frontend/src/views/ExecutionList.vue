@@ -357,6 +357,7 @@ function getStatusIcon(status) {
     paused: '⏸️',
     awaiting_approval: '🔔',
     skipped: '⏭️',
+    pending_retry: '🔁',  // RETRY-001
   }
   return icons[status] || '❓'
 }
@@ -371,6 +372,7 @@ function getStatusClasses(status) {
     paused: 'bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300',
     awaiting_approval: 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300',
     skipped: 'bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300',
+    pending_retry: 'bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-300',  // RETRY-001
   }
   return classes[status] || 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
 }

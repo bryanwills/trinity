@@ -151,6 +151,8 @@ TABLES = {
             timeout_seconds INTEGER DEFAULT 900,
             allowed_tools TEXT,
             model TEXT,
+            max_retries INTEGER DEFAULT 1,
+            retry_delay_seconds INTEGER DEFAULT 60,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
     """,
@@ -175,6 +177,9 @@ TABLES = {
             execution_log TEXT,
             model_used TEXT,
             subscription_id TEXT,
+            attempt_number INTEGER DEFAULT 1,
+            retry_of_execution_id TEXT,
+            retry_scheduled_at TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

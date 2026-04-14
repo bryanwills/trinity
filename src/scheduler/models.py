@@ -18,6 +18,7 @@ class ExecutionStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"  # Added for Issue #46 - records when execution was dropped
+    PENDING_RETRY = "pending_retry"  # Added for RETRY-001 - retry scheduled but not yet fired
 
 
 class TriggerSource(str, Enum):
@@ -25,6 +26,7 @@ class TriggerSource(str, Enum):
     SCHEDULE = "schedule"
     MANUAL = "manual"
     API = "api"
+    RETRY = "retry"  # Added for RETRY-001 - automatic retry of failed execution
 
 
 @dataclass
@@ -46,6 +48,9 @@ class Schedule:
     timeout_seconds: int = 900  # Default 15 minutes
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
+    # Retry configuration (RETRY-001)
+    max_retries: int = 1  # 0 = disabled, 1-5 range
+    retry_delay_seconds: int = 60  # Seconds between retries (30-600 range)
 
 
 @dataclass
@@ -73,6 +78,10 @@ class ScheduleExecution:
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
     source_mcp_key_name: Optional[str] = None
+    # Retry tracking (RETRY-001)
+    attempt_number: int = 1  # Which attempt this is (1 = first try)
+    retry_of_execution_id: Optional[str] = None  # Links retry to original execution
+    retry_scheduled_at: Optional[datetime] = None  # When retry is scheduled (for restart recovery)
 
 
 @dataclass
