@@ -179,6 +179,7 @@ The test suite covers:
 - **Watchdog Integration** (test_watchdog.py) - Watchdog report fields in cleanup status/trigger [SMOKE]
 - **Watchdog Unit Tests** (test_watchdog_unit.py) - Reconciliation logic, orphan recovery, auto-terminate, per-agent TTL (#129, #226) [UNIT]
 - **Context Used Formula** (unit/test_context_used_formula.py) - Verify context_used = input_tokens only, not input+output (#56) [UNIT]
+- **OTel Trace Logging** (unit/test_otel_trace_logging.py) - Trace ID injection in logs, span context correlation (#305, RELIABILITY-002) [UNIT]
 
 ### Avatars & Image Generation
 - **Avatars** (test_avatars.py) - Avatar serving, generation, regeneration, deletion, emotions, identity prompts, default generation (AVATAR-001/002/003) [SMOKE + Agent]
@@ -219,9 +220,9 @@ The test suite covers:
 
 ## Test Suite Statistics
 
-**Total Tests**: ~2,172 tests across 115 test files
+**Total Tests**: ~2,175 tests across 116 test files
 **Smoke Tests**: ~564 tests (fast, no agent creation)
-**Unit Tests**: ~43 tests (no backend needed, rate limit detection, watchdog logic, context formula)
+**Unit Tests**: ~46 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging)
 **Core Tests (not slow)**: ~2,069 tests
 **Slow Tests**: ~89 tests (chat execution, fleet ops, system agent ops, execution termination)
 **WebSocket Tests**: ~10 tests (web terminal, execution streaming)
@@ -255,8 +256,11 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 
 | Test File | Description | Tests Added |
 |-----------|-------------|-------------|
+| `unit/test_otel_trace_logging.py` | Trace ID injection in logs for log-trace correlation (#305) | 3 tests |
 | `unit/test_context_used_formula.py` | Verify context_used equals input_tokens only (#56) | 3 tests |
 | `test_watchdog_unit.py` | Updated `_reconcile_orphaned_executions()` tests for 3-tuple return (now returns `confirmed_running_ids` set, #226) | 7 tests updated |
+
+**OTel Trace Logging (#305)**: Added `tests/unit/test_otel_trace_logging.py` to verify the JsonFormatter injects `trace_id` and `span_id` into log entries when an OpenTelemetry span is active. Tests verify correct format (32 hex for trace_id, 16 hex for span_id), absence of trace context when no span is active, and preservation of standard log fields. Part of RELIABILITY-002.
 
 **Context Used Formula (#56)**: Added `tests/unit/test_context_used_formula.py` to verify `context_used` equals `input_tokens` only, not `input_tokens + output_tokens`. Per Claude Code SDK, `input_tokens` represents the full context window fill at final turn. Tests verify the formula, edge cases (missing tokens), and percentage calculation sanity.
 
