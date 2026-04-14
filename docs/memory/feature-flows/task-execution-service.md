@@ -267,13 +267,38 @@ The service catches all errors and returns `TaskExecutionResult` with `status=Ta
 
 | Error Case | Service Result | chat.py HTTP | public.py HTTP |
 |------------|---------------|--------------|----------------|
-| Slot not acquired | `status=TaskExecutionStatus.FAILED, error="Agent at capacity..."` | 429 | 429 |
-| Agent connect timeout | `status=TaskExecutionStatus.FAILED, error="timed out..."` | 504 | 504 |
-| Agent HTTP error | `status=TaskExecutionStatus.FAILED, error=detail` | 503 | 502 |
-| Unexpected exception | `status=TaskExecutionStatus.FAILED, error=str(e)` | 503 | 502 |
-| Cancelled execution | Preserved -- does not overwrite `TaskExecutionStatus.CANCELLED` | N/A | N/A |
+| Slot not acquired | `status=FAILED, error="Agent at capacity..."` | 429 | 429 |
+| Agent connect timeout | `status=FAILED, error="timed out...", error_code=TIMEOUT` | 504 | 504 |
+| Agent HTTP error | `status=FAILED, error=detail` | 503 | 502 |
+| Auth failure (#285) | `status=FAILED, error=detail, error_code=AUTH` | 503 | 503 |
+| Unexpected exception | `status=FAILED, error=str(e)` | 503 | 502 |
+| Cancelled execution | Preserved -- does not overwrite `CANCELLED` | N/A | N/A |
 
 Cancel protection (lines 324-325, 366-367, 390-391): Before writing failed status, checks `db.get_execution(execution_id)` -- if status is already `TaskExecutionStatus.CANCELLED` (from user termination), the service does not overwrite it.
+
+### Auth Failure Fast-Fail (Issue #285)
+
+When subscription tokens expire, Claude Code sometimes hangs for up to an hour before failing. This wastes execution slots until the watchdog recovers them. Issue #285 adds real-time auth failure detection:
+
+**Agent Server** (`docker/base-image/agent_server/services/claude_code.py`):
+
+1. **Pattern Matcher** (`_is_auth_failure_message()`, line 675): Detects auth failure patterns in stderr:
+   - "Invalid API key", "Authentication failed", "401 Unauthorized", "auth failed"
+   - Model-specific errors: "does not have access to model", "exceeds context window"
+
+2. **Real-time Stderr Scan** (line 910): Background thread scans Claude Code stderr during execution. When an auth pattern is detected, sets `auth_failure_event` and captures the reason.
+
+3. **Process Kill** (line 935): Main execution loop checks for auth failure event and kills the Claude Code process immediately instead of waiting for timeout.
+
+4. **HTTP 503 Response**: Auth failures return HTTP 503 (Service Unavailable) so the backend can distinguish from other errors.
+
+**Backend** (`src/backend/services/task_execution_service.py`):
+
+1. **Error Code Detection** (line 415): When agent returns HTTP 503, sets `error_code=TaskExecutionErrorCode.AUTH`
+
+2. **Structured Result**: Returns `TaskExecutionResult` with `error_code=AUTH` so callers can handle auth failures specifically (e.g., prompt user to reconfigure subscription)
+
+**Result**: Auth failures now fast-fail in seconds instead of hanging for up to an hour.
 
 > **Status Enums (#92)**: Execution statuses use `TaskExecutionStatus` (`running/success/failed/cancelled/skipped`). Activity statuses use `ActivityState` (`started/completed/failed`). Both are defined in `models.py`.
 
