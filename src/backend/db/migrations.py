@@ -1260,6 +1260,74 @@ def _migrate_validation_support(cursor, conn):
 # Ordered list of all migrations. Defined at module level (after all _migrate_* functions)
 # so run_all_migrations and the health check can both reference it.
 # IMPORTANT: append-only — never reorder or remove entries.
+def _migrate_audit_log_table(cursor, conn):
+    """Create audit_log table + indexes + immutability triggers (SEC-001 / Issue #20).
+
+    Phase 1 of the platform audit trail. The table is also defined in
+    db/schema.py for fresh installs; this migration handles existing installs.
+    """
+    cursor.execute("PRAGMA table_info(audit_log)")
+    if cursor.fetchall():
+        return  # already created (fresh install path)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT UNIQUE NOT NULL,
+            event_type TEXT NOT NULL,
+            event_action TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id TEXT,
+            actor_email TEXT,
+            actor_ip TEXT,
+            mcp_key_id TEXT,
+            mcp_key_name TEXT,
+            mcp_scope TEXT,
+            target_type TEXT,
+            target_id TEXT,
+            timestamp TEXT NOT NULL,
+            details TEXT,
+            request_id TEXT,
+            source TEXT NOT NULL,
+            endpoint TEXT,
+            previous_hash TEXT,
+            entry_hash TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    for ddl in [
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_type, actor_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_mcp_key ON audit_log(mcp_key_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_request ON audit_log(request_id)",
+        # Append-only enforcement: block UPDATE on every row, block DELETE within
+        # the 365-day retention window. Operators can purge stale entries after
+        # retention via a one-off script that drops the trigger.
+        """
+        CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+        BEFORE UPDATE ON audit_log
+        BEGIN
+            SELECT RAISE(ABORT, 'Audit log entries cannot be modified');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+        BEFORE DELETE ON audit_log
+        WHEN OLD.timestamp > datetime('now', '-365 days')
+        BEGIN
+            SELECT RAISE(ABORT, 'Audit log entries cannot be deleted within retention period');
+        END
+        """,
+    ]:
+        cursor.execute(ddl)
+
+    conn.commit()
+    print("Created audit_log table with indexes and immutability triggers (SEC-001)")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -1303,4 +1371,5 @@ MIGRATIONS = [
     ("backlog_support", _migrate_backlog_support),
     ("scheduler_retry_support", _migrate_scheduler_retry_support),
     ("validation_support", _migrate_validation_support),
+    ("audit_log_table", _migrate_audit_log_table),
 ]

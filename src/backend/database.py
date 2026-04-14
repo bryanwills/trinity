@@ -128,6 +128,7 @@ from db.operator_queue import OperatorQueueOperations
 from db.event_subscriptions import EventSubscriptionOperations
 from db.telegram_channels import TelegramChannelOperations
 from db.access_requests import AccessRequestOperations
+from db.audit import PlatformAuditOperations
 
 
 def init_database():
@@ -279,6 +280,7 @@ class DatabaseManager:
         self._event_subscription_ops = EventSubscriptionOperations()
         self._telegram_channel_ops = TelegramChannelOperations()
         self._access_request_ops = AccessRequestOperations()
+        self._audit_ops = PlatformAuditOperations()
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -1588,6 +1590,34 @@ class DatabaseManager:
 
     def delete_access_requests_for_agent(self, agent_name: str):
         return self._access_request_ops.delete_for_agent(agent_name)
+
+    # =========================================================================
+    # Platform Audit Log (SEC-001 / Issue #20 — Phase 1)
+    # =========================================================================
+
+    def create_audit_entry(self, entry: dict):
+        """Insert an audit log entry (append-only)."""
+        return self._audit_ops.create_audit_entry(entry)
+
+    def get_audit_entries(self, **filters):
+        """Query audit entries with optional filters. See PlatformAuditOperations for kwargs."""
+        return self._audit_ops.get_audit_entries(**filters)
+
+    def count_audit_entries(self, **filters):
+        """Count audit entries matching a filter (independent of limit/offset)."""
+        return self._audit_ops.count_audit_entries(**filters)
+
+    def get_audit_entry(self, event_id: str):
+        """Fetch a single audit entry by its event_id (UUID)."""
+        return self._audit_ops.get_audit_entry(event_id)
+
+    def get_audit_entries_range(self, start_id: int, end_id: int):
+        """Fetch entries by primary-key range (used by hash-chain verification in Phase 4)."""
+        return self._audit_ops.get_audit_entries_range(start_id, end_id)
+
+    def get_audit_stats(self, start_time: str = None, end_time: str = None):
+        """Aggregate counts by event_type and actor_type for the dashboard."""
+        return self._audit_ops.get_audit_stats(start_time=start_time, end_time=end_time)
 
 
 # Global database manager instance

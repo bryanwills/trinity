@@ -73,6 +73,7 @@ from routers.triggers import router as triggers_router
 from routers.alerts import router as alerts_router
 from routers.process_templates import router as process_templates_router
 from routers.audit import router as audit_router
+from routers.audit_log import router as audit_log_router  # SEC-001 / Issue #20
 from routers.docs import router as docs_router
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router
@@ -623,7 +624,8 @@ app.include_router(approvals_router)
 app.include_router(triggers_router)
 app.include_router(alerts_router)
 app.include_router(process_templates_router)
-app.include_router(audit_router)  # IT5 P1: Audit logging
+app.include_router(audit_router)  # IT5 P1: Process Engine audit logging
+app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase 1)
 app.include_router(docs_router)   # Process documentation serving
 app.include_router(skills_router) # Skills Management System
 app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
