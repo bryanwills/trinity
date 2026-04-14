@@ -94,6 +94,7 @@ class ParallelTaskRequest(BaseModel):
     create_new_session: Optional[bool] = False  # If true, close existing active sessions and create a new one
     chat_session_id: Optional[str] = None  # Explicit chat session ID to save messages to (for continuing existing sessions)
     resume_session_id: Optional[str] = None  # Claude Code session ID to resume (EXEC-023)
+    inject_result: Optional[bool] = False  # If true and self-task, inject result as message in originating chat session (SELF-EXEC-001)
 
 
 # ============================================================================
@@ -113,6 +114,9 @@ class ActivityType(str, Enum):
 
     # Collaboration activities
     AGENT_COLLABORATION = "agent_collaboration"
+
+    # Self-execute activities (agent runs background task on itself during chat)
+    SELF_TASK = "self_task"
 
     # Execution control activities
     EXECUTION_CANCELLED = "execution_cancelled"

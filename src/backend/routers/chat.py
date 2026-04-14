@@ -527,6 +527,8 @@ async def _run_async_task_with_persistence(
     user_id: Optional[int] = None,
     user_email: Optional[str] = None,
     subscription_id: Optional[str] = None,
+    is_self_task: bool = False,
+    self_task_activity_id: Optional[str] = None,
 ):
     """
     Async /task background wrapper (issue #95).
@@ -620,6 +622,79 @@ async def _run_async_task_with_persistence(
         except Exception as e:
             logger.warning(f"[Task Async] collaboration activity completion failed: {e}")
 
+    # ---- Post-task: complete self-task activity and inject result (SELF-EXEC-001) ----
+    if is_self_task and self_task_activity_id:
+        activity_status = (
+            ActivityState.COMPLETED
+            if result.status == TaskExecutionStatus.SUCCESS
+            else ActivityState.FAILED
+        )
+
+        # Complete the self-task activity
+        try:
+            await activity_service.complete_activity(
+                activity_id=self_task_activity_id,
+                status=activity_status,
+                details={
+                    "response_length": len(result.response or ""),
+                    "execution_time_ms": execution_time_ms,
+                    "execution_id": execution_id,
+                    "inject_result": request.inject_result,
+                },
+                error=(result.error if result.status == TaskExecutionStatus.FAILED else None),
+            )
+        except Exception as e:
+            logger.warning(f"[Task Async] self-task activity completion failed: {e}")
+
+        # Inject result into chat session if requested
+        if request.inject_result and request.chat_session_id and result.status == TaskExecutionStatus.SUCCESS:
+            try:
+                # Validate session exists and belongs to user
+                session = db.get_chat_session(request.chat_session_id)
+                if session and session.get("user_id") == user_id:
+                    # Add self-task result as a chat message
+                    db.add_chat_message(
+                        session_id=request.chat_session_id,
+                        agent_name=agent_name,
+                        user_id=user_id,
+                        user_email=user_email or "",
+                        role="assistant",
+                        content=result.response or "",
+                        cost=result.cost,
+                        context_used=result.context_used,
+                        context_max=result.context_max,
+                        execution_time_ms=execution_time_ms,
+                        source="self_task",  # Mark as self-task result
+                    )
+                    logger.info(f"[Self-Task] Injected result into chat session {request.chat_session_id}")
+                else:
+                    logger.warning(f"[Self-Task] Cannot inject result: session {request.chat_session_id} not found or not owned by user")
+            except Exception as e:
+                logger.warning(f"[Self-Task] Failed to inject result into chat session: {e}")
+
+        # Broadcast self-task completion event
+        if _websocket_manager:
+            try:
+                await _websocket_manager.broadcast(json.dumps({
+                    "type": "agent_activity",
+                    "agent_name": agent_name,
+                    "activity_type": "self_task",
+                    "activity_state": "completed" if result.status == TaskExecutionStatus.SUCCESS else "failed",
+                    "action": f"Background task completed",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "details": {
+                        "execution_id": execution_id,
+                        "chat_session_id": request.chat_session_id,
+                        "cost_usd": result.cost,
+                        "execution_time_ms": execution_time_ms,
+                        "response_preview": (result.response or "")[:200],
+                        "inject_result": request.inject_result,
+                        "result_injected": request.inject_result and request.chat_session_id is not None,
+                    }
+                }))
+            except Exception as e:
+                logger.warning(f"[Self-Task] WebSocket broadcast failed: {e}")
+
     logger.info(
         f"[Task Async] Completed background task for agent '{agent_name}', "
         f"execution_id={execution_id}, status={result.status}"
@@ -659,10 +734,22 @@ async def execute_parallel_task(
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
 
+    # SELF-EXEC-001: Security validation - verify X-Source-Agent matches MCP key's agent scope
+    # This prevents header spoofing where a caller claims to be a different agent
+    if x_source_agent and current_user.agent_name:
+        if x_source_agent != current_user.agent_name:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Source agent header '{x_source_agent}' doesn't match API key scope '{current_user.agent_name}'"
+            )
+
+    # SELF-EXEC-001: Detect self-task (agent calling itself)
+    is_self_task = (x_source_agent is not None and x_source_agent == name)
+
     # Determine execution source for logging
     if x_source_agent:
         source = ExecutionSource.AGENT
-        triggered_by = "agent"
+        triggered_by = "self_task" if is_self_task else "agent"
     else:
         source = ExecutionSource.USER
         triggered_by = "manual"
@@ -694,29 +781,67 @@ async def execute_parallel_task(
     # Broadcast collaboration event if this is agent-to-agent communication
     # Track collaboration activity FIRST (belongs to source agent) - mirrors /api/chat pattern
     collaboration_activity_id = None
-    if x_source_agent:
-        await broadcast_collaboration_event(
-            source_agent=x_source_agent,
-            target_agent=name,
-            action="parallel_task"
-        )
+    self_task_activity_id = None
 
-        # Track agent collaboration activity (belongs to source agent for Dashboard arrows)
-        collaboration_activity_id = await activity_service.track_activity(
-            agent_name=x_source_agent,  # Activity belongs to source agent (the caller)
-            activity_type=ActivityType.AGENT_COLLABORATION,
-            user_id=current_user.id,
-            triggered_by="agent",
-            related_execution_id=execution_id,  # Database execution ID for structured queries
-            details={
-                "source_agent": x_source_agent,
-                "target_agent": name,
-                "action": "parallel_task",
-                "message_preview": request.message[:100],
-                "execution_id": execution_id,  # Also in details for WebSocket events
-                "parallel_mode": True
-            }
-        )
+    if x_source_agent:
+        if is_self_task:
+            # SELF-EXEC-001: Self-task - track as SELF_TASK activity (belongs to the agent itself)
+            self_task_activity_id = await activity_service.track_activity(
+                agent_name=name,  # Activity belongs to the agent running the self-task
+                activity_type=ActivityType.SELF_TASK,
+                user_id=current_user.id,
+                triggered_by="self_task",
+                related_execution_id=execution_id,
+                details={
+                    "agent_name": name,
+                    "action": "self_task",
+                    "message_preview": request.message[:100],
+                    "execution_id": execution_id,
+                    "parallel_mode": True,
+                    "inject_result": request.inject_result,
+                    "chat_session_id": request.chat_session_id,
+                }
+            )
+            # Broadcast self-task event (distinct from collaboration)
+            if _websocket_manager:
+                await _websocket_manager.broadcast(json.dumps({
+                    "type": "agent_activity",
+                    "agent_name": name,
+                    "activity_type": "self_task",
+                    "activity_state": "started",
+                    "action": f"Background task: {request.message[:50]}...",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "details": {
+                        "execution_id": execution_id,
+                        "chat_session_id": request.chat_session_id,
+                        "message_preview": request.message[:100],
+                        "inject_result": request.inject_result,
+                    }
+                }))
+        else:
+            # Regular agent-to-agent collaboration
+            await broadcast_collaboration_event(
+                source_agent=x_source_agent,
+                target_agent=name,
+                action="parallel_task"
+            )
+
+            # Track agent collaboration activity (belongs to source agent for Dashboard arrows)
+            collaboration_activity_id = await activity_service.track_activity(
+                agent_name=x_source_agent,  # Activity belongs to source agent (the caller)
+                activity_type=ActivityType.AGENT_COLLABORATION,
+                user_id=current_user.id,
+                triggered_by="agent",
+                related_execution_id=execution_id,  # Database execution ID for structured queries
+                details={
+                    "source_agent": x_source_agent,
+                    "target_agent": name,
+                    "action": "parallel_task",
+                    "message_preview": request.message[:100],
+                    "execution_id": execution_id,  # Also in details for WebSocket events
+                    "parallel_mode": True
+                }
+            )
 
     # Async mode: pre-acquire slot synchronously so at-capacity returns 429 upfront
     # (preserves existing client contract), then delegate the lifecycle to
@@ -801,6 +926,8 @@ async def execute_parallel_task(
                 user_id=current_user.id,
                 user_email=current_user.email or current_user.username,
                 subscription_id=_task_subscription_id,
+                is_self_task=is_self_task,
+                self_task_activity_id=self_task_activity_id,
             )
         )
         bg_task.add_done_callback(_on_task_done)

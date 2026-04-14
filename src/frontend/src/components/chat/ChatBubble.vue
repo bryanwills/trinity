@@ -13,6 +13,44 @@
     </div>
     <p v-if="formattedTime" class="text-xs text-gray-400 dark:text-gray-500 mt-1 text-right">{{ formattedTime }}</p>
   </div>
+  <!-- Self-task result message (SELF-EXEC-001) - collapsible by default -->
+  <div
+    v-else-if="source === 'self_task'"
+    class="max-w-[85%]"
+  >
+    <div class="rounded-xl px-4 py-3 bg-purple-50 dark:bg-purple-900/20 text-gray-900 dark:text-white shadow-sm border border-purple-200 dark:border-purple-800">
+      <!-- Self-task header with collapse toggle -->
+      <div
+        class="flex items-center gap-2 mb-2 text-purple-600 dark:text-purple-400 cursor-pointer"
+        @click="selfTaskExpanded = !selfTaskExpanded"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        <span class="text-xs uppercase tracking-wide font-medium">Background Task Result</span>
+        <svg
+          class="w-3 h-3 ml-auto transition-transform"
+          :class="{ 'rotate-180': selfTaskExpanded }"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+        </svg>
+      </div>
+      <!-- Collapsed preview -->
+      <div v-if="!selfTaskExpanded" class="text-sm text-gray-500 dark:text-gray-400 truncate">
+        {{ contentPreview }}
+      </div>
+      <!-- Expanded content -->
+      <div
+        v-else
+        class="prose prose-sm dark:prose-invert max-w-none prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-0 prose-pre:my-2 prose-code:text-indigo-600 dark:prose-code:text-indigo-400 prose-code:bg-gray-100 dark:prose-code:bg-gray-700 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none"
+        v-html="renderedContent"
+      ></div>
+    </div>
+    <p v-if="formattedTime" class="text-xs text-gray-400 dark:text-gray-500 mt-1">{{ formattedTime }}</p>
+  </div>
   <!-- Assistant message (markdown rendered) -->
   <div
     v-else
@@ -33,7 +71,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { renderMarkdown } from '../../utils/markdown'
 
 const props = defineProps({
@@ -56,8 +94,18 @@ const props = defineProps({
   }
 })
 
+// SELF-EXEC-001: Self-task results start collapsed
+const selfTaskExpanded = ref(false)
+
 const renderedContent = computed(() => {
   return renderMarkdown(props.content)
+})
+
+// SELF-EXEC-001: Preview for collapsed self-task results
+const contentPreview = computed(() => {
+  const text = props.content || ''
+  const firstLine = text.split('\n')[0] || ''
+  return firstLine.length > 100 ? firstLine.substring(0, 100) + '...' : firstLine
 })
 
 const formattedTime = computed(() => {

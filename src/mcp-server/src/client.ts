@@ -517,6 +517,9 @@ export class TrinityClient {
       system_prompt?: string;
       timeout_seconds?: number;
       async_mode?: boolean;
+      // SELF-EXEC-001: Self-task options
+      inject_result?: boolean;
+      chat_session_id?: string;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string }
@@ -548,6 +551,9 @@ export class TrinityClient {
       system_prompt: options?.system_prompt,
       timeout_seconds: options?.timeout_seconds,
       async_mode: options?.async_mode,
+      // SELF-EXEC-001: Self-task options for result injection
+      inject_result: options?.inject_result,
+      chat_session_id: options?.chat_session_id,
     };
 
     // Async mode returns immediately; sync mode waits for full execution
