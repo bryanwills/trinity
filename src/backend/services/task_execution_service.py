@@ -115,6 +115,97 @@ async def agent_post_with_retry(
 
 
 # ---------------------------------------------------------------------------
+# Terminate helper (Issue #61)
+# ---------------------------------------------------------------------------
+
+TERMINATE_TIMEOUT = 5.0  # Short timeout for terminate call — don't block failure path
+
+
+async def terminate_execution_on_agent(
+    agent_name: str,
+    execution_id: str,
+) -> bool:
+    """
+    Terminate an execution on an agent container (Issue #61).
+
+    Calls POST /api/executions/{id}/terminate on the agent to kill the
+    running Claude process. This prevents orphaned processes from
+    accumulating when the backend times out waiting for a response.
+
+    Best-effort: failures are logged but don't raise exceptions.
+    The cleanup service watchdog provides a safety net.
+
+    Args:
+        agent_name: The agent container name.
+        execution_id: The execution to terminate.
+
+    Returns:
+        True if termination succeeded or process already finished,
+        False if termination failed (agent unreachable, etc.).
+    """
+    if not execution_id:
+        return False
+
+    agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/terminate"
+
+    try:
+        async with httpx.AsyncClient(timeout=TERMINATE_TIMEOUT) as client:
+            response = await client.post(agent_url)
+
+            if response.status_code < 300:
+                result = response.json()
+                status = result.get("status", "unknown")
+                if status == "terminated":
+                    logger.info(
+                        f"[TaskExecService] Terminated execution {execution_id} "
+                        f"on agent '{agent_name}'"
+                    )
+                elif status == "already_finished":
+                    logger.debug(
+                        f"[TaskExecService] Execution {execution_id} already finished "
+                        f"on agent '{agent_name}'"
+                    )
+                return True
+
+            elif response.status_code == 404:
+                # Execution not found in agent's registry — may have finished
+                # between timeout and terminate call
+                logger.debug(
+                    f"[TaskExecService] Execution {execution_id} not found on "
+                    f"agent '{agent_name}' (may have finished)"
+                )
+                return True
+
+            else:
+                logger.warning(
+                    f"[TaskExecService] Terminate returned {response.status_code} "
+                    f"for execution {execution_id} on agent '{agent_name}'"
+                )
+                return False
+
+    except httpx.TimeoutException:
+        logger.warning(
+            f"[TaskExecService] Terminate timed out for execution {execution_id} "
+            f"on agent '{agent_name}' — watchdog will clean up"
+        )
+        return False
+
+    except httpx.ConnectError:
+        logger.warning(
+            f"[TaskExecService] Could not reach agent '{agent_name}' to terminate "
+            f"execution {execution_id} — watchdog will clean up"
+        )
+        return False
+
+    except Exception as e:
+        logger.warning(
+            f"[TaskExecService] Error terminating execution {execution_id} "
+            f"on agent '{agent_name}': {e}"
+        )
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -365,6 +456,11 @@ class TaskExecutionService:
             elapsed = int((datetime.utcnow() - start_time).total_seconds())
             error_msg = f"Task execution timed out after {timeout_seconds} seconds"
             logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s)")
+
+            # Issue #61: Terminate the execution on the agent to prevent orphaned
+            # Claude processes from accumulating. Best-effort — watchdog is safety net.
+            await terminate_execution_on_agent(agent_name, execution_id)
+
             # Don't overwrite cancelled executions
             if execution_id:
                 existing = db.get_execution(execution_id)

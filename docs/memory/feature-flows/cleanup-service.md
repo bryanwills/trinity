@@ -96,7 +96,7 @@ Seven sequential operations, each wrapped in individual try/except. Watchdog run
    ```
    Calls `DatabaseManager.mark_stale_activities_failed()` which delegates to `ActivityOperations.mark_stale_activities_failed()`.
 
-5. **Cleanup stale Redis slots and fail execution records** (lines 123-148, Issue #219, #226)
+5. **Cleanup stale Redis slots and fail execution records** (lines 123-148, Issue #219, #226, #61)
    ```python
    slot_service = get_slot_service()
    agent_timeouts = db.get_all_execution_timeouts()  # #226: per-agent TTL
@@ -107,9 +107,11 @@ Seven sequential operations, each wrapped in individual try/except. Watchdog run
        for execution_id in execution_ids:
            if execution_id in confirmed_running_ids:
                continue  # Watchdog verified still running
+           # Issue #61: Attempt to terminate process before marking failed (best-effort)
+           await self._terminate_on_agent(client, agent_name, execution_id)
            db.fail_stale_slot_execution(execution_id, error=...)
    ```
-   Calls `SlotService.cleanup_stale_slots()` with per-agent timeouts (#226). The service scans all `agent:slots:*` keys, computes each agent's TTL as `timeout_seconds + 5 min buffer` (or default 20 min if no timeout configured), removes entries older than that TTL, and returns a dict mapping agent names to reclaimed execution IDs. The cleanup service then fails the corresponding `schedule_executions` DB records using a guarded update (`WHERE status = 'running'`), skipping any IDs the watchdog confirmed as still running.
+   Calls `SlotService.cleanup_stale_slots()` with per-agent timeouts (#226). The service scans all `agent:slots:*` keys, computes each agent's TTL as `timeout_seconds + 5 min buffer` (or default 20 min if no timeout configured), removes entries older than that TTL, and returns a dict mapping agent names to reclaimed execution IDs. **Issue #61**: Before failing the execution, the cleanup service attempts to terminate any orphaned Claude process on the agent (best-effort, failures logged). The cleanup service then fails the corresponding `schedule_executions` DB records using a guarded update (`WHERE status = 'running'`), skipping any IDs the watchdog confirmed as still running.
 
 ### Watchdog Reconciliation (Issue #129)
 

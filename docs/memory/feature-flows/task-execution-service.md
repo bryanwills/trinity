@@ -73,7 +73,26 @@ async def agent_post_with_retry(
 
 Exponential backoff: delay = `retry_delay * (2 ** attempt)`. Handles `httpx.ConnectError` for agent servers still booting.
 
-#### TaskExecutionService.execute_task() (line 113)
+#### terminate_execution_on_agent() (line 120, Issue #61)
+
+When the backend's HTTP client times out waiting for an agent response, this helper kills the orphaned Claude process:
+
+```python
+async def terminate_execution_on_agent(
+    agent_name: str,
+    execution_id: str,
+) -> bool:
+```
+
+Calls `POST /api/executions/{id}/terminate` on the agent container, which triggers:
+1. SIGINT (graceful termination, waits 5s)
+2. SIGKILL (force kill if process doesn't respond)
+
+Best-effort: failures are logged but don't raise exceptions. The cleanup service watchdog provides a safety net. Returns `True` for success/already_finished/not_found (404 means process may have finished), `False` for errors.
+
+**Timeout**: 5 seconds (constant `TERMINATE_TIMEOUT`). Short timeout to avoid blocking the failure path.
+
+#### TaskExecutionService.execute_task() (line 209)
 
 Full execution lifecycle in one method:
 
@@ -268,7 +287,7 @@ The service catches all errors and returns `TaskExecutionResult` with `status=Ta
 | Error Case | Service Result | chat.py HTTP | public.py HTTP |
 |------------|---------------|--------------|----------------|
 | Slot not acquired | `status=FAILED, error="Agent at capacity..."` | 429 | 429 |
-| Agent connect timeout | `status=FAILED, error="timed out...", error_code=TIMEOUT` | 504 | 504 |
+| Agent timeout (#61) | Terminates agent process, then `status=FAILED, error="timed out...", error_code=TIMEOUT` | 504 | 504 |
 | Agent HTTP error | `status=FAILED, error=detail` | 503 | 502 |
 | Auth failure (#285) | `status=FAILED, error=detail, error_code=AUTH` | 503 | 503 |
 | Unexpected exception | `status=FAILED, error=str(e)` | 503 | 502 |
@@ -327,7 +346,7 @@ execute_task()
   |      +-- Retries: 3 attempts, exponential backoff (1s, 2s, 4s)
   |      |
   |      +-- httpx.ConnectError --> retry or fail
-  |      +-- httpx.TimeoutException --> fail
+  |      +-- httpx.TimeoutException --> terminate_execution_on_agent() --> fail (#61)
   |      +-- httpx.HTTPError --> fail
   |
   +-- 5. sanitize_execution_log() + sanitize_response()

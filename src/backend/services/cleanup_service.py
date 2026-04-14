@@ -200,6 +200,14 @@ class CleanupService:
                         )
                         continue
                     try:
+                        # Issue #61: Attempt to terminate execution on agent before
+                        # marking it failed. Best-effort — may fail if agent unreachable.
+                        try:
+                            async with httpx.AsyncClient(timeout=WATCHDOG_HTTP_TIMEOUT) as term_client:
+                                await self._terminate_on_agent(term_client, agent_name, execution_id)
+                        except Exception as term_err:
+                            logger.debug(f"[Cleanup] Could not terminate {execution_id}: {term_err}")
+
                         updated = db.fail_stale_slot_execution(
                             execution_id=execution_id,
                             error=f"Stale execution — slot TTL expired for agent '{agent_name}', cleaned by cleanup service",
