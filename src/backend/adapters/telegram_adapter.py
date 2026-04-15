@@ -154,11 +154,13 @@ class TelegramAdapter(ChannelAdapter):
             is_reply = self._is_reply_to_bot(message, bot_id)
 
             if not is_mentioned and not is_reply:
-                # Check trigger mode — if "all", process anyway
+                # Check trigger mode — if "all" or "observe", process anyway
+                # Issue #349: "observe" mode passes all messages but agent can return [NO_REPLY]
                 binding = db.get_telegram_binding(agent_name)
                 if binding:
                     group_config = db.get_telegram_group_config(binding["id"], chat_id)
-                    if not group_config or group_config.get("trigger_mode") != "all":
+                    trigger_mode = group_config.get("trigger_mode") if group_config else None
+                    if trigger_mode not in ("all", "observe"):
                         return None
                 else:
                     return None

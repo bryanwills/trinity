@@ -94,7 +94,7 @@
             </div>
 
             <!-- Trigger Mode -->
-            <div class="flex items-center gap-4 text-xs">
+            <div class="flex items-center gap-4 text-xs flex-wrap">
               <label class="flex items-center gap-1.5 cursor-pointer">
                 <input
                   type="radio"
@@ -116,6 +116,17 @@
                   class="text-indigo-600 focus:ring-indigo-500"
                 />
                 <span class="text-gray-600 dark:text-gray-400">All messages</span>
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer" title="Agent sees all messages but can choose not to respond">
+                <input
+                  type="radio"
+                  :name="`trigger-${group.id}`"
+                  value="observe"
+                  :checked="group.trigger_mode === 'observe'"
+                  @change="updateGroup(group, { trigger_mode: 'observe' })"
+                  class="text-indigo-600 focus:ring-indigo-500"
+                />
+                <span class="text-gray-600 dark:text-gray-400">Observe</span>
               </label>
             </div>
 

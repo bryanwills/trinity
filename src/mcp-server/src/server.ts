@@ -20,6 +20,7 @@ import { createMonitoringTools } from "./tools/monitoring.js";
 import { createNeverminedTools } from "./tools/nevermined.js";
 import { createExecutionTools } from "./tools/executions.js";
 import { createEventTools } from "./tools/events.js";
+import { createChannelTools } from "./tools/channels.js";
 import type { McpAuthContext } from "./types.js";
 
 export interface ServerConfig {
@@ -272,8 +273,13 @@ export async function createServer(config: ServerConfig = {}) {
   server.addTool(eventTools.listEventSubscriptions);
   server.addTool(eventTools.deleteEventSubscription);
 
-  const totalTools = Object.keys(agentTools).length + Object.keys(chatTools).length + Object.keys(systemTools).length + Object.keys(docsTools).length + Object.keys(skillsTools).length + Object.keys(scheduleTools).length + Object.keys(tagTools).length + Object.keys(notificationTools).length + Object.keys(subscriptionTools).length + Object.keys(monitoringTools).length + Object.keys(neverminedTools).length + Object.keys(executionTools).length + Object.keys(eventTools).length;
-  console.log(`Registered ${totalTools} tools (${Object.keys(agentTools).length} agent, ${Object.keys(chatTools).length} chat, ${Object.keys(systemTools).length} system, ${Object.keys(docsTools).length} docs, ${Object.keys(skillsTools).length} skills, ${Object.keys(scheduleTools).length} schedule, ${Object.keys(tagTools).length} tags, ${Object.keys(notificationTools).length} notifications, ${Object.keys(subscriptionTools).length} subscriptions, ${Object.keys(monitoringTools).length} monitoring, ${Object.keys(neverminedTools).length} nevermined, ${Object.keys(executionTools).length} executions, ${Object.keys(eventTools).length} events)`);
+  // Register channel tools (2 tools) - Issue #349
+  const channelTools = createChannelTools(client, requireApiKey);
+  server.addTool(channelTools.listChannelGroups);
+  server.addTool(channelTools.sendGroupMessage);
+
+  const totalTools = Object.keys(agentTools).length + Object.keys(chatTools).length + Object.keys(systemTools).length + Object.keys(docsTools).length + Object.keys(skillsTools).length + Object.keys(scheduleTools).length + Object.keys(tagTools).length + Object.keys(notificationTools).length + Object.keys(subscriptionTools).length + Object.keys(monitoringTools).length + Object.keys(neverminedTools).length + Object.keys(executionTools).length + Object.keys(eventTools).length + Object.keys(channelTools).length;
+  console.log(`Registered ${totalTools} tools (${Object.keys(agentTools).length} agent, ${Object.keys(chatTools).length} chat, ${Object.keys(systemTools).length} system, ${Object.keys(docsTools).length} docs, ${Object.keys(skillsTools).length} skills, ${Object.keys(scheduleTools).length} schedule, ${Object.keys(tagTools).length} tags, ${Object.keys(notificationTools).length} notifications, ${Object.keys(subscriptionTools).length} subscriptions, ${Object.keys(monitoringTools).length} monitoring, ${Object.keys(neverminedTools).length} nevermined, ${Object.keys(executionTools).length} executions, ${Object.keys(eventTools).length} events, ${Object.keys(channelTools).length} channels)`);
 
   return { server, port, client, requireApiKey };
 }

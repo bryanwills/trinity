@@ -404,14 +404,18 @@ TelegramAdapter.parse_message(update)
     |  - Detect group vs private (chat.type in {"group", "supergroup"})
     |  - Check @mention in entities → _is_bot_mentioned()
     |  - Check reply_to_message → _is_reply_to_bot()
-    |  - If neither and trigger_mode != "all" → return None (skip)
+    |  - If neither and trigger_mode not in {"all", "observe"} → return None (skip)
     |  - Strip @mention from text for cleaner agent input
     v
 ChannelMessageRouter.handle_message()
     |  - Rate limit with per-group key (telegram:{bot_id}:group:{chat_id})
     |  - Silent drop on rate limit (no public error message in group)
+    |  - Add sender identity context (Issue #349): "[Group: {title}]\n[From: @{username} ({first_name})]"
     |  - Fresh context per message (no prior session history — prevents context bleed)
     |  - Execute via TaskExecutionService
+    v
+Response Check (Issue #349 — observe mode):
+    |  - If response contains "[NO_REPLY]" → skip sending, return silently
     v
 TelegramAdapter.send_response()
     |  - Reply to triggering message via reply_parameters (threaded in group)
@@ -419,13 +423,36 @@ TelegramAdapter.send_response()
 User sees response as reply in group
 ```
 
+### Sender Identity (Issue #349)
+
+In group chats, the agent previously couldn't identify who sent messages. The router now prepends sender context:
+
+```
+[Group: My Community Chat]
+[From: @johndoe (John)]
+
+Hey, what time does the meeting start?
+```
+
+**Implementation**: `ChannelMessageRouter._format_group_sender()` in `src/backend/adapters/message_router.py` extracts:
+- `chat_title` from message metadata
+- `username` from message metadata (if available)
+- `first_name` from `raw_message.from` (fallback to `User #{sender_id}`)
+
+This enables the agent to:
+- Address users by name in responses
+- Track who asked what in multi-user conversations
+- Implement user-specific behavior if needed
+
 ### Trigger Rules
 
-| Condition | trigger_mode=mention | trigger_mode=all |
-|-----------|---------------------|-----------------|
-| @mention in entities | ✅ Process | ✅ Process |
-| Reply to bot's message | ✅ Process | ✅ Process |
-| Regular message (no mention) | ❌ Skip | ✅ Process |
+| Condition | trigger_mode=mention | trigger_mode=all | trigger_mode=observe |
+|-----------|---------------------|-----------------|---------------------|
+| @mention in entities | ✅ Process | ✅ Process | ✅ Process |
+| Reply to bot's message | ✅ Process | ✅ Process | ✅ Process |
+| Regular message (no mention) | ❌ Skip | ✅ Process | ✅ Process (agent may skip reply) |
+
+**Observation Mode (Issue #349)**: In `observe` mode, the agent sees all messages (like `all` mode) but can return `[NO_REPLY]` anywhere in its response to suppress sending. This enables selective engagement — the agent monitors conversation context and chooses when to participate.
 
 ### Member Events
 
@@ -497,6 +524,51 @@ When `group_auth_mode: "any_verified"` is set on the agent's access policy, grou
 - `get_group_verified_email(binding_id, chat_id) -> str | None`
 - `set_group_verified(binding_id, chat_id, email)`
 - `clear_group_verification(binding_id, chat_id)`
+
+### Proactive Group Messaging (Issue #349)
+
+Agents can send messages to groups without being triggered by a user message. Use cases include scheduled announcements, alerts, and status updates.
+
+**API Endpoint** (`src/backend/routers/telegram.py`):
+```
+POST /api/agents/{agent_name}/telegram/groups/{chat_id}/messages
+Body: { "message": "Hello group!" }
+```
+
+**Rate Limiting**:
+- Per-group: 10 messages/hour/group
+- Per-agent: 100 messages/hour total across all groups
+- In-memory rate limit buckets cleared on backend restart
+
+**Response**:
+```json
+{
+  "ok": true,
+  "chat_id": "-100123456",
+  "group_title": "My Community",
+  "message_id": 12345
+}
+```
+
+**MCP Tools** (`src/mcp-server/src/tools/channels.ts`):
+
+| Tool | Description |
+|------|-------------|
+| `list_channel_groups` | List Telegram groups the agent is connected to. Returns chat_id, title, type, trigger_mode. |
+| `send_group_message` | Send a proactive message to a group. Supports Telegram HTML formatting. Max 4096 chars. |
+
+**Agent Usage Example**:
+```
+# List available groups
+list_channel_groups(channel_type="telegram")
+
+# Send announcement
+send_group_message(
+    channel_type="telegram",
+    chat_id="-100123456",
+    message="<b>Update</b>: New features deployed!"
+)
+```
 
 ### Security Notes
 
@@ -632,3 +704,4 @@ No changes to `src/backend/adapters/transports/telegram_webhook.py`. The transpo
 | 2026-04-11 | TGRAM-GROUP: Group chat support added. Trigger modes, welcome messages, member events. |
 | 2026-04-12 | #311: `/login` email verification for DMs integrated with unified access control. |
 | 2026-04-15 | Group authentication mode (`group_auth_mode: "any_verified"`). Groups can require at least one verified member. New columns `verified_by_email`/`verified_at` on `telegram_group_configs`. New adapter methods for group verification. |
+| 2026-04-15 | #349: Phase 1-3 enhancements. Sender identity in group messages (`_format_group_sender`). Observation mode (`trigger_mode: "observe"`) with `[NO_REPLY]` marker. Proactive group messaging endpoint with rate limiting. MCP tools `list_channel_groups` and `send_group_message`. |

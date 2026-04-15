@@ -1413,4 +1413,50 @@ export class TrinityClient {
       `/api/nevermined/agents/${encodeURIComponent(agentName)}/payments?limit=${limit}`
     );
   }
+
+  // ============================================================================
+  // Channel Groups (Issue #349 - Proactive Messaging)
+  // ============================================================================
+
+  /**
+   * List Telegram groups for an agent
+   */
+  async listTelegramGroups(agentName: string): Promise<Array<{
+    id: number;
+    binding_id: number;
+    chat_id: string;
+    chat_title: string | null;
+    chat_type: string;
+    trigger_mode: string;
+    welcome_enabled: boolean;
+    welcome_text: string | null;
+    is_active: boolean;
+    created_at: string;
+    updated_at: string;
+  }>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/telegram/groups`
+    );
+  }
+
+  /**
+   * Send a proactive message to a Telegram group
+   */
+  async sendTelegramGroupMessage(
+    agentName: string,
+    chatId: string,
+    message: string
+  ): Promise<{
+    ok: boolean;
+    message_id?: number;
+    chat_id: string;
+    group_title?: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/telegram/groups/${encodeURIComponent(chatId)}/messages`,
+      { message }
+    );
+  }
 }

@@ -140,6 +140,7 @@ The test suite covers:
 - **Agent Files** (test_agent_files.py) - File browser, downloads
 - **Agent Sharing** (test_agent_sharing.py) - Share/unshare agents, whitelist auto-add with `default_role="user"` (#314)
 - **Channel Access Control** (test_channel_access_control.py) - Per-agent access policy (require_email, open_access, group_auth_mode), access requests inbox (#311) [SMOKE + Agent]
+- **Telegram Groups** (test_telegram_groups.py) - Trigger mode validation (mention/all/observe), proactive message endpoint validation (#349) [SMOKE + Agent]
 - **Agent Permissions** (test_agent_permissions.py) - Agent-to-agent permission CRUD, defaults, cascade delete (Req 9.10)
 - **Agent Git** (test_agent_git.py) - Git sync operations
 - **Agent Metrics** (test_agent_metrics.py) - Custom metrics endpoint (Req 9.9)
@@ -222,8 +223,8 @@ The test suite covers:
 
 ## Test Suite Statistics
 
-**Total Tests**: ~2,175 tests across 116 test files
-**Smoke Tests**: ~564 tests (fast, no agent creation)
+**Total Tests**: ~2,180 tests across 117 test files
+**Smoke Tests**: ~569 tests (fast, no agent creation)
 **Unit Tests**: ~46 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging)
 **Core Tests (not slow)**: ~2,069 tests
 **Slow Tests**: ~89 tests (chat execution, fleet ops, system agent ops, execution termination)
@@ -258,7 +259,19 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 
 | Test File | Description | Tests Added |
 |-----------|-------------|-------------|
+| `test_telegram_groups.py` | Telegram group chat API tests: trigger mode validation, proactive messaging endpoint (#349) | 5 tests |
 | `test_channel_access_control.py` | Added `group_auth_mode` field tests for Telegram group authentication (#311) | 3 tests added, 4 tests updated |
+
+**Telegram Groups (#349)** (`test_telegram_groups.py`):
+
+- **TestTriggerModeValidation**:
+  - `test_invalid_trigger_mode_rejected` — PUT with invalid trigger_mode returns 400 (validation) or 404 (no binding)
+  - `test_observe_mode_accepted` — "observe" is a valid trigger_mode value (not rejected by validation)
+  
+- **TestProactiveMessageEndpoint**:
+  - `test_proactive_message_requires_binding` — POST /telegram/groups/{chat_id}/messages requires an existing Telegram binding (404 without)
+  - `test_proactive_message_requires_message` — Empty message body returns 400 or 404
+  - `test_proactive_message_validates_length` — Message exceeding 4096 chars returns 400 or 404
 
 **Group Auth Mode for Telegram Groups**: Updated `test_channel_access_control.py` to test the new `group_auth_mode` field on access policy:
 - `test_get_policy_returns_shape` — asserts `group_auth_mode` field is returned as string

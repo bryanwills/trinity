@@ -41,6 +41,9 @@ _DEFAULT_CHANNEL_ALLOWED_TOOLS = "WebSearch,WebFetch"
 _FILE_UPLOAD_RATE_LIMIT_MAX = 5     # file uploads per window
 _FILE_UPLOAD_RATE_LIMIT_WINDOW = 60 # seconds
 
+# No-reply marker for observation mode (Issue #349)
+_NO_REPLY_MARKER = "[NO_REPLY]"
+
 # Outbound file extraction from agent responses
 _OUTBOUND_MIN_BLOCK_CHARS = 100
 _OUTBOUND_MAX_FILES = 5
@@ -74,6 +77,48 @@ def _get_channel_timeout() -> int:
 def _get_channel_allowed_tools() -> List[str]:
     raw = settings_service.get_setting("channel_allowed_tools", _DEFAULT_CHANNEL_ALLOWED_TOOLS)
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Group chat sender formatting (Issue #349)
+# ---------------------------------------------------------------------------
+
+def _format_group_sender(message: NormalizedMessage) -> str:
+    """
+    Format sender identity for group chat context.
+
+    Extracts username and first_name from message metadata to provide
+    clear sender attribution in group conversations.
+
+    Returns a formatted string like:
+        [Group: AI Builders Chat]
+        [From: @johndoe (John)]
+    """
+    parts = []
+
+    # Add group title if available
+    chat_title = message.metadata.get("chat_title")
+    if chat_title:
+        parts.append(f"[Group: {chat_title}]")
+
+    # Extract sender info from metadata
+    username = message.metadata.get("username")
+    raw_message = message.metadata.get("raw_message", {})
+    from_user = raw_message.get("from", {}) if isinstance(raw_message, dict) else {}
+    first_name = from_user.get("first_name")
+
+    # Format sender identity with available info
+    if username and first_name:
+        parts.append(f"[From: @{username} ({first_name})]")
+    elif username:
+        parts.append(f"[From: @{username}]")
+    elif first_name:
+        parts.append(f"[From: {first_name}]")
+    else:
+        # Fallback to sender_id if no identity info available
+        parts.append(f"[From: User #{message.sender_id}]")
+
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -307,8 +352,10 @@ class ChannelMessageRouter:
         # 7. Build context prompt (same as web public chat)
         # In group chats, use fresh context (no prior history) to prevent
         # leaking prior private conversation context into public group replies.
+        # Issue #349: Include sender identity in group messages so agent knows who is speaking.
         if is_group:
-            context_prompt = message.text
+            sender_context = _format_group_sender(message)
+            context_prompt = f"{sender_context}\n\n{message.text}"
         else:
             context_prompt = db.build_public_chat_context(session_id, message.text)
         logger.debug(f"[ROUTER:{channel}] Step 7 - context built ({len(context_prompt)} chars, group={is_group})")
@@ -419,6 +466,16 @@ class ChannelMessageRouter:
             logger.error(f"[ROUTER:{channel}] Outbound file extraction failed: {e}", exc_info=True)
 
         # 12. Send response to channel
+        # Issue #349: Check for [NO_REPLY] marker (observation mode)
+        # Agent can return "[NO_REPLY]" to indicate it observed the message
+        # but chooses not to respond. This enables selective engagement in groups.
+        if send_text.strip() == _NO_REPLY_MARKER:
+            logger.info(f"[ROUTER:{channel}] Agent returned {_NO_REPLY_MARKER}, skipping response")
+            # Still run cleanup but skip sending
+            await self._cleanup_uploads(container, upload_dir)
+            logger.info(f"[ROUTER:{channel}] DONE (no reply): {agent_name}, execution_id={result.execution_id}")
+            return
+
         logger.debug(f"[ROUTER:{channel}] Step 12 - sending response")
         response_metadata = {"bot_token": bot_token, "agent_name": agent_name}
         if is_group:

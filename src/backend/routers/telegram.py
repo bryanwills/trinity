@@ -114,6 +114,11 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     welcome_text: Optional[str] = None
 
 
+class TelegramGroupMessageRequest(BaseModel):
+    """Request model for proactive group messaging (Issue #349)."""
+    message: str
+
+
 @auth_router.get("/{agent_name}/telegram", response_model=TelegramBindingResponse)
 async def get_telegram_binding(
     agent_name: str,
@@ -317,8 +322,9 @@ async def update_telegram_group(
 ):
     """Update a group's trigger mode or welcome message settings."""
     # Validate trigger_mode if provided
-    if config.trigger_mode is not None and config.trigger_mode not in ("mention", "all"):
-        raise HTTPException(status_code=400, detail="trigger_mode must be 'mention' or 'all'")
+    # Issue #349: Added 'observe' mode - agent sees all messages but can return [NO_REPLY]
+    if config.trigger_mode is not None and config.trigger_mode not in ("mention", "all", "observe"):
+        raise HTTPException(status_code=400, detail="trigger_mode must be 'mention', 'all', or 'observe'")
 
     # Validate welcome_text length
     if config.welcome_text is not None and len(config.welcome_text) > 4096:
@@ -364,3 +370,138 @@ async def delete_telegram_group(
 
     db.deactivate_telegram_group_config(binding["id"], target["chat_id"])
     return {"ok": True, "message": "Group config removed"}
+
+
+# =========================================================================
+# Proactive Group Messaging (Issue #349)
+# =========================================================================
+
+# Rate limiting constants
+_PROACTIVE_RATE_LIMIT_PER_GROUP = 10     # messages per hour per group
+_PROACTIVE_RATE_LIMIT_PER_AGENT = 100    # messages per hour per agent
+_PROACTIVE_RATE_LIMIT_WINDOW = 3600      # 1 hour in seconds
+
+# In-memory rate limit buckets (agent:group → timestamps)
+_proactive_rate_buckets: dict = {}
+
+
+def _check_proactive_rate_limit(agent_name: str, chat_id: str) -> tuple[bool, str]:
+    """
+    Check rate limits for proactive messaging.
+
+    Returns (allowed, error_message). If not allowed, error_message explains why.
+    """
+    import time
+
+    now = time.time()
+    window = _PROACTIVE_RATE_LIMIT_WINDOW
+
+    # Clean old entries
+    group_key = f"{agent_name}:{chat_id}"
+    agent_key = f"{agent_name}:*"
+
+    # Group-level check
+    group_bucket = _proactive_rate_buckets.get(group_key, [])
+    group_bucket = [t for t in group_bucket if now - t < window]
+    _proactive_rate_buckets[group_key] = group_bucket
+
+    if len(group_bucket) >= _PROACTIVE_RATE_LIMIT_PER_GROUP:
+        return False, f"Rate limited: max {_PROACTIVE_RATE_LIMIT_PER_GROUP} messages/hour to this group"
+
+    # Agent-level check (sum across all groups)
+    agent_total = 0
+    for key, bucket in list(_proactive_rate_buckets.items()):
+        if key.startswith(f"{agent_name}:"):
+            cleaned = [t for t in bucket if now - t < window]
+            _proactive_rate_buckets[key] = cleaned
+            agent_total += len(cleaned)
+
+    if agent_total >= _PROACTIVE_RATE_LIMIT_PER_AGENT:
+        return False, f"Rate limited: max {_PROACTIVE_RATE_LIMIT_PER_AGENT} proactive messages/hour"
+
+    # Allow and record
+    _proactive_rate_buckets[group_key] = group_bucket + [now]
+    return True, ""
+
+
+@auth_router.post("/{agent_name}/telegram/groups/{chat_id}/messages")
+async def send_telegram_group_message(
+    agent_name: OwnedAgentByName,
+    chat_id: str,
+    request: TelegramGroupMessageRequest,
+):
+    """
+    Send a proactive message to a Telegram group (Issue #349).
+
+    The agent must have an active binding for this group. Rate limited to
+    prevent spam: 10 messages/hour/group and 100 messages/hour/agent.
+    """
+    # Validate binding exists
+    binding = db.get_telegram_binding(agent_name)
+    if not binding:
+        raise HTTPException(status_code=404, detail="No Telegram binding found for this agent")
+
+    # Validate group belongs to this agent
+    groups = db.get_telegram_groups_for_agent(agent_name)
+    target_group = next((g for g in groups if g["chat_id"] == chat_id and g["is_active"]), None)
+    if not target_group:
+        raise HTTPException(status_code=404, detail="Group not found or not active for this agent")
+
+    # Check rate limits
+    allowed, error_msg = _check_proactive_rate_limit(agent_name, chat_id)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=error_msg)
+
+    # Validate message length
+    if not request.message or not request.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    if len(request.message) > 4096:
+        raise HTTPException(status_code=400, detail="Message exceeds Telegram's 4096 character limit")
+
+    # Get bot token and send
+    bot_token = db.get_telegram_bot_token(agent_name)
+    if not bot_token:
+        raise HTTPException(status_code=500, detail="Failed to retrieve bot token")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": request.message,
+                    "parse_mode": "HTML",
+                }
+            )
+
+            if response.status_code == 429:
+                # Telegram rate limit
+                retry_after = response.json().get("parameters", {}).get("retry_after", 60)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Telegram rate limit. Retry after {retry_after} seconds."
+                )
+
+            if response.status_code != 200:
+                error_body = response.json()
+                logger.error(f"Telegram API error: {error_body}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Telegram API error: {error_body.get('description', 'Unknown error')}"
+                )
+
+            result = response.json().get("result", {})
+            return {
+                "ok": True,
+                "message_id": result.get("message_id"),
+                "chat_id": chat_id,
+                "group_title": target_group.get("chat_title"),
+            }
+
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Telegram API timeout")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to send proactive message: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to send message")
