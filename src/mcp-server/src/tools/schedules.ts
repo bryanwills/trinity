@@ -174,6 +174,22 @@ export function createScheduleTools(
           .string()
           .optional()
           .describe("Model override for this schedule's executions (e.g., 'claude-sonnet-4-20250514'). If omitted, uses agent default."),
+        max_retries: z
+          .number()
+          .int()
+          .min(0)
+          .max(5)
+          .optional()
+          .default(1)
+          .describe("Max retry attempts on failure (0-5). Default: 1. Set to 0 to disable retries."),
+        retry_delay_seconds: z
+          .number()
+          .int()
+          .min(30)
+          .max(600)
+          .optional()
+          .default(60)
+          .describe("Seconds between retry attempts (30-600). Default: 60. Rate-limited failures use 2x delay."),
       }),
       execute: async (
         args: {
@@ -187,6 +203,8 @@ export function createScheduleTools(
           timeout_seconds?: number;
           allowed_tools?: string[];
           model?: string;
+          max_retries?: number;
+          retry_delay_seconds?: number;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -214,6 +232,8 @@ export function createScheduleTools(
           timeout_seconds: args.timeout_seconds,
           allowed_tools: args.allowed_tools,
           model: args.model,
+          max_retries: args.max_retries,
+          retry_delay_seconds: args.retry_delay_seconds,
         });
 
         console.log(`[create_agent_schedule] Created schedule '${schedule.name}' (${schedule.id}) for agent '${args.agent_name}'`);
@@ -301,6 +321,20 @@ export function createScheduleTools(
           .string()
           .optional()
           .describe("New model override for executions"),
+        max_retries: z
+          .number()
+          .int()
+          .min(0)
+          .max(5)
+          .optional()
+          .describe("New max retry attempts (0-5). If omitted, keeps current value."),
+        retry_delay_seconds: z
+          .number()
+          .int()
+          .min(30)
+          .max(600)
+          .optional()
+          .describe("New retry delay in seconds (30-600). If omitted, keeps current value."),
       }),
       execute: async (
         args: {
@@ -315,6 +349,8 @@ export function createScheduleTools(
           timeout_seconds?: number;
           allowed_tools?: string[];
           model?: string;
+          max_retries?: number;
+          retry_delay_seconds?: number;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -343,6 +379,8 @@ export function createScheduleTools(
         if (args.timeout_seconds !== undefined) updates.timeout_seconds = args.timeout_seconds;
         if (args.allowed_tools !== undefined) updates.allowed_tools = args.allowed_tools;
         if (args.model !== undefined) updates.model = args.model;
+        if (args.max_retries !== undefined) updates.max_retries = args.max_retries;
+        if (args.retry_delay_seconds !== undefined) updates.retry_delay_seconds = args.retry_delay_seconds;
 
         const schedule = await apiClient.updateAgentSchedule(
           args.agent_name,

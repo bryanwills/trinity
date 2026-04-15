@@ -128,6 +128,7 @@ from db.operator_queue import OperatorQueueOperations
 from db.event_subscriptions import EventSubscriptionOperations
 from db.telegram_channels import TelegramChannelOperations
 from db.access_requests import AccessRequestOperations
+from db.audit import PlatformAuditOperations
 
 
 def init_database():
@@ -279,6 +280,7 @@ class DatabaseManager:
         self._event_subscription_ops = EventSubscriptionOperations()
         self._telegram_channel_ops = TelegramChannelOperations()
         self._access_request_ops = AccessRequestOperations()
+        self._audit_ops = PlatformAuditOperations()
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -353,8 +355,10 @@ class DatabaseManager:
     def get_access_policy(self, agent_name: str):
         return self._agent_ops.get_access_policy(agent_name)
 
-    def set_access_policy(self, agent_name: str, require_email: bool, open_access: bool):
-        return self._agent_ops.set_access_policy(agent_name, require_email, open_access)
+    def set_access_policy(
+        self, agent_name: str, require_email: bool, open_access: bool, group_auth_mode: str = "none"
+    ):
+        return self._agent_ops.set_access_policy(agent_name, require_email, open_access, group_auth_mode)
 
     def email_has_agent_access(self, agent_name: str, email: str):
         return self._agent_ops.email_has_agent_access(agent_name, email)
@@ -468,8 +472,49 @@ class DatabaseManager:
     def get_execution_timeout(self, agent_name: str) -> int:
         return self._agent_ops.get_execution_timeout(agent_name)
 
+    def get_all_execution_timeouts(self) -> dict:
+        return self._agent_ops.get_all_execution_timeouts()
+
     def set_execution_timeout(self, agent_name: str, timeout_seconds: int) -> bool:
         return self._agent_ops.set_execution_timeout(agent_name, timeout_seconds)
+
+    # =========================================================================
+    # Backlog Depth (delegated to db/agent_settings/resources.py) - BACKLOG-001
+    # =========================================================================
+
+    def get_max_backlog_depth(self, agent_name: str) -> int:
+        return self._agent_ops.get_max_backlog_depth(agent_name)
+
+    def set_max_backlog_depth(self, agent_name: str, depth: int) -> bool:
+        return self._agent_ops.set_max_backlog_depth(agent_name, depth)
+
+    # =========================================================================
+    # Backlog Execution Queries (delegated to db/schedules.py) - BACKLOG-001
+    # =========================================================================
+
+    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str) -> bool:
+        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at)
+
+    def claim_next_queued(self, agent_name: str):
+        return self._schedule_ops.claim_next_queued(agent_name)
+
+    def release_claim_to_queued(self, execution_id: str) -> bool:
+        return self._schedule_ops.release_claim_to_queued(execution_id)
+
+    def get_queued_count(self, agent_name: str) -> int:
+        return self._schedule_ops.get_queued_count(agent_name)
+
+    def cancel_queued_execution(self, execution_id: str, reason: str = "cancelled") -> bool:
+        return self._schedule_ops.cancel_queued_execution(execution_id, reason)
+
+    def cancel_queued_for_agent(self, agent_name: str, reason: str = "agent_deleted") -> int:
+        return self._schedule_ops.cancel_queued_for_agent(agent_name, reason)
+
+    def expire_stale_queued(self, max_age_hours: float = 24) -> int:
+        return self._schedule_ops.expire_stale_queued(max_age_hours)
+
+    def list_agents_with_queued(self):
+        return self._schedule_ops.list_agents_with_queued()
 
     # =========================================================================
     # Avatar Identity (delegated to db/agents.py) - AVATAR-001
@@ -925,8 +970,13 @@ class DatabaseManager:
     def is_email_whitelisted(self, email: str):
         return self._email_auth_ops.is_email_whitelisted(email)
 
-    def add_to_whitelist(self, email: str, added_by: str, source: str = "manual"):
-        return self._email_auth_ops.add_to_whitelist(email, added_by, source)
+    def add_to_whitelist(self, email: str, added_by: str, source: str, *, default_role: str):
+        return self._email_auth_ops.add_to_whitelist(
+            email, added_by, source, default_role=default_role
+        )
+
+    def get_whitelist_default_role(self, email: str):
+        return self._email_auth_ops.get_whitelist_default_role(email)
 
     def remove_from_whitelist(self, email: str):
         return self._email_auth_ops.remove_from_whitelist(email)
@@ -1429,6 +1479,20 @@ class DatabaseManager:
     def deactivate_telegram_group_config(self, binding_id, chat_id):
         return self._telegram_channel_ops.deactivate_group_config(binding_id, chat_id)
 
+    # Telegram Group Verification (group_auth_mode support)
+
+    def is_telegram_group_verified(self, binding_id, chat_id):
+        return self._telegram_channel_ops.is_group_verified(binding_id, chat_id)
+
+    def get_telegram_group_verified_email(self, binding_id, chat_id):
+        return self._telegram_channel_ops.get_group_verified_email(binding_id, chat_id)
+
+    def set_telegram_group_verified(self, binding_id, chat_id, email):
+        return self._telegram_channel_ops.set_group_verified(binding_id, chat_id, email)
+
+    def clear_telegram_group_verification(self, binding_id, chat_id):
+        return self._telegram_channel_ops.clear_group_verification(binding_id, chat_id)
+
     # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
     # =========================================================================
@@ -1552,6 +1616,34 @@ class DatabaseManager:
 
     def delete_access_requests_for_agent(self, agent_name: str):
         return self._access_request_ops.delete_for_agent(agent_name)
+
+    # =========================================================================
+    # Platform Audit Log (SEC-001 / Issue #20 — Phase 1)
+    # =========================================================================
+
+    def create_audit_entry(self, entry: dict):
+        """Insert an audit log entry (append-only)."""
+        return self._audit_ops.create_audit_entry(entry)
+
+    def get_audit_entries(self, **filters):
+        """Query audit entries with optional filters. See PlatformAuditOperations for kwargs."""
+        return self._audit_ops.get_audit_entries(**filters)
+
+    def count_audit_entries(self, **filters):
+        """Count audit entries matching a filter (independent of limit/offset)."""
+        return self._audit_ops.count_audit_entries(**filters)
+
+    def get_audit_entry(self, event_id: str):
+        """Fetch a single audit entry by its event_id (UUID)."""
+        return self._audit_ops.get_audit_entry(event_id)
+
+    def get_audit_entries_range(self, start_id: int, end_id: int):
+        """Fetch entries by primary-key range (used by hash-chain verification in Phase 4)."""
+        return self._audit_ops.get_audit_entries_range(start_id, end_id)
+
+    def get_audit_stats(self, start_time: str = None, end_time: str = None):
+        """Aggregate counts by event_type and actor_type for the dashboard."""
+        return self._audit_ops.get_audit_stats(start_time=start_time, end_time=end_time)
 
 
 # Global database manager instance

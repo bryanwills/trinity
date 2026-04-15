@@ -68,6 +68,7 @@ TABLES = {
             is_default_avatar INTEGER DEFAULT 0,
             require_email INTEGER DEFAULT 0,
             open_access INTEGER DEFAULT 0,
+            group_auth_mode TEXT DEFAULT 'none',
             guardrails_config TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
@@ -114,6 +115,7 @@ TABLES = {
             added_by TEXT NOT NULL,
             added_at TEXT NOT NULL,
             source TEXT NOT NULL,
+            default_role TEXT NOT NULL DEFAULT 'user',
             FOREIGN KEY (added_by) REFERENCES users(id)
         )
     """,
@@ -151,6 +153,11 @@ TABLES = {
             timeout_seconds INTEGER DEFAULT 900,
             allowed_tools TEXT,
             model TEXT,
+            max_retries INTEGER DEFAULT 1,
+            retry_delay_seconds INTEGER DEFAULT 60,
+            validation_enabled INTEGER DEFAULT 0,
+            validation_prompt TEXT,
+            validation_timeout_seconds INTEGER DEFAULT 120,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
     """,
@@ -175,6 +182,13 @@ TABLES = {
             execution_log TEXT,
             model_used TEXT,
             subscription_id TEXT,
+            attempt_number INTEGER DEFAULT 1,
+            retry_of_execution_id TEXT,
+            retry_scheduled_at TEXT,
+            business_status TEXT,
+            validated_at TEXT,
+            validation_execution_id TEXT,
+            validates_execution_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -662,6 +676,38 @@ TABLES = {
             UNIQUE(agent_name, email)
         )
     """,
+
+    # -------------------------------------------------------------------------
+    # Platform Audit Log (SEC-001 / Issue #20) — Phase 1
+    # -------------------------------------------------------------------------
+    # Cross-cutting append-only audit trail for agent lifecycle, auth, MCP,
+    # credentials, sharing, settings, git, and system events. Distinct from
+    # the Process Engine's `audit_entries` table which is workflow-specific.
+    "audit_log": """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT UNIQUE NOT NULL,
+            event_type TEXT NOT NULL,
+            event_action TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id TEXT,
+            actor_email TEXT,
+            actor_ip TEXT,
+            mcp_key_id TEXT,
+            mcp_key_name TEXT,
+            mcp_scope TEXT,
+            target_type TEXT,
+            target_id TEXT,
+            timestamp TEXT NOT NULL,
+            details TEXT,
+            request_id TEXT,
+            source TEXT NOT NULL,
+            endpoint TEXT,
+            previous_hash TEXT,
+            entry_hash TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """,
 }
 
 # =============================================================================
@@ -694,6 +740,9 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_executions_status ON schedule_executions(status)",
     # PERF-001: Composite index for Tasks list queries
     "CREATE INDEX IF NOT EXISTS idx_executions_agent_started ON schedule_executions(agent_name, started_at DESC)",
+    # VALIDATE-001: Business status for validation results
+    "CREATE INDEX IF NOT EXISTS idx_executions_business_status ON schedule_executions(business_status)",
+    "CREATE INDEX IF NOT EXISTS idx_executions_validates ON schedule_executions(validates_execution_id)",
 
     # Git config indexes
     "CREATE INDEX IF NOT EXISTS idx_git_config_agent ON agent_git_config(agent_name)",
@@ -804,6 +853,39 @@ INDEXES = [
     # Access requests indexes (Issue #311)
     "CREATE INDEX IF NOT EXISTS idx_access_requests_agent ON access_requests(agent_name, status)",
     "CREATE INDEX IF NOT EXISTS idx_access_requests_email ON access_requests(email)",
+
+    # Platform audit log indexes (SEC-001 / Issue #20 — Phase 1)
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type, timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_type, actor_id, timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_mcp_key ON audit_log(mcp_key_id, timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_request ON audit_log(request_id)",
+]
+
+
+# =============================================================================
+# Triggers — Append-only enforcement for audit_log (SEC-001)
+# =============================================================================
+
+TRIGGERS = [
+    # Block UPDATE on every audit_log row.
+    """
+    CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+    BEFORE UPDATE ON audit_log
+    BEGIN
+        SELECT RAISE(ABORT, 'Audit log entries cannot be modified');
+    END
+    """,
+    # Block DELETE during the 365-day retention window.
+    """
+    CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+    BEFORE DELETE ON audit_log
+    WHEN OLD.timestamp > datetime('now', '-365 days')
+    BEGIN
+        SELECT RAISE(ABORT, 'Audit log entries cannot be deleted within retention period');
+    END
+    """,
 ]
 
 
@@ -823,11 +905,18 @@ def create_all_indexes(cursor):
         cursor.execute(index_sql)
 
 
+def create_all_triggers(cursor):
+    """Create all triggers. Safe to call multiple times (uses IF NOT EXISTS)."""
+    for trigger_sql in TRIGGERS:
+        cursor.execute(trigger_sql)
+
+
 def init_schema(cursor, conn):
     """Initialize complete database schema.
 
-    Creates all tables and indexes. Safe to call on existing database.
+    Creates all tables, indexes, and triggers. Safe to call on existing database.
     """
     create_all_tables(cursor)
     create_all_indexes(cursor)
+    create_all_triggers(cursor)
     conn.commit()

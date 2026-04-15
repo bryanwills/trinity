@@ -338,7 +338,8 @@ class TelegramChannelOperations:
             cursor.execute("""
                 SELECT id, binding_id, chat_id, chat_title, chat_type,
                        trigger_mode, welcome_enabled, welcome_text,
-                       is_active, created_at, updated_at
+                       is_active, created_at, updated_at,
+                       verified_by_email, verified_at
                 FROM telegram_group_configs
                 WHERE binding_id = ? AND chat_id = ?
             """, (binding_id, chat_id))
@@ -375,7 +376,8 @@ class TelegramChannelOperations:
             cursor.execute("""
                 SELECT id, binding_id, chat_id, chat_title, chat_type,
                        trigger_mode, welcome_enabled, welcome_text,
-                       is_active, created_at, updated_at
+                       is_active, created_at, updated_at,
+                       verified_by_email, verified_at
                 FROM telegram_group_configs
                 WHERE binding_id = ? AND chat_id = ?
             """, (binding_id, chat_id))
@@ -388,7 +390,8 @@ class TelegramChannelOperations:
             cursor.execute("""
                 SELECT id, binding_id, chat_id, chat_title, chat_type,
                        trigger_mode, welcome_enabled, welcome_text,
-                       is_active, created_at, updated_at
+                       is_active, created_at, updated_at,
+                       verified_by_email, verified_at
                 FROM telegram_group_configs
                 WHERE binding_id = ? AND chat_id = ?
             """, (binding_id, chat_id))
@@ -402,7 +405,8 @@ class TelegramChannelOperations:
             cursor.execute("""
                 SELECT id, binding_id, chat_id, chat_title, chat_type,
                        trigger_mode, welcome_enabled, welcome_text,
-                       is_active, created_at, updated_at
+                       is_active, created_at, updated_at,
+                       verified_by_email, verified_at
                 FROM telegram_group_configs
                 WHERE binding_id = ? AND is_active = 1
                 ORDER BY chat_title
@@ -452,7 +456,8 @@ class TelegramChannelOperations:
             cursor.execute("""
                 SELECT id, binding_id, chat_id, chat_title, chat_type,
                        trigger_mode, welcome_enabled, welcome_text,
-                       is_active, created_at, updated_at
+                       is_active, created_at, updated_at,
+                       verified_by_email, verified_at
                 FROM telegram_group_configs
                 WHERE id = ?
             """, (group_config_id,))
@@ -486,6 +491,60 @@ class TelegramChannelOperations:
         return count
 
     # =========================================================================
+    # Group Verification (group_auth_mode support)
+    # =========================================================================
+
+    def is_group_verified(self, binding_id: int, chat_id: str) -> bool:
+        """Check if a group has at least one verified member."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT verified_by_email
+                FROM telegram_group_configs
+                WHERE binding_id = ? AND chat_id = ?
+            """, (binding_id, chat_id))
+            row = cursor.fetchone()
+        return bool(row and row[0])
+
+    def get_group_verified_email(self, binding_id: int, chat_id: str) -> Optional[str]:
+        """Get the email that verified this group, if any."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT verified_by_email
+                FROM telegram_group_configs
+                WHERE binding_id = ? AND chat_id = ?
+            """, (binding_id, chat_id))
+            row = cursor.fetchone()
+        return row[0] if row else None
+
+    def set_group_verified(self, binding_id: int, chat_id: str, email: str) -> bool:
+        """Mark a group as verified by the given email."""
+        now = datetime.utcnow().isoformat()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE telegram_group_configs
+                SET verified_by_email = ?, verified_at = ?, updated_at = ?
+                WHERE binding_id = ? AND chat_id = ?
+            """, (email.lower(), now, now, binding_id, chat_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def clear_group_verification(self, binding_id: int, chat_id: str) -> bool:
+        """Clear verification status for a group (e.g., when verified user leaves)."""
+        now = datetime.utcnow().isoformat()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE telegram_group_configs
+                SET verified_by_email = NULL, verified_at = NULL, updated_at = ?
+                WHERE binding_id = ? AND chat_id = ?
+            """, (now, binding_id, chat_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    # =========================================================================
     # Row converters
     # =========================================================================
 
@@ -502,6 +561,8 @@ class TelegramChannelOperations:
             "is_active": bool(row[8]),
             "created_at": row[9],
             "updated_at": row[10],
+            "verified_by_email": row[11] if len(row) > 11 else None,
+            "verified_at": row[12] if len(row) > 12 else None,
         }
 
     def _row_to_binding(self, row) -> dict:

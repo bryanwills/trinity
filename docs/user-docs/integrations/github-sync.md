@@ -41,5 +41,5 @@ MCP tool: `initialize_github_sync(agent_name, repo_url)`
 
 ## See Also
 
-- [Agent creation](/docs/user-docs/agents/creating-agents.md)
-- [Templates](/docs/user-docs/agents/templates.md)
+- [GitHub PAT Setup](github-pat-setup.md) — Configure a Personal Access Token before using sync
+- [Creating Agents](../agents/creating-agents.md) — Creating agents from GitHub templates

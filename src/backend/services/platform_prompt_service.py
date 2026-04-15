@@ -5,9 +5,23 @@ Builds the system prompt that is injected into every Claude Code invocation
 via --append-system-prompt. Replaces the old file-based CLAUDE.local.md injection.
 """
 import logging
+import re
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from typing import List, Optional
+
 from database import db
 
 logger = logging.getLogger(__name__)
+
+# Max number of collaborators to render in the context block.
+MAX_COLLABORATORS = 20
+# Max chars for user-controlled strings before truncation (prompt-injection mitigation).
+MAX_FIELD_LEN = 80
+# Narrower caps for specific field types.
+MAX_COLLAB_NAME_LEN = 60
+MAX_TIMESTAMP_LEN = 40
+MAX_PLATFORM_URL_LEN = 200
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -123,3 +137,273 @@ def get_platform_system_prompt() -> str:
         logger.debug(f"Including custom trinity_prompt ({len(custom_prompt)} chars)")
 
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Execution Context (#171)
+# ---------------------------------------------------------------------------
+
+# Characters we strip from user-controlled strings before rendering them
+# into the system prompt. Newlines and control chars enable the most
+# obvious prompt-injection vectors (a crafted schedule name could otherwise
+# inject its own markdown heading).
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_field(value: Optional[str], max_len: int = MAX_FIELD_LEN) -> Optional[str]:
+    """Sanitize a user-controlled string before embedding it in the system prompt.
+
+    Strips control characters (including newlines and tabs), backticks, and
+    markdown heading markers; truncates to max_len chars. Returns None for
+    empty input so callers can omit the field entirely.
+    """
+    if value is None:
+        return None
+    cleaned = _CONTROL_CHAR_RE.sub(" ", str(value))
+    cleaned = cleaned.replace("`", "'").replace("##", "#").replace("---", "-")
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1] + "…"
+    return cleaned
+
+
+@dataclass
+class ExecutionContext:
+    """Per-invocation execution metadata injected into the agent system prompt.
+
+    All fields are optional; the renderer omits any field that is None or empty.
+    The caller constructs this from whatever it knows — a chat handler won't
+    have a timeout, a scheduled task won't have a source user, etc.
+    """
+    agent_name: Optional[str] = None
+    mode: Optional[str] = None                          # "chat" | "task"
+    triggered_by: Optional[str] = None                  # raw trigger label
+    source_user_email: Optional[str] = None
+    source_agent_name: Optional[str] = None
+    source_mcp_key_name: Optional[str] = None
+    model: Optional[str] = None
+    timeout_seconds: Optional[int] = None
+    attempt: Optional[int] = None
+    schedule_name: Optional[str] = None
+    schedule_cron: Optional[str] = None
+    schedule_next_run: Optional[str] = None
+    collaborators: Optional[List[str]] = None
+    platform_url: Optional[str] = None
+    timestamp: Optional[str] = None
+
+    @staticmethod
+    def derive_mode(triggered_by: Optional[str]) -> str:
+        """Map a triggered_by label to a behavioral mode.
+
+        chat mode: user is waiting and can respond in a future turn
+        task mode: headless execution, agent should not block on input
+        """
+        chat_triggers = {"chat", "user", "public", "paid"}
+        if triggered_by and triggered_by.lower() in chat_triggers:
+            return "chat"
+        return "task"
+
+
+def _render_triggered_by(ctx: ExecutionContext) -> Optional[str]:
+    """Build the `Triggered by` line, enriched with source identity when known."""
+    raw = _sanitize_field(ctx.triggered_by)
+    if not raw:
+        return None
+    extras = []
+    if ctx.source_agent_name:
+        agent = _sanitize_field(ctx.source_agent_name)
+        if agent:
+            extras.append(f"source agent: '{agent}'")
+    if ctx.source_mcp_key_name:
+        key = _sanitize_field(ctx.source_mcp_key_name)
+        if key:
+            extras.append(f"mcp key: '{key}'")
+    if ctx.source_user_email:
+        email = _sanitize_field(ctx.source_user_email)
+        if email:
+            extras.append(f"user: '{email}'")
+    if extras:
+        return f"{raw} ({', '.join(extras)})"
+    return raw
+
+
+def _render_schedule_line(ctx: ExecutionContext) -> Optional[str]:
+    """Build a compact schedule description line, or None if no schedule."""
+    name = _sanitize_field(ctx.schedule_name)
+    cron = _sanitize_field(ctx.schedule_cron)
+    next_run = _sanitize_field(ctx.schedule_next_run, max_len=MAX_TIMESTAMP_LEN)
+    if not (name or cron or next_run):
+        return None
+    parts = []
+    if name:
+        parts.append(f"'{name}'")
+    meta = []
+    if cron:
+        meta.append(f"cron: {cron}")
+    if next_run:
+        meta.append(f"next: {next_run}")
+    if meta:
+        parts.append(f"({', '.join(meta)})")
+    return " ".join(parts)
+
+
+def _render_collaborators(ctx: ExecutionContext) -> Optional[str]:
+    """Render the collaborators list, capped at MAX_COLLABORATORS."""
+    if not ctx.collaborators:
+        return None
+    cleaned: List[str] = []
+    for name in ctx.collaborators:
+        safe = _sanitize_field(name, max_len=MAX_COLLAB_NAME_LEN)
+        if safe:
+            cleaned.append(safe)
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_COLLABORATORS:
+        shown = cleaned[:MAX_COLLABORATORS]
+        return ", ".join(shown) + f", … ({len(cleaned) - MAX_COLLABORATORS} more)"
+    return ", ".join(cleaned)
+
+
+def _mode_guidance(mode: str) -> str:
+    if mode == "chat":
+        return "Interactive session. You may ask clarifying questions if the request is ambiguous."
+    return (
+        "Autonomous execution. Do not ask clarifying questions — execute to completion "
+        "and return your results. Plan your work to finish well within the timeout budget."
+    )
+
+
+def build_execution_context(ctx: ExecutionContext) -> str:
+    """Render an ExecutionContext into a markdown block for the system prompt.
+
+    Returns an empty string on failure so the caller can fall back to the
+    base platform prompt without breaking the request.
+    """
+    try:
+        mode = ctx.mode or ExecutionContext.derive_mode(ctx.triggered_by)
+        mode = _sanitize_field(mode) or "task"
+
+        lines: List[str] = [f"- **Mode**: {mode}"]
+
+        triggered = _render_triggered_by(ctx)
+        if triggered:
+            lines.append(f"- **Triggered by**: {triggered}")
+
+        schedule_line = _render_schedule_line(ctx)
+        if schedule_line:
+            lines.append(f"- **Schedule**: {schedule_line}")
+
+        if ctx.attempt and ctx.attempt > 0:
+            lines.append(f"- **Attempt**: {ctx.attempt}")
+
+        model = _sanitize_field(ctx.model)
+        if model:
+            lines.append(f"- **Model**: {model}")
+
+        if mode == "task" and ctx.timeout_seconds and ctx.timeout_seconds > 0:
+            lines.append(
+                f"- **Timeout**: {ctx.timeout_seconds}s — plan to finish well within this budget"
+            )
+
+        agent = _sanitize_field(ctx.agent_name)
+        if agent:
+            lines.append(f"- **Agent**: {agent}")
+
+        collaborators = _render_collaborators(ctx)
+        if collaborators:
+            lines.append(f"- **Collaborators**: {collaborators}")
+
+        timestamp = _sanitize_field(
+            ctx.timestamp, max_len=MAX_TIMESTAMP_LEN
+        ) or datetime.now(timezone.utc).isoformat()
+        lines.append(f"- **Timestamp**: {timestamp}")
+
+        platform = _sanitize_field(ctx.platform_url, max_len=MAX_PLATFORM_URL_LEN)
+        if platform:
+            lines.append(f"- **Platform**: {platform}")
+
+        guidance = _mode_guidance(mode)
+        body = "\n".join(lines)
+        return f"## Execution Context\n\n{body}\n\n{guidance}"
+    except Exception as e:
+        logger.warning(f"build_execution_context failed: {e}")
+        return ""
+
+
+def _resolve_collaborators(agent_name: Optional[str]) -> List[str]:
+    """Look up permitted collaborator names for an agent. Empty list on failure."""
+    if not agent_name:
+        return []
+    try:
+        return db.get_permitted_agents(agent_name) or []
+    except Exception as e:
+        logger.debug(f"_resolve_collaborators({agent_name}) failed: {e}")
+        return []
+
+
+def _resolve_platform_url() -> Optional[str]:
+    """Best-effort lookup of the platform's public URL."""
+    try:
+        value = db.get_setting_value("public_chat_url", default=None)
+        if value and str(value).strip():
+            return str(value).strip()
+    except Exception as e:
+        logger.debug(f"_resolve_platform_url failed: {e}")
+    return None
+
+
+def compose_system_prompt(
+    execution_context: Optional[ExecutionContext] = None,
+    caller_prompt: Optional[str] = None,
+    *,
+    include_execution_context: bool = True,
+) -> str:
+    """Compose the full system prompt: platform instructions + execution context + caller prompt.
+
+    Single composition entry point. Keeps ordering and defaults in one place
+    (invariant #15). Callers should use this instead of concatenating prompt
+    fragments themselves.
+    """
+    parts: List[str] = [get_platform_system_prompt()]
+
+    if include_execution_context and execution_context is not None:
+        # Auto-fill collaborators and platform URL without mutating the caller's
+        # object — construct a shallow copy with the resolved fields filled in.
+        ctx = execution_context
+        if ctx.collaborators is None or ctx.platform_url is None:
+            ctx = replace(
+                ctx,
+                collaborators=(
+                    ctx.collaborators
+                    if ctx.collaborators is not None
+                    else _resolve_collaborators(ctx.agent_name)
+                ),
+                platform_url=(
+                    ctx.platform_url
+                    if ctx.platform_url is not None
+                    else _resolve_platform_url()
+                ),
+            )
+        block = build_execution_context(ctx)
+        if block:
+            parts.append(block)
+
+    if caller_prompt and caller_prompt.strip():
+        parts.append(caller_prompt.strip())
+
+    return "\n\n".join(parts)
+
+
+def is_execution_context_enabled() -> bool:
+    """Operator kill-switch for the execution context block. Default: enabled."""
+    try:
+        value = db.get_setting_value(
+            "trinity_execution_context_enabled", default="true"
+        )
+    except Exception:
+        return True
+    if value is None:
+        return True
+    return str(value).strip().lower() not in {"false", "0", "no", "off"}

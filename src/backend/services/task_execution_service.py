@@ -31,7 +31,12 @@ from models import ActivityState, ActivityType, TaskExecutionStatus
 from services.activity_service import activity_service
 from services.slot_service import get_slot_service
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
-from services.platform_prompt_service import get_platform_system_prompt
+from services.platform_prompt_service import (
+    ExecutionContext,
+    compose_system_prompt,
+    get_platform_system_prompt,
+    is_execution_context_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +120,97 @@ async def agent_post_with_retry(
 
 
 # ---------------------------------------------------------------------------
+# Terminate helper (Issue #61)
+# ---------------------------------------------------------------------------
+
+TERMINATE_TIMEOUT = 5.0  # Short timeout for terminate call — don't block failure path
+
+
+async def terminate_execution_on_agent(
+    agent_name: str,
+    execution_id: str,
+) -> bool:
+    """
+    Terminate an execution on an agent container (Issue #61).
+
+    Calls POST /api/executions/{id}/terminate on the agent to kill the
+    running Claude process. This prevents orphaned processes from
+    accumulating when the backend times out waiting for a response.
+
+    Best-effort: failures are logged but don't raise exceptions.
+    The cleanup service watchdog provides a safety net.
+
+    Args:
+        agent_name: The agent container name.
+        execution_id: The execution to terminate.
+
+    Returns:
+        True if termination succeeded or process already finished,
+        False if termination failed (agent unreachable, etc.).
+    """
+    if not execution_id:
+        return False
+
+    agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/terminate"
+
+    try:
+        async with httpx.AsyncClient(timeout=TERMINATE_TIMEOUT) as client:
+            response = await client.post(agent_url)
+
+            if response.status_code < 300:
+                result = response.json()
+                status = result.get("status", "unknown")
+                if status == "terminated":
+                    logger.info(
+                        f"[TaskExecService] Terminated execution {execution_id} "
+                        f"on agent '{agent_name}'"
+                    )
+                elif status == "already_finished":
+                    logger.debug(
+                        f"[TaskExecService] Execution {execution_id} already finished "
+                        f"on agent '{agent_name}'"
+                    )
+                return True
+
+            elif response.status_code == 404:
+                # Execution not found in agent's registry — may have finished
+                # between timeout and terminate call
+                logger.debug(
+                    f"[TaskExecService] Execution {execution_id} not found on "
+                    f"agent '{agent_name}' (may have finished)"
+                )
+                return True
+
+            else:
+                logger.warning(
+                    f"[TaskExecService] Terminate returned {response.status_code} "
+                    f"for execution {execution_id} on agent '{agent_name}'"
+                )
+                return False
+
+    except httpx.TimeoutException:
+        logger.warning(
+            f"[TaskExecService] Terminate timed out for execution {execution_id} "
+            f"on agent '{agent_name}' — watchdog will clean up"
+        )
+        return False
+
+    except httpx.ConnectError:
+        logger.warning(
+            f"[TaskExecService] Could not reach agent '{agent_name}' to terminate "
+            f"execution {execution_id} — watchdog will clean up"
+        )
+        return False
+
+    except Exception as e:
+        logger.warning(
+            f"[TaskExecService] Error terminating execution {execution_id} "
+            f"on agent '{agent_name}': {e}"
+        )
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -145,6 +241,11 @@ class TaskExecutionService:
         execution_id: Optional[str] = None,
         fan_out_id: Optional[str] = None,
         subscription_id: Optional[str] = None,
+        parent_activity_id: Optional[str] = None,
+        extra_activity_details: Optional[dict] = None,
+        slot_already_held: bool = False,
+        schedule_context: Optional[dict] = None,
+        attempt: Optional[int] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -167,7 +268,9 @@ class TaskExecutionService:
         """
         slot_service = get_slot_service()
         activity_id: Optional[str] = None
-        slot_acquired = False  # Track whether slot was acquired for proper cleanup
+        # If caller already acquired the slot (async /task path preserves 429-upfront
+        # contract by pre-flighting capacity), we still own releasing it in finally.
+        slot_acquired = slot_already_held
 
         # TIMEOUT-001: Use agent's configured timeout if not explicitly provided
         if timeout_seconds is None:
@@ -204,44 +307,49 @@ class TaskExecutionService:
         # stuck in 'running' status with NULL session_id and duration_ms.
         try:
             # ---- 2. Acquire capacity slot ------------------------------------
-            max_parallel_tasks = db.get_max_parallel_tasks(agent_name)
-            slot_acquired = await slot_service.acquire_slot(
-                agent_name=agent_name,
-                execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
-                max_parallel_tasks=max_parallel_tasks,
-                message_preview=message[:100] if message else "",
-                timeout_seconds=timeout_seconds,  # TIMEOUT-001: Pass for dynamic slot TTL
-            )
-
-            if not slot_acquired:
-                error_msg = f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running)"
-                if execution_id:
-                    db.update_execution_status(
-                        execution_id=execution_id,
-                        status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
-                    )
-                return TaskExecutionResult(
-                    execution_id=execution_id or "",
-                    status=TaskExecutionStatus.FAILED,
-                    response="",
-                    error=error_msg,
+            if not slot_already_held:
+                max_parallel_tasks = db.get_max_parallel_tasks(agent_name)
+                slot_acquired = await slot_service.acquire_slot(
+                    agent_name=agent_name,
+                    execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
+                    max_parallel_tasks=max_parallel_tasks,
+                    message_preview=message[:100] if message else "",
+                    timeout_seconds=timeout_seconds,  # TIMEOUT-001: Pass for dynamic slot TTL
                 )
 
+                if not slot_acquired:
+                    error_msg = f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running)"
+                    if execution_id:
+                        db.update_execution_status(
+                            execution_id=execution_id,
+                            status=TaskExecutionStatus.FAILED,
+                            error=error_msg,
+                        )
+                    return TaskExecutionResult(
+                        execution_id=execution_id or "",
+                        status=TaskExecutionStatus.FAILED,
+                        response="",
+                        error=error_msg,
+                    )
+
             # ---- 3. Track activity start -------------------------------------
+            activity_details = {
+                "message_preview": message[:100] if message else "",
+                "source_agent": source_agent_name,
+                "execution_id": execution_id,
+                "triggered_by": triggered_by,
+            }
+            if extra_activity_details:
+                activity_details.update(extra_activity_details)
             try:
                 activity_id = await activity_service.track_activity(
                     agent_name=agent_name,
                     activity_type=ActivityType.CHAT_START,
                     user_id=source_user_id,
                     triggered_by=triggered_by,
+                    parent_activity_id=parent_activity_id,
                     related_execution_id=execution_id,
-                    details={
-                        "message_preview": message[:100] if message else "",
-                        "source_agent": source_agent_name,
-                        "execution_id": execution_id,
-                        "triggered_by": triggered_by,
-                    },
+                    details=activity_details,
                 )
             except Exception as e:
                 logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
@@ -257,12 +365,36 @@ class TaskExecutionService:
                     logger.warning(f"[TaskExecService] Failed to mark execution dispatched: {e}")
 
             # ---- 4. Call agent with retry --------------------------------
-            # Prepend platform instructions to any caller-provided system_prompt
-            platform_prompt = get_platform_system_prompt()
-            if system_prompt:
-                effective_system_prompt = platform_prompt + "\n\n" + system_prompt
-            else:
-                effective_system_prompt = platform_prompt
+            # Compose platform prompt + execution context (#171) + caller system_prompt.
+            # Never let context-building fail the request.
+            try:
+                exec_ctx = ExecutionContext(
+                    agent_name=agent_name,
+                    mode=ExecutionContext.derive_mode(triggered_by),
+                    triggered_by=triggered_by,
+                    source_user_email=source_user_email,
+                    source_agent_name=source_agent_name,
+                    source_mcp_key_name=source_mcp_key_name,
+                    model=model,
+                    timeout_seconds=timeout_seconds,
+                    attempt=attempt,
+                    schedule_name=(schedule_context or {}).get("name"),
+                    schedule_cron=(schedule_context or {}).get("cron"),
+                    schedule_next_run=(schedule_context or {}).get("next_run"),
+                )
+                effective_system_prompt = compose_system_prompt(
+                    execution_context=exec_ctx,
+                    caller_prompt=system_prompt,
+                    include_execution_context=is_execution_context_enabled(),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[TaskExecService] execution context build failed, falling back: {e}"
+                )
+                platform_prompt = get_platform_system_prompt()
+                effective_system_prompt = (
+                    platform_prompt + "\n\n" + system_prompt if system_prompt else platform_prompt
+                )
 
             payload = {
                 "message": message,
@@ -308,7 +440,7 @@ class TaskExecutionService:
                     except Exception as e:
                         logger.error(f"[TaskExecService] Failed to serialize execution_log for {execution_id}: {e}")
 
-            context_used = metadata.get("input_tokens", 0) + metadata.get("output_tokens", 0)
+            context_used = metadata.get("input_tokens", 0)
             sanitized_resp = sanitize_response(response_data.get("response"))
             claude_session_id = response_data.get("session_id") or metadata.get("session_id")
 
@@ -355,6 +487,11 @@ class TaskExecutionService:
             elapsed = int((datetime.utcnow() - start_time).total_seconds())
             error_msg = f"Task execution timed out after {timeout_seconds} seconds"
             logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s)")
+
+            # Issue #61: Terminate the execution on the agent to prevent orphaned
+            # Claude processes from accumulating. Best-effort — watchdog is safety net.
+            await terminate_execution_on_agent(agent_name, execution_id)
+
             # Don't overwrite cancelled executions
             if execution_id:
                 existing = db.get_execution(execution_id)
@@ -399,6 +536,13 @@ class TaskExecutionService:
                 except Exception as switch_err:
                     logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
 
+            # Issue #285: Detect auth failures (HTTP 503 from agent server)
+            # Return structured error code so callers can handle appropriately
+            error_code = None
+            if agent_status_code == 503:
+                logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
+                error_code = TaskExecutionErrorCode.AUTH
+
             if execution_id:
                 existing = db.get_execution(execution_id)
                 if not existing or existing.status != TaskExecutionStatus.CANCELLED:
@@ -418,6 +562,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 response="",
                 error=error_msg,
+                error_code=error_code,  # Issue #285: Include auth error code
             )
 
         except Exception as e:

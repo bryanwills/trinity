@@ -22,11 +22,13 @@ router = APIRouter(prefix="/api/agents", tags=["sharing"])
 class AccessPolicy(BaseModel):
     require_email: bool
     open_access: bool
+    group_auth_mode: str = "none"  # 'none' or 'any_verified'
 
 
 class AccessPolicyUpdate(BaseModel):
     require_email: bool
     open_access: bool
+    group_auth_mode: str = "none"  # 'none' or 'any_verified'
 
 
 class AccessRequest(BaseModel):
@@ -79,7 +81,8 @@ async def share_agent_endpoint(
             db.add_to_whitelist(
                 share_request.email,
                 current_user.username,
-                source="agent_sharing"
+                source="agent_sharing",
+                default_role="user",  # chat-only grant; don't promote to creator (#314)
             )
         except Exception:
             # Already whitelisted or error - continue anyway
@@ -153,7 +156,12 @@ async def update_access_policy_endpoint(
     current_user: CurrentUser,
 ):
     """Update the per-agent channel access policy (owner-only)."""
-    db.set_access_policy(agent_name, update.require_email, update.open_access)
+    db.set_access_policy(
+        agent_name,
+        update.require_email,
+        update.open_access,
+        update.group_auth_mode,
+    )
     return AccessPolicy(**db.get_access_policy(agent_name))
 
 
@@ -208,6 +216,7 @@ async def decide_access_request_endpoint(
                     existing["email"],
                     current_user.username,
                     source="access_request",
+                    default_role="user",  # chat-only grant; don't promote to creator (#314)
                 )
             except Exception:
                 pass

@@ -192,6 +192,21 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
             "If true, return immediately with execution_id (fire-and-forget). " +
             "Only applies when parallel=true. Poll the execution endpoint for results."
           ),
+        inject_result: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "If true and this is a self-task (calling yourself), inject the result as a message " +
+            "in your current chat session. Requires chat_session_id. Only applies to self-calls."
+          ),
+        chat_session_id: z
+          .string()
+          .optional()
+          .describe(
+            "Chat session ID to link this self-task to. Required for inject_result=true. " +
+            "The result will be injected into this session when the task completes."
+          ),
       }),
       execute: async (
         {
@@ -203,6 +218,8 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           system_prompt,
           timeout_seconds,
           async: asyncMode,
+          inject_result,
+          chat_session_id,
         }: {
           agent_name: string;
           message: string;
@@ -212,6 +229,8 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           system_prompt?: string;
           timeout_seconds?: number;
           async?: boolean;
+          inject_result?: boolean;
+          chat_session_id?: string;
         },
         context: any
       ) => {
@@ -233,13 +252,20 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           }, null, 2);
         }
 
-        // Log successful collaboration
-        if (authContext?.scope === "agent") {
-          console.log(`[Agent Collaboration] ${authContext.agentName} -> ${agent_name} (${parallel ? 'parallel' : 'sequential'})`);
-        }
-
         // Pass source agent for collaboration tracking
         const sourceAgent = authContext?.scope === "agent" ? authContext.agentName : undefined;
+
+        // SELF-EXEC-001: Detect self-call (agent calling itself)
+        const isSelfTask = sourceAgent !== undefined && sourceAgent === agent_name;
+
+        // Log collaboration or self-task
+        if (authContext?.scope === "agent") {
+          if (isSelfTask) {
+            console.log(`[Self-Task] ${authContext.agentName} calling itself (${parallel ? 'parallel' : 'sequential'}, inject_result=${inject_result})`);
+          } else {
+            console.log(`[Agent Collaboration] ${authContext.agentName} -> ${agent_name} (${parallel ? 'parallel' : 'sequential'})`);
+          }
+        }
 
         // Build MCP key info for execution origin tracking (AUDIT-001)
         const mcpKeyInfo = authContext ? {
@@ -251,7 +277,8 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
         if (parallel) {
           // Parallel task mode - stateless, no queue
           const modeDesc = asyncMode ? 'async (fire-and-forget)' : 'sync';
-          console.log(`[Parallel Task] Sending task to ${agent_name} (${modeDesc})`);
+          const taskDesc = isSelfTask ? 'self-task' : 'parallel task';
+          console.log(`[Parallel Task] Sending ${taskDesc} to ${agent_name} (${modeDesc})`);
           const response = await apiClient.task(
             agent_name,
             message,
@@ -261,6 +288,9 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
               system_prompt,
               timeout_seconds,
               async_mode: asyncMode,
+              // SELF-EXEC-001: Pass inject_result and chat_session_id for self-tasks
+              inject_result: isSelfTask ? inject_result : undefined,
+              chat_session_id: isSelfTask ? chat_session_id : undefined,
             },
             sourceAgent,
             mcpKeyInfo

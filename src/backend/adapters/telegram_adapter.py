@@ -34,10 +34,47 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 # Group chat types
 _GROUP_CHAT_TYPES = {"group", "supergroup"}
 
-# Pending /login email per (binding_id, telegram_user_id) — cleared on verify/logout.
-# In-memory: codes are short-lived (10 min) and a backend restart simply forces
-# the user to re-issue /login.
-_PENDING_LOGINS: dict = {}
+# Pending login TTL in seconds (matches code expiry)
+_PENDING_LOGIN_TTL = 600  # 10 minutes
+
+
+def _get_pending_login_key(binding_id: int, user_id: str) -> str:
+    """Redis key for pending Telegram login."""
+    return f"telegram_pending_login:{binding_id}:{user_id}"
+
+
+def _get_pending_login(binding_id: int, user_id: str) -> Optional[str]:
+    """Get pending login email from Redis."""
+    from routers.auth import get_redis_client
+    try:
+        r = get_redis_client()
+        if r:
+            return r.get(_get_pending_login_key(binding_id, user_id))
+    except Exception as e:
+        logger.warning(f"Redis unavailable for pending login lookup: {e}")
+    return None
+
+
+def _set_pending_login(binding_id: int, user_id: str, email: str) -> None:
+    """Store pending login email in Redis with TTL."""
+    from routers.auth import get_redis_client
+    try:
+        r = get_redis_client()
+        if r:
+            r.setex(_get_pending_login_key(binding_id, user_id), _PENDING_LOGIN_TTL, email)
+    except Exception as e:
+        logger.warning(f"Redis unavailable for pending login store: {e}")
+
+
+def _clear_pending_login(binding_id: int, user_id: str) -> None:
+    """Clear pending login from Redis."""
+    from routers.auth import get_redis_client
+    try:
+        r = get_redis_client()
+        if r:
+            r.delete(_get_pending_login_key(binding_id, user_id))
+    except Exception as e:
+        logger.warning(f"Redis unavailable for pending login clear: {e}")
 
 
 class TelegramAdapter(ChannelAdapter):
@@ -226,6 +263,62 @@ class TelegramAdapter(ChannelAdapter):
             "🔒 This agent requires a verified email.\n\n"
             "Send <code>/login your@email.com</code> and I'll email you a 6-digit code. "
             "Then reply with <code>/login 123456</code> to complete verification."
+        )
+        await self._send_message(
+            bot_token=bot_token,
+            chat_id=message.channel_id,
+            text=text,
+            reply_to_message_id=message.thread_id,
+            parse_mode="HTML",
+        )
+
+    # =========================================================================
+    # Group Authentication (group_auth_mode support)
+    # =========================================================================
+
+    async def is_group_verified(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+    ) -> bool:
+        """Check if this Telegram group has at least one verified member."""
+        binding = db.get_telegram_binding(agent_name)
+        if not binding:
+            return True  # No binding = allow (shouldn't happen)
+        return db.is_telegram_group_verified(binding["id"], message.channel_id)
+
+    async def set_group_verified(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+        email: str,
+    ) -> None:
+        """Mark this Telegram group as verified by the given email."""
+        binding = db.get_telegram_binding(agent_name)
+        if not binding:
+            return
+        db.set_telegram_group_verified(binding["id"], message.channel_id, email)
+        logger.info(
+            f"Telegram group {message.channel_id} verified by {email} "
+            f"for agent {agent_name}"
+        )
+
+    async def prompt_group_auth(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+        bot_token: Optional[str] = None,
+    ) -> None:
+        """Prompt for group verification with Telegram-specific instructions."""
+        if not bot_token:
+            bot_token = db.get_telegram_bot_token(agent_name)
+        if not bot_token:
+            return
+        text = (
+            "🔒 This agent requires at least one verified member in the group.\n\n"
+            "Send <code>/login your@email.com</code> to verify your email, "
+            "then reply with <code>/login 123456</code> to complete verification.\n\n"
+            "Once verified, everyone in this group can chat with me."
         )
         await self._send_message(
             bot_token=bot_token,
@@ -472,7 +565,7 @@ class TelegramAdapter(ChannelAdapter):
 
         # 6-digit code path
         if arg.isdigit() and len(arg) == 6:
-            pending_email = _PENDING_LOGINS.get((binding["id"], message.sender_id))
+            pending_email = _get_pending_login(binding["id"], message.sender_id)
             if not pending_email:
                 return (
                     "I don't have a pending login for you. Send "
@@ -482,7 +575,7 @@ class TelegramAdapter(ChannelAdapter):
             if not result:
                 return "❌ Invalid or expired code. Try again or request a new one."
             db.set_telegram_verified_email(binding["id"], message.sender_id, pending_email)
-            _PENDING_LOGINS.pop((binding["id"], message.sender_id), None)
+            _clear_pending_login(binding["id"], message.sender_id)
             return (
                 f"✅ Verified! You're now signed in as <code>{pending_email}</code>.\n"
                 "You can chat normally now."
@@ -506,7 +599,7 @@ class TelegramAdapter(ChannelAdapter):
             logger.error(f"Failed to send verification email to {email}: {e}")
             sent = False
 
-        _PENDING_LOGINS[(binding["id"], message.sender_id)] = email
+        _set_pending_login(binding["id"], message.sender_id, email)
 
         if not sent:
             return (
@@ -526,7 +619,7 @@ class TelegramAdapter(ChannelAdapter):
         if not binding:
             return "Logout is unavailable for this chat."
         db.clear_telegram_verified_email(binding["id"], message.sender_id)
-        _PENDING_LOGINS.pop((binding["id"], message.sender_id), None)
+        _clear_pending_login(binding["id"], message.sender_id)
         return "👋 Logged out. Send <code>/login your@email.com</code> to sign in again."
 
     # =========================================================================

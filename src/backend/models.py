@@ -94,6 +94,7 @@ class ParallelTaskRequest(BaseModel):
     create_new_session: Optional[bool] = False  # If true, close existing active sessions and create a new one
     chat_session_id: Optional[str] = None  # Explicit chat session ID to save messages to (for continuing existing sessions)
     resume_session_id: Optional[str] = None  # Claude Code session ID to resume (EXEC-023)
+    inject_result: Optional[bool] = False  # If true and self-task, inject result as message in originating chat session (SELF-EXEC-001)
 
 
 # ============================================================================
@@ -113,6 +114,9 @@ class ActivityType(str, Enum):
 
     # Collaboration activities
     AGENT_COLLABORATION = "agent_collaboration"
+
+    # Self-execute activities (agent runs background task on itself during chat)
+    SELF_TASK = "self_task"
 
     # Execution control activities
     EXECUTION_CANCELLED = "execution_cancelled"
@@ -185,11 +189,25 @@ class TaskExecutionStatus(str, Enum):
     Used across: TaskExecutionService, db/schedules.py, scheduler/database.py, chat.py, cleanup_service.py.
     NOT used by: process_engine (has its own ExecutionStatus), ExecutionQueue (uses QueueItemStatus).
     """
+    QUEUED = "queued"  # BACKLOG-001: Persisted async task waiting for a free slot
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
+
+
+class BusinessStatus(str, Enum):
+    """
+    Business validation status for task executions (VALIDATE-001).
+
+    Separate from technical TaskExecutionStatus — an execution can complete
+    successfully (technical status) but fail business validation.
+    """
+    PENDING_VALIDATION = "pending_validation"  # Execution completed, awaiting validation
+    VALIDATED = "validated"                     # Validation passed
+    FAILED_VALIDATION = "failed_validation"    # Validation found incomplete/incorrect work
+    SKIPPED = "skipped"                        # Validation not configured for this schedule
 
 
 class QueueItemStatus(str, Enum):
@@ -317,6 +335,11 @@ class DeployLocalRequest(BaseModel):
     """Request to deploy a local agent."""
     archive: str  # Base64-encoded tar.gz
     name: Optional[str] = None  # Override name from template.yaml
+    credentials: Optional[Dict[str, str]] = None  # Optional credentials to inject {KEY: value}
+
+
+# Maximum credentials allowed per deploy-local request
+MAX_DEPLOY_CREDENTIALS = 100
 
 
 class DeployLocalResponse(BaseModel):
@@ -324,6 +347,8 @@ class DeployLocalResponse(BaseModel):
     status: str  # "success" or "error"
     agent: Optional[AgentStatus] = None
     versioning: Optional[VersioningInfo] = None
+    credentials_imported: Optional[Dict[str, str]] = None  # Files found in archive
+    credentials_injected: Optional[int] = None  # Count of credentials injected
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
 

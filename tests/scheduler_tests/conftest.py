@@ -89,7 +89,7 @@ def initialized_db(temp_db_path: str) -> Generator[str, None, None]:
     conn = sqlite3.connect(temp_db_path)
     cursor = conn.cursor()
 
-    # Create necessary tables (MODEL-001: Added model column)
+    # Create necessary tables (MODEL-001: Added model column, RETRY-001: Added retry columns)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS agent_schedules (
             id TEXT PRIMARY KEY,
@@ -105,11 +105,13 @@ def initialized_db(temp_db_path: str) -> Generator[str, None, None]:
             updated_at TEXT NOT NULL,
             last_run_at TEXT,
             next_run_at TEXT,
-            model TEXT
+            model TEXT,
+            max_retries INTEGER DEFAULT 1,
+            retry_delay_seconds INTEGER DEFAULT 60
         )
     """)
 
-    # MODEL-001: Added model_used column
+    # MODEL-001: Added model_used column, RETRY-001: Added retry tracking columns
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS schedule_executions (
             id TEXT PRIMARY KEY,
@@ -135,7 +137,10 @@ def initialized_db(temp_db_path: str) -> Generator[str, None, None]:
             source_mcp_key_id TEXT,
             source_mcp_key_name TEXT,
             model_used TEXT,
-            skip_reason TEXT
+            skip_reason TEXT,
+            attempt_number INTEGER DEFAULT 1,
+            retry_of_execution_id TEXT,
+            retry_scheduled_at TEXT
         )
     """)
 

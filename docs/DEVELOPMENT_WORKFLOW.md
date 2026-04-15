@@ -164,7 +164,9 @@ See `docs/memory/feature-flows.md` for the complete index.
 curl http://localhost:8000/health
 
 # Run tests
-# Use the test-runner agent
+/test-runner              # Run full test suite
+/test-runner auth         # Run tests matching "auth"
+/test-runner --verbose    # Include detailed output
 ```
 
 #### Documentation
@@ -347,13 +349,13 @@ Keep these in sync at all times:
 
 ## Sub-Agents Reference
 
-| Agent | Use When |
-|-------|----------|
-| `test-runner` | After development to validate changes |
+| Agent / Skill | Use When |
+|---------------|----------|
+| `/test-runner` | After development to validate changes (run full test suite) |
 | `feature-flow-analyzer` | After modifying feature behavior |
 | `security-analyzer` | Before commits touching auth, credentials, or APIs |
 
-Agents are invoked automatically by Claude Code when appropriate, or you can request them directly.
+Agents are invoked automatically by Claude Code when appropriate. The `/test-runner` skill can be invoked directly with optional arguments (e.g., `/test-runner auth --verbose`).
 
 ---
 
@@ -371,6 +373,7 @@ Agents are invoked automatically by Claude Code when appropriate, or you can req
 | `/sync-feature-flows` | Sync feature flow docs with code changes | In Progress |
 | `/security-check` | Validate no secrets in staged files | In Progress |
 | `/add-testing` | Add tests for a feature | In Progress |
+| `/test-runner [filter] [--verbose]` | Run API test suite with report | In Progress / Review |
 | `/validate-pr <number>` | Validate PR against methodology | Review |
 | `/validate-architecture` | Validate codebase against 16 architectural invariants | Weekly / Review |
 | `/validate-schema` | Check schema.py vs migrations.py vs architecture.md for drift | Weekly |
@@ -437,7 +440,7 @@ Skills in `.claude/skills/` define HOW to approach specific tasks:
 - [ ] `/implement` — build the feature
 - [ ] `/review` — pre-landing code review
 - [ ] `/cso --diff` — security audit of changes (recommended for P0/P1)
-- [ ] Run tests (`test-runner` agent)
+- [ ] `/test-runner` — run API test suite
 - [ ] `/sync-feature-flows` — update documentation
 - [ ] Open PR with `Fixes #N`, run `/validate-pr`
 - [ ] Squash merge when approved

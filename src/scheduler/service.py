@@ -9,7 +9,7 @@ import asyncio
 import logging
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -69,6 +69,9 @@ class SchedulerService:
         # Maps schedule_id -> (enabled, updated_at_iso)
         self._schedule_snapshot: Dict[str, tuple] = {}
         self._process_schedule_snapshot: Dict[str, tuple] = {}
+
+        # Issue #132: Track active background polling tasks for graceful shutdown
+        self._active_poll_tasks: set = set()
 
     @property
     def redis(self) -> redis.Redis:
@@ -139,6 +142,9 @@ class SchedulerService:
         logger.info(f"Schedule sync interval: {config.schedule_reload_interval}s")
         logger.info(f"Misfire grace time: {config.misfire_grace_time}s")
 
+        # RETRY-001: Recover any pending retries from before restart
+        self._recover_pending_retries()
+
     def _get_missed_schedules(self, schedules: List[Schedule]) -> List[Schedule]:
         """
         Detect schedules that missed their last expected run (Issue #145).
@@ -199,6 +205,13 @@ class SchedulerService:
             self.scheduler.shutdown(wait=False)
             self._initialized = False
             logger.info("Scheduler shutdown")
+
+        # Issue #132: Cancel active poll tasks on shutdown
+        if self._active_poll_tasks:
+            logger.info(f"Cancelling {len(self._active_poll_tasks)} active poll tasks")
+            for task in self._active_poll_tasks:
+                task.cancel()
+            self._active_poll_tasks.clear()
 
         if self._redis:
             self._redis.close()
@@ -726,6 +739,21 @@ class SchedulerService:
             status = result.get("status", ExecutionStatus.FAILED)
             error_msg = result.get("error")
 
+            # Issue #132: Handle fire-and-forget dispatch mode.
+            # When status == "dispatched", the backend accepted the task and a
+            # background poll task is running. Update last_run_at immediately
+            # (to ensure missed schedule detection works on restart) and return.
+            # The background task will handle completion events.
+            if status == "dispatched":
+                now = datetime.utcnow()
+                next_run = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
+                self.db.update_schedule_run_times(schedule.id, last_run_at=now, next_run_at=next_run)
+                logger.info(
+                    f"Schedule {schedule.name} dispatched (fire-and-forget), "
+                    f"execution_id={execution.id}, background poll running"
+                )
+                return  # Background task handles completion events
+
             if status == ExecutionStatus.SUCCESS:
                 # Update schedule last run time
                 now = datetime.utcnow()
@@ -868,15 +896,30 @@ class SchedulerService:
 
         # Step 2: Check if backend accepted async mode
         if result.get("status") == "accepted" and result.get("async_mode"):
-            # Async accepted — poll DB for completion
+            # Issue #132: Fire-and-forget — spawn background task for polling,
+            # return immediately so APScheduler job function doesn't block.
+            # This prevents max_instances=1 from skipping subsequent triggers.
             logger.info(
                 f"Backend accepted async execution for {agent_name}, "
-                f"execution_id={execution_id}, polling every {config.poll_interval}s"
+                f"execution_id={execution_id}, spawning background poll task"
             )
-            return await self._poll_execution_completion(
-                execution_id=execution_id,
-                timeout_seconds=timeout_seconds,
+            task = asyncio.create_task(
+                self._poll_and_finalize(
+                    execution_id=execution_id,
+                    timeout_seconds=timeout_seconds,
+                    agent_name=agent_name,
+                )
             )
+            # Track task for graceful shutdown
+            self._active_poll_tasks.add(task)
+            task.add_done_callback(self._active_poll_tasks.discard)
+
+            # Return immediately with "dispatched" status
+            return {
+                "status": "dispatched",
+                "async_mode": True,
+                "execution_id": execution_id,
+            }
 
         # Backward compatibility: backend returned a sync result (old backend
         # without async_mode support). Use the result directly.
@@ -935,6 +978,453 @@ class SchedulerService:
             f"Polling deadline exceeded for execution {execution_id} "
             f"(timeout_seconds={timeout_seconds}, polls={poll_count})"
         )
+
+    async def _poll_and_finalize(
+        self,
+        execution_id: str,
+        timeout_seconds: int,
+        agent_name: str,
+    ):
+        """
+        Background task that polls for execution completion and publishes events.
+
+        Issue #132: This runs as a fire-and-forget background task so the
+        APScheduler job function can return immediately, preventing
+        max_instances=1 from skipping subsequent triggers.
+
+        Args:
+            execution_id: The execution ID to poll
+            timeout_seconds: Task timeout for polling deadline
+            agent_name: Agent name for logging and events
+        """
+        try:
+            result = await self._poll_execution_completion(
+                execution_id=execution_id,
+                timeout_seconds=timeout_seconds,
+            )
+
+            status = result.get("status", ExecutionStatus.FAILED)
+            error_msg = result.get("error")
+
+            # Look up schedule_id from execution record for WebSocket event
+            execution = self.db.get_execution(execution_id)
+            schedule_id = execution.schedule_id if execution else None
+
+            if status == ExecutionStatus.SUCCESS:
+                logger.info(f"Background poll: execution {execution_id} succeeded")
+                await self._publish_event({
+                    "type": "schedule_execution_completed",
+                    "agent": agent_name,
+                    "schedule_id": schedule_id,
+                    "execution_id": execution_id,
+                    "status": "success"
+                })
+
+                # VALIDATE-001: Check if validation is enabled and trigger it
+                await self._maybe_trigger_validation(
+                    execution=execution,
+                    agent_name=agent_name,
+                )
+            else:
+                # Log auth failures specially for diagnostics
+                if error_msg:
+                    auth_indicators = [
+                        "credit balance", "unauthorized", "authentication",
+                        "credentials", "forbidden", "401", "403",
+                        "oauth", "token expired", "not authenticated"
+                    ]
+                    error_lower = error_msg.lower()
+                    is_auth_failure = any(ind in error_lower for ind in auth_indicators)
+
+                    if is_auth_failure:
+                        logger.error(
+                            f"Background poll: execution {execution_id} failed due to auth error: {error_msg}"
+                        )
+                    else:
+                        logger.error(f"Background poll: execution {execution_id} failed: {error_msg}")
+                else:
+                    logger.error(f"Background poll: execution {execution_id} failed (no error detail)")
+
+                await self._publish_event({
+                    "type": "schedule_execution_completed",
+                    "agent": agent_name,
+                    "schedule_id": schedule_id,
+                    "execution_id": execution_id,
+                    "status": "failed",
+                    "error": error_msg
+                })
+
+                # RETRY-001: Check if retry is eligible and schedule it
+                await self._maybe_schedule_retry(
+                    execution=execution,
+                    error_msg=error_msg
+                )
+
+        except asyncio.CancelledError:
+            logger.info(f"Background poll for execution {execution_id} cancelled (shutdown)")
+            raise
+        except Exception as e:
+            # Log but don't propagate - this is a background task
+            logger.error(f"Background poll for execution {execution_id} failed: {e}")
+            # Check if backend already finalized the execution
+            current = self.db.get_execution(execution_id)
+            if current and current.status != ExecutionStatus.RUNNING:
+                logger.info(
+                    f"Execution {execution_id} already finalized as '{current.status}' "
+                    "— background poll error is benign"
+                )
+            else:
+                # Execution stuck in running state - cleanup service will recover
+                logger.warning(
+                    f"Execution {execution_id} may be stuck in 'running' state — "
+                    "cleanup service will recover within 5 minutes"
+                )
+
+    # =========================================================================
+    # Retry Management (RETRY-001)
+    # =========================================================================
+
+    async def _maybe_schedule_retry(
+        self,
+        execution: ScheduleExecution,
+        error_msg: str = None
+    ):
+        """Check if a failed execution is eligible for retry and schedule it.
+
+        Called after _poll_and_finalize detects a failure.
+        """
+        if not execution:
+            return
+
+        # Don't retry skipped or cancelled executions
+        if execution.status in (ExecutionStatus.SKIPPED, ExecutionStatus.CANCELLED):
+            logger.debug(f"Execution {execution.id} status '{execution.status}' is not retriable")
+            return
+
+        # Get the schedule to check retry configuration
+        schedule = self.db.get_schedule(execution.schedule_id)
+        if not schedule:
+            logger.debug(f"Schedule {execution.schedule_id} not found, skipping retry")
+            return
+
+        # Check if retries are enabled
+        max_retries = schedule.max_retries
+        if max_retries <= 0:
+            logger.debug(f"Schedule {schedule.id} has max_retries=0, skipping retry")
+            return
+
+        # Check if we've exceeded retry limit
+        current_attempt = execution.attempt_number or 1
+        if current_attempt > max_retries:
+            logger.info(
+                f"Execution {execution.id} attempt {current_attempt} exceeds max_retries={max_retries}, "
+                "no more retries"
+            )
+            return
+
+        # Calculate retry delay
+        retry_delay = schedule.retry_delay_seconds
+
+        # Check for rate limit (429) in error - use 2x delay, capped at 300s
+        if error_msg:
+            error_lower = error_msg.lower()
+            if "429" in error_lower or "rate limit" in error_lower or "too many requests" in error_lower:
+                retry_delay = min(300, retry_delay * 2)
+                logger.info(f"Rate limit detected, using 2x delay: {retry_delay}s")
+
+        # Schedule the retry
+        retry_at = datetime.utcnow() + timedelta(seconds=retry_delay)
+
+        logger.info(
+            f"Scheduling retry for execution {execution.id} "
+            f"(attempt {current_attempt + 1}/{max_retries + 1}) at {retry_at.isoformat()}"
+        )
+
+        # Persist retry intent to DB (survives restart)
+        self.db.schedule_retry(execution.id, retry_at)
+
+        # Schedule APScheduler date trigger
+        self._schedule_retry_job(
+            execution=execution,
+            schedule=schedule,
+            retry_at=retry_at,
+            next_attempt_number=current_attempt + 1
+        )
+
+    def _schedule_retry_job(
+        self,
+        execution: ScheduleExecution,
+        schedule: Schedule,
+        retry_at: datetime,
+        next_attempt_number: int
+    ):
+        """Schedule an APScheduler date trigger for retry."""
+        from apscheduler.triggers.date import DateTrigger
+
+        # Find the original execution ID for linking
+        original_id = self.db.get_original_execution_id(execution.id)
+
+        job_id = f"retry_{execution.id}"
+
+        # Remove any existing retry job for this execution
+        try:
+            self.scheduler.remove_job(job_id)
+        except Exception:
+            pass
+
+        self.scheduler.add_job(
+            self._execute_retry,
+            trigger=DateTrigger(run_date=retry_at),
+            id=job_id,
+            kwargs={
+                "original_execution_id": original_id,
+                "failed_execution_id": execution.id,
+                "schedule_id": schedule.id,
+                "agent_name": schedule.agent_name,
+                "message": schedule.message,
+                "timeout_seconds": schedule.timeout_seconds,
+                "model": schedule.model,
+                "allowed_tools": schedule.allowed_tools,
+                "next_attempt_number": next_attempt_number,
+            },
+            replace_existing=True
+        )
+
+    async def _execute_retry(
+        self,
+        original_execution_id: str,
+        failed_execution_id: str,
+        schedule_id: str,
+        agent_name: str,
+        message: str,
+        timeout_seconds: int,
+        model: str,
+        allowed_tools: list,
+        next_attempt_number: int
+    ):
+        """Execute a scheduled retry.
+
+        Called by APScheduler when the date trigger fires.
+        """
+        logger.info(
+            f"Executing retry for schedule {schedule_id}, agent {agent_name}, "
+            f"attempt {next_attempt_number}"
+        )
+
+        # Clear the retry_scheduled_at from the failed execution
+        self.db.clear_retry_scheduled(failed_execution_id)
+
+        # Check if agent still exists (in case it was deleted while retry was pending)
+        schedule = self.db.get_schedule(schedule_id)
+        if not schedule or not schedule.enabled:
+            logger.warning(
+                f"Schedule {schedule_id} no longer exists or is disabled, "
+                "skipping retry execution"
+            )
+            return
+
+        # Create a new execution record for the retry
+        retry_execution = self.db.create_execution(
+            schedule_id=schedule_id,
+            agent_name=agent_name,
+            message=message,
+            triggered_by="retry",
+            model_used=model,
+            attempt_number=next_attempt_number,
+            retry_of_execution_id=original_execution_id
+        )
+
+        if not retry_execution:
+            logger.error(f"Failed to create retry execution record for schedule {schedule_id}")
+            return
+
+        # Execute the task via the backend
+        try:
+            await self._call_backend_execute_task(
+                agent_name=agent_name,
+                message=message,
+                triggered_by="retry",
+                timeout_seconds=timeout_seconds,
+                model=model,
+                allowed_tools=allowed_tools,
+                execution_id=retry_execution.id
+            )
+        except Exception as e:
+            logger.error(f"Retry execution failed for {retry_execution.id}: {e}")
+            self.db.update_execution_status(
+                execution_id=retry_execution.id,
+                status=ExecutionStatus.FAILED,
+                error=str(e)[:2000]
+            )
+
+    def _recover_pending_retries(self):
+        """Recover pending retries after scheduler restart.
+
+        Called during initialization to reschedule any retries that were
+        pending when the scheduler shut down.
+        """
+        pending = self.db.get_pending_retries()
+        if not pending:
+            return
+
+        logger.info(f"Recovering {len(pending)} pending retries after restart")
+
+        now = datetime.utcnow()
+        for execution in pending:
+            schedule = self.db.get_schedule(execution.schedule_id)
+            if not schedule or not schedule.enabled:
+                # Schedule deleted or disabled, clear the retry
+                logger.info(
+                    f"Schedule {execution.schedule_id} no longer valid, "
+                    f"clearing retry for execution {execution.id}"
+                )
+                self.db.clear_retry_scheduled(execution.id)
+                continue
+
+            retry_at = execution.retry_scheduled_at
+            if retry_at < now:
+                # Retry time has passed, execute immediately
+                retry_at = now + timedelta(seconds=5)
+                logger.info(
+                    f"Retry for execution {execution.id} was scheduled for "
+                    f"{execution.retry_scheduled_at}, executing in 5s"
+                )
+
+            self._schedule_retry_job(
+                execution=execution,
+                schedule=schedule,
+                retry_at=retry_at,
+                next_attempt_number=(execution.attempt_number or 1) + 1
+            )
+
+    # =========================================================================
+    # Validation Management (VALIDATE-001)
+    # =========================================================================
+
+    async def _maybe_trigger_validation(
+        self,
+        execution: ScheduleExecution,
+        agent_name: str,
+    ):
+        """Check if a successful execution should be validated and trigger it.
+
+        Called after _poll_and_finalize detects a success.
+
+        Args:
+            execution: The completed execution record.
+            agent_name: The agent name for logging.
+        """
+        if not execution:
+            return
+
+        # Skip validation for validation executions (prevent infinite loop)
+        if execution.triggered_by == "validation":
+            logger.debug(f"Execution {execution.id} is a validation execution, skipping validation")
+            return
+
+        # Skip if execution already has a validation (duplicate prevention)
+        if execution.validation_execution_id:
+            logger.debug(f"Execution {execution.id} already has validation {execution.validation_execution_id}")
+            return
+
+        # Get the schedule to check validation configuration
+        schedule = self.db.get_schedule(execution.schedule_id)
+        if not schedule:
+            logger.debug(f"Schedule {execution.schedule_id} not found, skipping validation")
+            return
+
+        # Check if validation is enabled
+        if not schedule.validation_enabled:
+            logger.debug(f"Schedule {schedule.id} has validation_enabled=False, skipping validation")
+            # Mark as skipped for visibility
+            self._update_business_status(execution.id, "skipped")
+            return
+
+        logger.info(
+            f"Triggering validation for execution {execution.id} "
+            f"(schedule {schedule.id}, agent {agent_name})"
+        )
+
+        # Trigger validation via backend API
+        try:
+            await self._call_backend_trigger_validation(
+                execution_id=execution.id,
+                agent_name=agent_name,
+                schedule_id=schedule.id,
+                original_message=execution.message,
+                execution_response=execution.response or "",
+                custom_prompt=schedule.validation_prompt,
+                timeout_seconds=schedule.validation_timeout_seconds,
+            )
+        except Exception as e:
+            logger.error(f"Failed to trigger validation for execution {execution.id}: {e}")
+            # Mark as failed validation if trigger fails
+            self._update_business_status(execution.id, "failed_validation")
+
+    async def _call_backend_trigger_validation(
+        self,
+        execution_id: str,
+        agent_name: str,
+        schedule_id: str,
+        original_message: str,
+        execution_response: str,
+        custom_prompt: str = None,
+        timeout_seconds: int = 120,
+    ) -> dict:
+        """Call the backend API to trigger validation.
+
+        Args:
+            execution_id: The execution to validate.
+            agent_name: The agent to run validation on.
+            schedule_id: The schedule ID.
+            original_message: The original task message.
+            execution_response: The response from the original execution.
+            custom_prompt: Optional custom auditor prompt.
+            timeout_seconds: Timeout for validation task.
+
+        Returns:
+            dict with validation result.
+        """
+        url = f"{config.backend_url}/api/internal/validate-execution"
+
+        payload = {
+            "execution_id": execution_id,
+            "agent_name": agent_name,
+            "schedule_id": schedule_id,
+            "original_message": original_message,
+            "execution_response": execution_response,
+            "custom_prompt": custom_prompt,
+            "timeout_seconds": timeout_seconds,
+        }
+
+        headers = {"X-Internal-Secret": config.internal_api_secret}
+
+        async with httpx.AsyncClient(timeout=float(timeout_seconds) + 30) as client:
+            response = await client.post(url, json=payload, headers=headers)
+
+            if response.status_code >= 400:
+                logger.error(
+                    f"Backend validation trigger failed: {response.status_code} - {response.text}"
+                )
+                response.raise_for_status()
+
+            return response.json()
+
+    def _update_business_status(self, execution_id: str, business_status: str):
+        """Update the business status of an execution in the database.
+
+        Args:
+            execution_id: The execution to update.
+            business_status: The new business status.
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE schedule_executions
+                SET business_status = ?, validated_at = ?
+                WHERE id = ?
+            """, (business_status, datetime.utcnow().isoformat(), execution_id))
+            conn.commit()
 
     # =========================================================================
     # Schedule Management (for runtime updates)

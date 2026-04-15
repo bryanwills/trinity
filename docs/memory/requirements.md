@@ -379,6 +379,36 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Validation: 60-7200s (1 min to 2 hours)
 - **Flow**: `docs/memory/feature-flows/parallel-capacity.md` (updated), `docs/memory/feature-flows/task-execution-service.md` (updated)
 
+### 10.8 Persistent Task Backlog (BACKLOG-001)
+- **Status**: ✅ Implemented (2026-04-13)
+- **Requirement ID**: BACKLOG-001
+- **GitHub Issue**: #260
+- **Description**: Async `/task` requests that arrive at full parallel capacity now spill into a durable SQLite-backed FIFO backlog instead of returning HTTP 429. Queued items drain automatically when slots free via a `SlotService` release callback; 60s maintenance task expires stale rows and drains orphans after restart.
+- **Key Features**:
+  - New `QUEUED` value on `TaskExecutionStatus`; reuses `schedule_executions` with `queued_at` + `backlog_metadata` columns
+  - Partial index `idx_executions_queued` for cheap O(log n) FIFO claim via atomic `UPDATE ... RETURNING`
+  - Per-agent `max_backlog_depth` setting (default 50, validated 1-200)
+  - True HTTP 429 only when the backlog is also full
+  - Terminate-while-queued short-circuit (no container interaction)
+  - Agent delete cascades to cancel queued rows
+  - Frontend: amber `queued` badge in Tasks tab and Execution Detail
+  - Identity captured at enqueue and replayed at drain (no re-auth, matches scheduler pattern)
+- **Flow**: `docs/memory/feature-flows/persistent-task-backlog.md`
+
+### 10.9 Business Task Validation (VALIDATE-001)
+- **Status**: ✅ Implemented (2026-04-14)
+- **Requirement ID**: VALIDATE-001
+- **GitHub Issue**: #294
+- **Description**: Post-execution validation phase that runs a clean-context Claude session with auditor framing to verify business task completion. Separates technical success (Claude ran without errors) from business success (intended work was done).
+- **Key Features**:
+  - Per-schedule `validation_enabled`, `validation_prompt`, `validation_timeout_seconds` config
+  - `business_status` field on executions: `pending_validation`, `validated`, `failed_validation`, `skipped`
+  - Linked validation execution records via `validates_execution_id` / `validation_execution_id`
+  - Default auditor prompt with explicit framing and JSON response format
+  - Fallback text inference when JSON parsing fails
+  - Operator queue notification on validation failure
+- **Flow**: `docs/memory/feature-flows/business-validation.md`
+
 ---
 
 ## 11. GitHub Integration
@@ -423,15 +453,26 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Flow**: `docs/memory/feature-flows/system-agent-ui.md`
 
 ### 12.5 OpenTelemetry Integration
-- **Status**: ✅ Implemented (2025-12-20)
-- **Description**: OTel metrics export from Claude Code agents
-- **Key Features**: Cost, tokens, productivity metrics in Dashboard
+- **Status**: ✅ Implemented (2025-12-20, extended 2026-04-14)
+- **Description**: OTel metrics export from Claude Code agents + backend distributed tracing
+- **Key Features**: Cost, tokens, productivity metrics in Dashboard; trace_id in logs for multi-agent request correlation (RELIABILITY-002)
 - **Flow**: `docs/memory/feature-flows/opentelemetry-integration.md`
 
 ### 12.6 System-Wide Trinity Prompt
 - **Status**: ✅ Implemented (2025-12-14, refactored 2026-03-15 Issue #136)
 - **Description**: Admin-configurable prompt injected at runtime via `--append-system-prompt` on every Claude Code invocation
 - **Flow**: `docs/memory/feature-flows/system-wide-trinity-prompt.md`
+
+### 12.6.1 Execution Context Injection (#171)
+- **Status**: ✅ Implemented (2026-04-14)
+- **Description**: Dynamic per-invocation `## Execution Context` block appended to every agent system prompt so agents can self-calibrate. Carries mode (chat vs autonomous task), trigger source, model, timeout budget, own name, permitted collaborators, schedule metadata, and timestamp.
+- **Key Features**:
+  - Single composition seam (`platform_prompt_service.compose_system_prompt`) for all invocation paths (chat / task / schedule / mcp / agent-to-agent / fan-out / paid / public)
+  - Behavioral guidance per mode: chat mode permits clarifying questions; task mode enforces execute-to-completion
+  - User-controlled metadata (schedule name, MCP key name) sanitized before rendering — strips control chars, backticks, and markdown heading markers, caps length — to prevent prompt-injection via metadata fields
+  - Builder failures never fail a request: always falls back to the base platform prompt
+  - Operator kill-switch via `trinity_execution_context_enabled` setting (default enabled)
+- **Flow**: `docs/memory/feature-flows/execution-context-injection.md`
 
 ### 12.7 Vector Memory
 - **Status**: ❌ Removed (2025-12-24)
@@ -1025,16 +1066,27 @@ The Process Engine supports six step types:
 ## 20. Security & Compliance
 
 ### 20.1 Audit Trail System (SEC-001)
-- **Status**: ⏳ Pending Implementation
+- **Status**: 🚧 Phase 1 implemented (2026-04-14, Issue #20). Phases 2–4 pending.
 - **Requirement ID**: SEC-001
 - **Priority**: HIGH
 - **Description**: Comprehensive audit logging for all user and agent actions with full actor attribution. Enables investigation, compliance reporting, and accountability.
 - **Key Features**:
-  - Append-only `audit_log` table with immutability triggers
+  - Append-only `audit_log` table with immutability triggers (UPDATE blocked unconditionally; DELETE blocked within 365-day retention)
   - Full actor attribution (user, agent, MCP client, system)
   - MCP API key tracking per tool call
-  - Hash chain for tamper evidence (optional compliance mode)
-  - Query API with filters and export (CSV/JSON)
+  - Hash chain for tamper evidence (Phase 4 — code present but dormant in Phase 1)
+  - Query API with filters, pagination, and stats aggregation
+  - Distinct from Process Engine audit (`audit_entries`) — coexist intentionally
+- **Phase 1 Delivery (#20, this PR)**:
+  - `audit_log` table + indexes + immutability triggers (`db/schema.py`, migration #31)
+  - `PlatformAuditOperations` (`db/audit.py`)
+  - `PlatformAuditService` with global instance (`services/platform_audit_service.py`)
+  - Admin query API: `GET /api/audit-log`, `GET /api/audit-log/stats`, `GET /api/audit-log/{event_id}`
+  - 29 unit tests (schema, query, filters, pagination, immutability, service actor resolution, error handling, lifecycle integration shape)
+- **Phase 2a Delivery (#20, same PR — agent lifecycle smoke test)**:
+  - `routers/agents.py` emits audit rows after successful create / start / stop / delete
+  - 5 integration-shape tests asserting the exact field layout produced by the handlers
+  - End-to-end verifiable: UI agent action → row appears in `/api/audit-log`
 - **Event Categories**:
   - `AGENT_LIFECYCLE`: create, start, stop, delete, recreate
   - `EXECUTION`: task_triggered, chat_started, schedule_triggered
@@ -1046,11 +1098,13 @@ The Process Engine supports six step types:
   - `GIT_OPERATION`: sync, pull, init, commit
   - `SYSTEM`: startup, shutdown, emergency_stop
 - **Architecture**: `docs/requirements/AUDIT_TRAIL_ARCHITECTURE.md`
+- **Flow**: `docs/memory/feature-flows/audit-trail.md`
 - **Implementation Phases**:
-  1. Core infrastructure (table, service, API)
-  2. Backend integration (lifecycle, auth, permissions)
-  3. MCP integration (tool call audit)
-  4. Advanced features (hash chain, export, retention)
+  1. ✅ Core infrastructure (table, service, db ops, API, tests) — landed in this PR
+  2a. ✅ Agent lifecycle integration (create / start / stop / delete) — landed in this PR as smoke test
+  2b. ⏳ Remaining backend integration (auth, sharing, settings, credentials, rename, request_id middleware)
+  3. ⏳ MCP integration (TypeScript audit logging for tool calls)
+  4. ⏳ Advanced features (hash chain verification, CSV/JSON export, retention automation, admin UI)
 
 ### 20.2 Execution Origin Tracking (AUDIT-001)
 - **Status**: ⏳ Pending Implementation

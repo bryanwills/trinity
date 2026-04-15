@@ -1,2 +1,0 @@
-# Test Agent
-Quota test.

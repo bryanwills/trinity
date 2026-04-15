@@ -115,6 +115,13 @@ class ScheduleCreate(BaseModel):
     timeout_seconds: int = 900  # Default 15 minutes
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
+    # Retry configuration (RETRY-001)
+    max_retries: int = 1  # 0 = disabled, 1-5 range. Default 1 for resilience.
+    retry_delay_seconds: int = 60  # Seconds between retries (30-600 range)
+    # Validation configuration (VALIDATE-001)
+    validation_enabled: bool = False  # Enable post-execution validation
+    validation_prompt: Optional[str] = None  # Custom auditor instructions (None = default prompt)
+    validation_timeout_seconds: int = 120  # Timeout for validation task (30-600 range)
 
 
 class Schedule(BaseModel):
@@ -135,6 +142,13 @@ class Schedule(BaseModel):
     timeout_seconds: int = 900  # Default 15 minutes
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
+    # Retry configuration (RETRY-001)
+    max_retries: int = 1  # 0 = disabled, 1-5 range
+    retry_delay_seconds: int = 60  # Seconds between retries (30-600 range)
+    # Validation configuration (VALIDATE-001)
+    validation_enabled: bool = False  # Enable post-execution validation
+    validation_prompt: Optional[str] = None  # Custom auditor instructions (None = default prompt)
+    validation_timeout_seconds: int = 120  # Timeout for validation task (30-600 range)
 
 
 class ScheduleExecution(BaseModel):
@@ -170,6 +184,18 @@ class ScheduleExecution(BaseModel):
     fan_out_id: Optional[str] = None           # Parent fan-out operation ID
     # Subscription usage tracking (SUB-004)
     subscription_id: Optional[str] = None      # Subscription active at record time
+    # Persistent backlog (BACKLOG-001)
+    queued_at: Optional[datetime] = None       # ISO timestamp for FIFO ordering when status=queued
+    backlog_metadata: Optional[str] = None     # JSON blob of the full ParallelTaskRequest context
+    # Retry tracking (RETRY-001)
+    attempt_number: int = 1                    # Which attempt this is (1 = first try)
+    retry_of_execution_id: Optional[str] = None  # Links retry to original execution
+    retry_scheduled_at: Optional[datetime] = None  # When retry is scheduled (for restart recovery)
+    # Validation tracking (VALIDATE-001)
+    business_status: Optional[str] = None       # pending_validation, validated, failed_validation, skipped
+    validated_at: Optional[datetime] = None     # When validation completed
+    validation_execution_id: Optional[str] = None  # FK to the validation execution record
+    validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)
 
 
 # =========================================================================
@@ -446,13 +472,15 @@ class EmailWhitelistEntry(BaseModel):
     added_by: str  # User ID
     added_by_username: Optional[str] = None
     added_at: datetime
-    source: str  # "manual", "agent_sharing"
+    source: str  # "manual", "agent_sharing", "access_request", "cli"
+    default_role: str = "user"  # Role assigned on first email login (#314)
 
 
 class EmailWhitelistAdd(BaseModel):
     """Request to add an email to the whitelist."""
     email: str
     source: str = "manual"
+    default_role: str = "user"  # Role assigned on first email login (#314)
 
 
 class EmailLoginRequest(BaseModel):

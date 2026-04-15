@@ -1,0 +1,205 @@
+"""
+Platform Audit Service (SEC-001 / Issue #20 — Phase 1).
+
+Single entry point for cross-cutting audit logging across the Trinity
+platform: agent lifecycle, authentication, authorization, configuration,
+credentials, MCP operations, git operations, and system events.
+
+Distinct from the Process Engine's `AuditService`
+(`services/process_engine/services/audit.py`) which records process
+workflow events. The two systems are intentionally separate per the
+SEC-001 architecture document; a unified query layer can span both later.
+
+Phase 1 ships the service surface and the global instance. Phase 2
+will sprinkle `await platform_audit_service.log(...)` calls through the
+existing routers and services.
+"""
+
+import hashlib
+import json
+import logging
+import uuid
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Dict, Optional
+
+from database import db
+
+logger = logging.getLogger(__name__)
+
+
+class AuditEventType(str, Enum):
+    """High-level categories for audit events.
+
+    Action strings (e.g. "create", "login_success") are free-form within a
+    category — keep them lowercase, snake_case, and stable so historical
+    queries remain meaningful.
+    """
+
+    AGENT_LIFECYCLE = "agent_lifecycle"
+    EXECUTION = "execution"
+    AUTHENTICATION = "authentication"
+    AUTHORIZATION = "authorization"
+    CONFIGURATION = "configuration"
+    CREDENTIALS = "credentials"
+    MCP_OPERATION = "mcp_operation"
+    GIT_OPERATION = "git_operation"
+    SYSTEM = "system"
+
+
+class AuditActorType(str, Enum):
+    """Who performed the action."""
+
+    USER = "user"          # human via UI / API token
+    AGENT = "agent"        # agent container acting on its own
+    MCP_CLIENT = "mcp_client"  # external client via MCP API key
+    SYSTEM = "system"      # platform itself (scheduler, system agent)
+
+
+class PlatformAuditService:
+    """Centralized audit logging with immutability guarantees.
+
+    - Actor attribution from JWT user, agent name, or MCP context
+    - Append-only writes through `db.create_audit_entry`
+    - Optional hash chain (Phase 4) for tamper evidence — disabled by default
+    - Errors are logged but never raised; audit failures must not break the
+      caller's primary operation
+    """
+
+    def __init__(self) -> None:
+        self._last_hash: Optional[str] = None
+        self._hash_chain_enabled = False  # Phase 4 toggle
+
+    async def log(
+        self,
+        event_type: AuditEventType,
+        event_action: str,
+        source: str,
+        *,
+        # Actor — supply at least one
+        actor_user: Optional[Any] = None,        # Pydantic User model
+        actor_agent_name: Optional[str] = None,
+        actor_ip: Optional[str] = None,
+        # MCP context (when via MCP API key)
+        mcp_key_id: Optional[str] = None,
+        mcp_key_name: Optional[str] = None,
+        mcp_scope: Optional[str] = None,
+        # Target
+        target_type: Optional[str] = None,
+        target_id: Optional[str] = None,
+        # Request context
+        request_id: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Log a single audit event.
+
+        Returns the generated `event_id` (UUID) on success, or `None` on
+        failure. Callers should not branch on the return value — audit
+        logging is best-effort and must not affect business logic.
+        """
+        try:
+            event_id = str(uuid.uuid4())
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+            actor_type, actor_id, actor_email = self._resolve_actor(
+                actor_user=actor_user,
+                actor_agent_name=actor_agent_name,
+                mcp_scope=mcp_scope,
+                mcp_key_id=mcp_key_id,
+            )
+
+            entry: Dict[str, Any] = {
+                "event_id": event_id,
+                "event_type": event_type.value
+                if isinstance(event_type, AuditEventType)
+                else str(event_type),
+                "event_action": str(event_action),
+                "actor_type": actor_type,
+                "actor_id": actor_id,
+                "actor_email": actor_email,
+                "actor_ip": actor_ip,
+                "mcp_key_id": mcp_key_id,
+                "mcp_key_name": mcp_key_name,
+                "mcp_scope": mcp_scope,
+                "target_type": target_type,
+                "target_id": str(target_id) if target_id is not None else None,
+                "timestamp": timestamp,
+                "details": json.dumps(details) if details else None,
+                "request_id": request_id,
+                "source": source,
+                "endpoint": endpoint,
+                "previous_hash": None,
+                "entry_hash": None,
+            }
+
+            if self._hash_chain_enabled:
+                entry["previous_hash"] = self._last_hash
+                entry["entry_hash"] = self._compute_hash(entry)
+                self._last_hash = entry["entry_hash"]
+
+            db.create_audit_entry(entry)
+            return event_id
+
+        except Exception as e:
+            # Audit failures are non-fatal: log loudly but never raise.
+            logger.error(
+                "[PlatformAuditService] failed to write audit entry "
+                f"({event_type}/{event_action}): {e}",
+                exc_info=True,
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_actor(
+        actor_user: Optional[Any],
+        actor_agent_name: Optional[str],
+        mcp_scope: Optional[str],
+        mcp_key_id: Optional[str],
+    ) -> tuple:
+        """Determine (actor_type, actor_id, actor_email) from inputs.
+
+        Precedence: user > agent > mcp_scope=='system' > mcp_client.
+        Returns ('system', 'trinity-system', None) for system events with no
+        identifiable actor — never returns all-None so the NOT NULL
+        actor_type column is satisfied.
+        """
+        if actor_user is not None:
+            return (
+                AuditActorType.USER.value,
+                str(getattr(actor_user, "id", None) or ""),
+                getattr(actor_user, "email", None),
+            )
+        if actor_agent_name:
+            return (AuditActorType.AGENT.value, actor_agent_name, None)
+        if mcp_scope == "system":
+            return (AuditActorType.SYSTEM.value, "trinity-system", None)
+        if mcp_key_id:
+            return (AuditActorType.MCP_CLIENT.value, mcp_key_id, None)
+        return (AuditActorType.SYSTEM.value, "trinity-system", None)
+
+    @staticmethod
+    def _compute_hash(entry: Dict[str, Any]) -> str:
+        """SHA-256 over a stable subset of the entry. Used only when hash chain is enabled."""
+        content = json.dumps(
+            {
+                "event_id": entry["event_id"],
+                "event_type": entry["event_type"],
+                "event_action": entry["event_action"],
+                "actor_id": entry.get("actor_id"),
+                "target_id": entry.get("target_id"),
+                "timestamp": entry["timestamp"],
+                "details": entry.get("details"),
+                "previous_hash": entry.get("previous_hash"),
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(content.encode()).hexdigest()
+
+
+# Global instance — import as `from services.platform_audit_service import platform_audit_service`
+platform_audit_service = PlatformAuditService()

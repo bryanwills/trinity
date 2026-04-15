@@ -153,6 +153,21 @@ class ResourcesMixin:
                 return row["execution_timeout_seconds"]
             return 900  # Default 15 minutes
 
+    def get_all_execution_timeouts(self) -> Dict[str, int]:
+        """
+        Get execution_timeout_seconds for all agents.
+
+        Returns:
+            Dict mapping agent_name to timeout in seconds.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT agent_name, COALESCE(execution_timeout_seconds, 900) as timeout
+                FROM agent_ownership
+            """)
+            return {row["agent_name"]: row["timeout"] for row in cursor.fetchall()}
+
     def set_execution_timeout(self, agent_name: str, timeout_seconds: int) -> bool:
         """
         Set execution_timeout_seconds for an agent.
@@ -174,5 +189,50 @@ class ResourcesMixin:
                 UPDATE agent_ownership SET execution_timeout_seconds = ?
                 WHERE agent_name = ?
             """, (timeout_seconds, agent_name))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    # =========================================================================
+    # Backlog Depth (BACKLOG-001)
+    # =========================================================================
+
+    def get_max_backlog_depth(self, agent_name: str) -> int:
+        """
+        Get max_backlog_depth for an agent (default: 50, cap: 200).
+
+        The backlog holds async tasks that arrived while all parallel slots were
+        busy. When a slot frees, the oldest queued item drains automatically.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COALESCE(max_backlog_depth, 50) as max_backlog_depth
+                FROM agent_ownership WHERE agent_name = ?
+                """,
+                (agent_name,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row["max_backlog_depth"]
+            return 50
+
+    def set_max_backlog_depth(self, agent_name: str, depth: int) -> bool:
+        """
+        Set max_backlog_depth for an agent (valid range 1-200).
+
+        Returns False on out-of-range input or if the agent doesn't exist.
+        """
+        if depth < 1 or depth > 200:
+            return False
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE agent_ownership SET max_backlog_depth = ?
+                WHERE agent_name = ?
+                """,
+                (depth, agent_name),
+            )
             conn.commit()
             return cursor.rowcount > 0

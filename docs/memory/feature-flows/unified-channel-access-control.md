@@ -13,6 +13,8 @@ After #311, all three channels share one gate, one allow-list (`agent_sharing`),
 ## Design Principle
 > **An agent owner manages access by email, not by channel.** Approving `alice@example.com` admits her on Telegram, Slack, and web. Each adapter's job is to prove her email; the platform decides whether she is allowed.
 
+> **Group chats can require at least one verified member.** With `group_auth_mode: "any_verified"`, the first verified user "unlocks" the group for everyone.
+
 ## User Story
 - As an agent owner, I want to gate my agent uniformly across channels so that approving a user once admits them everywhere.
 - As a user contacting an agent on Telegram, I want a clear way to verify my email so the owner can recognize me as the same person who emailed them.
@@ -74,10 +76,23 @@ Web public-chat runs the same gate inline in `src/backend/routers/public.py` (it
 ### Migration: `access_control` (`src/backend/db/migrations.py:1007-1047`)
 
 Idempotent migration that:
-1. Adds two columns to `agent_ownership`:
+1. Adds columns to `agent_ownership`:
    ```sql
    ALTER TABLE agent_ownership ADD COLUMN require_email INTEGER DEFAULT 0;
    ALTER TABLE agent_ownership ADD COLUMN open_access INTEGER DEFAULT 0;
+   ```
+
+### Migration: `group_auth_mode` (`src/backend/db/migrations.py`)
+
+Idempotent migration that:
+1. Adds `group_auth_mode` to `agent_ownership`:
+   ```sql
+   ALTER TABLE agent_ownership ADD COLUMN group_auth_mode TEXT DEFAULT 'none';
+   ```
+2. Adds group verification columns to `telegram_group_configs`:
+   ```sql
+   ALTER TABLE telegram_group_configs ADD COLUMN verified_by_email TEXT;
+   ALTER TABLE telegram_group_configs ADD COLUMN verified_at TEXT;
    ```
 2. Adds two columns to `telegram_chat_links` to bind a verified email to a Telegram user:
    ```sql
@@ -109,8 +124,12 @@ New mixin composed into `AgentOperations` (`db/agents.py:33-40`):
 
 | Method | Purpose |
 |--------|---------|
-| `get_access_policy(agent_name)` | Returns `{require_email: bool, open_access: bool}`. Defaults to `{False, False}` when the agent has no row. |
-| `set_access_policy(agent_name, require_email, open_access)` | Updates both flags atomically on `agent_ownership`. |
+| `get_access_policy(agent_name)` | Returns `{require_email: bool, open_access: bool, group_auth_mode: str}`. Defaults to `{False, False, "none"}` when the agent has no row. |
+| `set_access_policy(agent_name, require_email, open_access, group_auth_mode)` | Updates all three fields atomically on `agent_ownership`. |
+
+**`group_auth_mode` values:**
+- `"none"` (default) — Group chats bypass email verification entirely (legacy behavior)
+- `"any_verified"` — At least one verified member required before the bot responds to anyone in the group
 
 This follows architectural invariant #2 (Mixin Composition for agent settings): each new agent setting is a new mixin, not a bigger class.
 
@@ -183,9 +202,9 @@ New methods on the central `db` singleton:
 
 ## Channel Adapter Layer
 
-### `ChannelAdapter` ABC additions (`src/backend/adapters/base.py:169-212`)
+### `ChannelAdapter` ABC additions (`src/backend/adapters/base.py:169-290`)
 
-Two new methods on the base class — both have safe defaults, so existing adapters keep working without changes (architectural invariant #9):
+Methods on the base class — all have safe defaults, so existing adapters keep working without changes (architectural invariant #9):
 
 ```python
 async def resolve_verified_email(self, message: NormalizedMessage) -> Optional[str]:
@@ -206,6 +225,31 @@ async def prompt_auth(
     """
     Ask the sender to prove an email (channel-specific).
     Default: send a generic text reply with /login instructions.
+    """
+
+# Group Authentication (group_auth_mode support)
+
+async def is_group_verified(self, message: NormalizedMessage, agent_name: str) -> bool:
+    """
+    Check if the group chat has at least one verified member.
+    Called when group_auth_mode == "any_verified".
+    Default: True (allow all — for channels that don't support groups).
+    """
+    return True
+
+async def set_group_verified(self, message: NormalizedMessage, agent_name: str, email: str) -> None:
+    """
+    Mark the group as verified by the given email.
+    Called when a verified user sends the first message to an unverified group.
+    Default: no-op.
+    """
+    pass
+
+async def prompt_group_auth(self, message: NormalizedMessage, agent_name: str, bot_token: Optional[str] = None) -> None:
+    """
+    Prompt for group verification (channel-specific).
+    Called when group_auth_mode == "any_verified" and no one has verified yet.
+    Default: send generic text reply.
     """
 ```
 
@@ -318,9 +362,32 @@ if not is_group:                                    # group chats bypass — see
 source_email = verified_email or adapter.get_source_identifier(message)
 ```
 
-### Group chat bypass
+### Group chat authentication
 
-`is_group = message.metadata.get("is_group", False)` — Telegram group chats skip the entire gate. Group access is gated by the bot being added to the group (a manual operator action), not by per-user identity. This preserves the existing TGRAM-GROUP semantics where every group member can chat freely.
+`is_group = message.metadata.get("is_group", False)` — Group chats have separate authentication logic controlled by `group_auth_mode`:
+
+**`group_auth_mode: "none"` (default)** — Group chats skip email verification entirely. Group access is gated by the bot being added to the group (a manual operator action), not by per-user identity. This preserves the existing TGRAM-GROUP semantics.
+
+**`group_auth_mode: "any_verified"`** — At least one group member must verify their email before the bot responds to anyone:
+
+```python
+# In message_router.py step 5b
+if is_group:
+    group_auth_mode = policy.get("group_auth_mode", "none")
+    if group_auth_mode == "any_verified":
+        group_verified = await adapter.is_group_verified(message, agent_name)
+        if not group_verified:
+            verified_email = await adapter.resolve_verified_email(message)
+            if verified_email:
+                # Sender is verified — unlock the group for everyone
+                await adapter.set_group_verified(message, agent_name, verified_email)
+            else:
+                # No one verified — prompt for auth
+                await adapter.prompt_group_auth(message, agent_name, bot_token)
+                return
+```
+
+Once a verified user "unlocks" a group, the `verified_by_email` is stored in `telegram_group_configs` and all subsequent messages from any group member are allowed.
 
 ### Backward compatibility
 
@@ -334,8 +401,8 @@ All four are owner-only via the `OwnedAgentByName` dependency (architectural inv
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/agents/{name}/access-policy` | Owner | Returns `{require_email, open_access}` |
-| PUT | `/api/agents/{name}/access-policy` | Owner | Body: `{require_email, open_access}` |
+| GET | `/api/agents/{name}/access-policy` | Owner | Returns `{require_email, open_access, group_auth_mode}` |
+| PUT | `/api/agents/{name}/access-policy` | Owner | Body: `{require_email, open_access, group_auth_mode}` |
 | GET | `/api/agents/{name}/access-requests?status=pending` | Owner | Lists access requests for the agent |
 | POST | `/api/agents/{name}/access-requests/{id}/decide` | Owner | Body: `{approve: bool}` |
 
@@ -353,10 +420,12 @@ On approval the endpoint:
 class AccessPolicy(BaseModel):
     require_email: bool
     open_access: bool
+    group_auth_mode: str = "none"  # 'none' or 'any_verified'
 
 class AccessPolicyUpdate(BaseModel):
     require_email: bool
     open_access: bool
+    group_auth_mode: str = "none"  # 'none' or 'any_verified'
 
 class AccessRequest(BaseModel):
     id: str
@@ -508,11 +577,18 @@ Approving an access request inserts the email into `agent_sharing` so all future
 1. Approve `alice@example.com` via the Telegram flow.
 2. Alice contacts the same agent on Slack (with the same email in her workspace profile). **Expected**: admitted immediately — no second approval; same MEM-001 memory thread.
 
-### Test 5: Group chat bypass
+### Test 5: Group chat bypass (group_auth_mode: none)
 1. Add the bot to a Telegram group.
-2. With "Require verified email" on, a non-verified group member @mentions the bot. **Expected**: gate is bypassed; agent responds normally.
+2. With "Require verified email" on but `group_auth_mode: "none"`, a non-verified group member @mentions the bot. **Expected**: gate is bypassed; agent responds normally.
 
-### Test 6: Cascade on agent deletion
+### Test 6: Group authentication (group_auth_mode: any_verified)
+1. Owner sets `group_auth_mode: "any_verified"` via API or UI.
+2. Add the bot to a Telegram group.
+3. An unverified group member @mentions the bot. **Expected**: bot replies with group auth prompt ("This agent requires at least one verified member...").
+4. A verified user (who did `/login` in DM) @mentions the bot. **Expected**: group is unlocked, agent responds. `telegram_group_configs.verified_by_email` is set.
+5. Another unverified member @mentions the bot. **Expected**: agent responds (group already verified).
+
+### Test 7: Cascade on agent deletion
 ```bash
 # Delete an agent that had pending access requests
 curl -X DELETE http://localhost:8000/api/agents/my-agent -H "Authorization: Bearer $TOKEN"
@@ -547,3 +623,4 @@ Working. Telegram, Slack, and web public-chat all run the same gate.
 |------|---------|
 | 2026-04-12 | Initial implementation (#311). New migration `access_control`, `AccessPolicyMixin`, `AccessRequestOperations`, ABC additions, Telegram `/login` state machine, Slack `users.info` resolver, four owner endpoints, SharingPanel UI. |
 | 2026-04-13 | Web public-chat unified. `routers/public.py` now runs the same gate as `message_router.py`, keyed on `agent_ownership.require_email` instead of per-link `agent_public_links.require_email`. New migration `public_link_require_email_unified` ORs legacy per-link flags into the agent-level flag. Access requests from web use `channel="web"`. Closes the #252 follow-up. |
+| 2026-04-15 | Group authentication mode. New `group_auth_mode` field (`"none"` or `"any_verified"`) on access policy. When `any_verified`, groups require at least one verified member before the bot responds. New migration `group_auth_mode` adds column to `agent_ownership` and `verified_by_email`/`verified_at` to `telegram_group_configs`. New ABC methods: `is_group_verified()`, `set_group_verified()`, `prompt_group_auth()`. Router gate applies group auth when `is_group=True`. |

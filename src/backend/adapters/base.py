@@ -237,3 +237,65 @@ class ChannelAdapter(ABC):
         Default: no-op. Override in concrete adapters.
         """
         pass
+
+    # =========================================================================
+    # Group Authentication (group_auth_mode support)
+    # =========================================================================
+
+    async def is_group_verified(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+    ) -> bool:
+        """
+        Check if the group chat has at least one verified member.
+
+        Called when group_auth_mode == "any_verified". Channels that don't
+        support groups should return True (allow all).
+
+        Default: True. Override in concrete adapters.
+        """
+        return True
+
+    async def set_group_verified(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+        email: str,
+    ) -> None:
+        """
+        Mark the group as verified by the given email.
+
+        Called when a verified user sends the first message to an unverified group.
+        The email becomes the "group verifier" — subsequent messages from any
+        group member are allowed.
+
+        Default: no-op. Override in concrete adapters.
+        """
+        pass
+
+    async def prompt_group_auth(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+        bot_token: Optional[str] = None,
+    ) -> None:
+        """
+        Prompt for group verification (channel-specific).
+
+        Called when group_auth_mode == "any_verified" and no one in the group
+        has verified yet. Default sends a generic text reply; channels can
+        override for better UX.
+        """
+        text = (
+            "This agent requires at least one verified member in the group.\n"
+            "Send `/login your@email.com` to verify your email."
+        )
+        await self.send_response(
+            message.channel_id,
+            ChannelResponse(
+                text=text,
+                metadata={"bot_token": bot_token, "agent_name": agent_name},
+            ),
+            thread_id=message.thread_id,
+        )

@@ -209,17 +209,49 @@ class ChannelMessageRouter:
 
         # 5b. Unified cross-channel access gate (Issue #311).
         # Resolve a verified email via the adapter, then apply the agent's
-        # access policy. Group chats bypass — group context is gated by the
-        # bot being added to the group, not by per-user email.
+        # access policy. Group chats have separate auth logic via group_auth_mode.
+        policy = db.get_access_policy(agent_name)
         verified_email: Optional[str] = None
-        if not is_group:
+
+        if is_group:
+            # Group chat auth: apply group_auth_mode policy
+            group_auth_mode = policy.get("group_auth_mode", "none")
+
+            if group_auth_mode == "any_verified":
+                # Check if group is already verified by any member
+                group_verified = await adapter.is_group_verified(message, agent_name)
+
+                if not group_verified:
+                    # Group not verified — check if sender can verify it
+                    try:
+                        verified_email = await adapter.resolve_verified_email(message)
+                    except Exception as e:
+                        logger.warning(f"[ROUTER:{channel}] resolve_verified_email error: {e}")
+                        verified_email = None
+
+                    if verified_email:
+                        # Sender is verified — unlock the group
+                        await adapter.set_group_verified(message, agent_name, verified_email)
+                        logger.info(
+                            f"[ROUTER:{channel}] Group {message.channel_id} verified by {verified_email}"
+                        )
+                    else:
+                        # No one verified — prompt for auth
+                        logger.info(
+                            f"[ROUTER:{channel}] Group access denied: agent={agent_name} "
+                            f"requires verified member, group={message.channel_id} not verified"
+                        )
+                        await adapter.prompt_group_auth(message, agent_name, bot_token)
+                        return
+            # else: group_auth_mode == "none" — allow all group messages (legacy behavior)
+        else:
+            # DM auth: apply require_email / open_access policy
             try:
                 verified_email = await adapter.resolve_verified_email(message)
             except Exception as e:
                 logger.warning(f"[ROUTER:{channel}] resolve_verified_email error: {e}")
                 verified_email = None
 
-            policy = db.get_access_policy(agent_name)
             require_email = policy.get("require_email", False)
             open_access = policy.get("open_access", False)
 

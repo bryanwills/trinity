@@ -160,7 +160,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 *System:*
 - `system_agent.py` - System agent management
 
-**Services (`services/`)** — 22 service modules + Process Engine:
+**Services (`services/`)** — 23 service modules + Process Engine:
 
 *Core:*
 - `docker_service.py` - Docker container management
@@ -172,6 +172,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 *Execution & Scheduling:*
 - `task_execution_service.py` - Unified task execution lifecycle (slot mgmt, activity tracking, sanitization) (EXEC-024)
 - `slot_service.py` - Parallel execution slot management with dynamic TTL (CAPACITY-001)
+- `backlog_service.py` - Persistent SQLite-backed FIFO backlog for async tasks at capacity (BACKLOG-001)
 - `execution_queue.py` - Redis-based execution queueing
 - `scheduler_service.py` - APScheduler-based scheduling service
 - `cleanup_service.py` - Active watchdog reconciliation + passive stale recovery for executions, activities, and slots (CLEANUP-001, #129)
@@ -227,6 +228,14 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 **Logging (`logging_config.py`):**
 - Structured JSON logging for production
 - Captured by Vector via Docker stdout/stderr
+- OpenTelemetry trace ID included in log entries for log-trace correlation (RELIABILITY-002)
+
+**OpenTelemetry Tracing (`main.py`):**
+- Auto-instrumentation for FastAPI, httpx, and Redis (RELIABILITY-002)
+- `traceparent` header propagated through inter-agent calls
+- Traces exported to OTel Collector via OTLP/gRPC (`trinity-otel-collector:4317`)
+- Configurable sampling via `OTEL_SAMPLE_RATE` (default 10%)
+- Enabled via `OTEL_ENABLED=1` environment variable
 
 **Utilities (`utils/`):**
 - `helpers.py` - Shared helper functions
@@ -439,6 +448,7 @@ Services that run continuously in the backend process:
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back. (OPS-001) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval. (MON-001) |
 | **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. |
+| **Backlog Maintenance** | `backlog_service.py` | Expires stale queued tasks (>24h) and drains orphans after restart. Runs every 60s. (BACKLOG-001) |
 
 ---
 
@@ -667,6 +677,30 @@ Services that run continuously in the backend process:
 
 **Background Service:** `OperatorQueueSyncService` polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back.
 
+### Platform Audit Log (SEC-001 — Phase 1, NEW: 2026-04-14)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/audit-log` | Admin | List entries (filters: event_type, actor_type, actor_id, target_type, target_id, source, start_time, end_time, limit, offset) |
+| GET | `/api/audit-log/stats` | Admin | Aggregate counts by event_type and actor_type |
+| GET | `/api/audit-log/{event_id}` | Admin | Single entry by UUID |
+
+**Storage**: append-only `audit_log` table in main SQLite DB. SQLite triggers
+block UPDATE unconditionally and DELETE within the 365-day retention window.
+
+**Distinct from `/api/audit`**: the existing `/api/audit` router exposes the
+Process Engine's workflow audit (`audit_entries` table). The new `/api/audit-log`
+covers cross-cutting platform events (lifecycle, auth, MCP, credentials, etc.)
+via the new `audit_log` table. Both are intentionally separate per the SEC-001
+architecture; a unified surface can be added later.
+
+**Phase 1 + agent lifecycle smoke test.** Phase 1 ships the infrastructure;
+Phase 2a ships agent lifecycle audit (`routers/agents.py` emits rows after
+create / start / stop / delete) as a working end-to-end demonstration.
+Remaining write integrations (auth, sharing, settings, credentials — Phase 2b),
+MCP TypeScript audit (Phase 3), and hash-chain verification + export (Phase 4)
+follow as separate PRs against issue #20.
+
 ### Nevermined Payments (NVM-001)
 
 | Method | Path | Auth | Description |
@@ -847,8 +881,14 @@ CREATE TABLE schedule_executions (
     error TEXT,
     triggered_by TEXT NOT NULL,
     model_used TEXT,                             -- MODEL-001: Which model was used
+    queued_at TEXT,                              -- BACKLOG-001: When task entered backlog
+    backlog_metadata TEXT,                       -- BACKLOG-001: JSON identity/request for drain replay
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
+
+-- BACKLOG-001: Partial index for cheap atomic FIFO claim
+CREATE INDEX idx_executions_queued ON schedule_executions(agent_name, queued_at)
+    WHERE status = 'queued';
 ```
 
 **agent_activities:** (Phase 9.7 - Unified Activity Stream)
@@ -1176,6 +1216,52 @@ CREATE INDEX idx_opqueue_agent_status ON operator_queue(agent_name, status);
 - Cost tracking and threshold alerts
 - Sub-process support with parent-child linking
 
+**audit_log:** (SEC-001 / Issue #20 — Phase 1, NEW: 2026-04-14)
+```sql
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT UNIQUE NOT NULL,         -- UUID, generated by service layer
+    event_type TEXT NOT NULL,              -- AuditEventType (agent_lifecycle, authentication, ...)
+    event_action TEXT NOT NULL,            -- specific action ("create", "login_success", etc.)
+    actor_type TEXT NOT NULL,              -- user | agent | mcp_client | system
+    actor_id TEXT,                         -- user.id, agent_name, or mcp key id
+    actor_email TEXT,
+    actor_ip TEXT,
+    mcp_key_id TEXT,
+    mcp_key_name TEXT,
+    mcp_scope TEXT,                        -- user | agent | system
+    target_type TEXT,
+    target_id TEXT,
+    timestamp TEXT NOT NULL,               -- ISO 8601 UTC
+    details TEXT,                          -- JSON payload, event-specific
+    request_id TEXT,                       -- request correlation id
+    source TEXT NOT NULL,                  -- api | mcp | scheduler | system
+    endpoint TEXT,                         -- request path
+    previous_hash TEXT,                    -- Phase 4 (hash chain — dormant)
+    entry_hash TEXT,                       -- Phase 4
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp DESC);
+CREATE INDEX idx_audit_log_event_type ON audit_log(event_type, timestamp DESC);
+CREATE INDEX idx_audit_log_actor ON audit_log(actor_type, actor_id, timestamp DESC);
+CREATE INDEX idx_audit_log_target ON audit_log(target_type, target_id, timestamp DESC);
+CREATE INDEX idx_audit_log_mcp_key ON audit_log(mcp_key_id, timestamp DESC);
+CREATE INDEX idx_audit_log_request ON audit_log(request_id);
+
+-- Append-only enforcement at the database layer
+CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'Audit log entries cannot be modified'); END;
+
+CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log
+WHEN OLD.timestamp > datetime('now', '-365 days')
+BEGIN SELECT RAISE(ABORT, 'Audit log entries cannot be deleted within retention period'); END;
+```
+
+**audit_log Features:**
+- Append-only via SQLite triggers (UPDATE blocked unconditionally, DELETE blocked within 365-day retention)
+- Cross-cutting platform audit; coexists with the Process Engine's separate `audit_entries` table
+- Phase 1 ships infrastructure only; write integration into routers happens in Phase 2
+
 ### Redis
 
 **Credential Storage (DEPRECATED - CRED-002):**
@@ -1258,7 +1344,8 @@ Users authenticate to the Trinity web UI and API.
 
 - Email whitelist controls who can login via email
 - Admin login always available for 'admin' user
-- **4-tier role hierarchy** (ROLE-001): `user` < `operator` < `creator` < `admin`. New email users default to `creator`. Agent creation requires `creator` or above. Enforced via `require_role()` dependency factory in `dependencies.py`.
+- **4-tier role hierarchy** (ROLE-001): `user` < `operator` < `creator` < `admin`. Agent creation requires `creator` or above. Enforced via `require_role()` dependency factory in `dependencies.py`.
+- **Whitelist-driven role on first login** (#314): New email users inherit the `default_role` recorded on their `email_whitelist` row (fallback `user` if no row or NULL). Callsites pass explicit intent — `/share` and access-request approvals → `user` (chat-only grant); public `/api/access/request` self-signup → `user`; admin whitelist UI → caller-specified, defaults to `user`. Owners promote collaborators to `creator` explicitly via `PUT /api/users/{username}/role`. This closes a privilege-escalation where any access grant silently promoted the recipient to `creator` on first web login.
 
 ### 2. MCP API Keys (User → MCP Server)
 

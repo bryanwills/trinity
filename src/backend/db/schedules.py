@@ -89,7 +89,14 @@ class ScheduleOperations:
             next_run_at=parse_iso_timestamp(row["next_run_at"]) if row["next_run_at"] else None,
             timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys and row["timeout_seconds"] else 900,
             allowed_tools=allowed_tools,
-            model=row["model"] if "model" in row_keys else None
+            model=row["model"] if "model" in row_keys else None,
+            # Retry configuration (RETRY-001)
+            max_retries=row["max_retries"] if "max_retries" in row_keys and row["max_retries"] is not None else 1,
+            retry_delay_seconds=row["retry_delay_seconds"] if "retry_delay_seconds" in row_keys and row["retry_delay_seconds"] is not None else 60,
+            # Validation configuration (VALIDATE-001)
+            validation_enabled=bool(row["validation_enabled"]) if "validation_enabled" in row_keys and row["validation_enabled"] is not None else False,
+            validation_prompt=row["validation_prompt"] if "validation_prompt" in row_keys else None,
+            validation_timeout_seconds=row["validation_timeout_seconds"] if "validation_timeout_seconds" in row_keys and row["validation_timeout_seconds"] is not None else 120
         )
 
     @staticmethod
@@ -128,6 +135,21 @@ class ScheduleOperations:
             fan_out_id=row["fan_out_id"] if "fan_out_id" in row_keys else None,
             # Subscription usage tracking (SUB-004)
             subscription_id=row["subscription_id"] if "subscription_id" in row_keys else None,
+            # Persistent backlog (BACKLOG-001)
+            queued_at=parse_iso_timestamp(row["queued_at"])
+                if "queued_at" in row_keys and row["queued_at"] else None,
+            backlog_metadata=row["backlog_metadata"] if "backlog_metadata" in row_keys else None,
+            # Retry tracking (RETRY-001)
+            attempt_number=row["attempt_number"] if "attempt_number" in row_keys and row["attempt_number"] else 1,
+            retry_of_execution_id=row["retry_of_execution_id"] if "retry_of_execution_id" in row_keys else None,
+            retry_scheduled_at=parse_iso_timestamp(row["retry_scheduled_at"])
+                if "retry_scheduled_at" in row_keys and row["retry_scheduled_at"] else None,
+            # Validation tracking (VALIDATE-001)
+            business_status=row["business_status"] if "business_status" in row_keys else None,
+            validated_at=parse_iso_timestamp(row["validated_at"])
+                if "validated_at" in row_keys and row["validated_at"] else None,
+            validation_execution_id=row["validation_execution_id"] if "validation_execution_id" in row_keys else None,
+            validates_execution_id=row["validates_execution_id"] if "validates_execution_id" in row_keys else None,
         )
 
     @staticmethod
@@ -186,12 +208,20 @@ class ScheduleOperations:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             try:
+                # Clamp retry values to valid ranges (RETRY-001)
+                max_retries = max(0, min(5, schedule_data.max_retries))
+                retry_delay_seconds = max(30, min(600, schedule_data.retry_delay_seconds))
+
+                # Clamp validation timeout to valid range (VALIDATE-001)
+                validation_timeout_seconds = max(30, min(600, schedule_data.validation_timeout_seconds))
+
                 cursor.execute("""
                     INSERT INTO agent_schedules (
                         id, agent_name, name, cron_expression, message, enabled,
                         timezone, description, owner_id, created_at, updated_at, next_run_at,
-                        timeout_seconds, allowed_tools, model
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        timeout_seconds, allowed_tools, model, max_retries, retry_delay_seconds,
+                        validation_enabled, validation_prompt, validation_timeout_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     schedule_id,
                     agent_name,
@@ -207,7 +237,12 @@ class ScheduleOperations:
                     next_run_at_iso,
                     schedule_data.timeout_seconds,
                     allowed_tools_json,
-                    schedule_data.model
+                    schedule_data.model,
+                    max_retries,
+                    retry_delay_seconds,
+                    1 if schedule_data.validation_enabled else 0,
+                    schedule_data.validation_prompt,
+                    validation_timeout_seconds
                 ))
                 conn.commit()
 
@@ -226,7 +261,12 @@ class ScheduleOperations:
                     next_run_at=next_run_at,
                     timeout_seconds=schedule_data.timeout_seconds,
                     allowed_tools=schedule_data.allowed_tools,
-                    model=schedule_data.model
+                    model=schedule_data.model,
+                    max_retries=max_retries,
+                    retry_delay_seconds=retry_delay_seconds,
+                    validation_enabled=schedule_data.validation_enabled,
+                    validation_prompt=schedule_data.validation_prompt,
+                    validation_timeout_seconds=validation_timeout_seconds
                 )
             except sqlite3.IntegrityError:
                 return None
@@ -298,7 +338,12 @@ class ScheduleOperations:
 
             set_clauses = []
             params = []
-            allowed_fields = ["name", "cron_expression", "message", "enabled", "timezone", "description", "timeout_seconds", "allowed_tools", "model"]
+            allowed_fields = [
+                "name", "cron_expression", "message", "enabled", "timezone",
+                "description", "timeout_seconds", "allowed_tools", "model",
+                "max_retries", "retry_delay_seconds",  # RETRY-001
+                "validation_enabled", "validation_prompt", "validation_timeout_seconds"  # VALIDATE-001
+            ]
 
             for key, value in updates.items():
                 if key in allowed_fields:
@@ -307,6 +352,18 @@ class ScheduleOperations:
                     elif key == "allowed_tools":
                         # Serialize allowed_tools to JSON
                         value = json.dumps(value) if value is not None else None
+                    elif key == "max_retries":
+                        # Clamp to valid range (RETRY-001)
+                        value = max(0, min(5, int(value)))
+                    elif key == "retry_delay_seconds":
+                        # Clamp to valid range (RETRY-001)
+                        value = max(30, min(600, int(value)))
+                    elif key == "validation_enabled":
+                        # Convert to integer for SQLite (VALIDATE-001)
+                        value = 1 if value else 0
+                    elif key == "validation_timeout_seconds":
+                        # Clamp to valid range (VALIDATE-001)
+                        value = max(30, min(600, int(value)))
                     set_clauses.append(f"{key} = ?")
                     params.append(value)
 
@@ -604,6 +661,233 @@ class ScheduleOperations:
             conn.commit()
             return cursor.rowcount > 0
 
+    # =========================================================================
+    # Persistent Backlog (BACKLOG-001)
+    # =========================================================================
+
+    def update_execution_to_queued(
+        self, execution_id: str, backlog_metadata: str, queued_at: str
+    ) -> bool:
+        """Transition an execution row to QUEUED state and attach its backlog metadata.
+
+        Called by BacklogService.enqueue(). The row is already created by
+        create_task_execution in RUNNING state, so we flip it back to queued and
+        stamp queued_at for FIFO ordering.
+
+        Args:
+            execution_id: Execution row to transition.
+            backlog_metadata: JSON string capturing the full request context.
+            queued_at: ISO timestamp (used as the FIFO ordering key).
+
+        Returns:
+            True if the row was updated, False if not found.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    queued_at = ?,
+                    backlog_metadata = ?,
+                    started_at = ?
+                WHERE id = ?
+                """,
+                (
+                    TaskExecutionStatus.QUEUED,
+                    queued_at,
+                    backlog_metadata,
+                    queued_at,  # reset started_at so drain records a clean run window
+                    execution_id,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def claim_next_queued(self, agent_name: str) -> Optional[Dict]:
+        """Atomically claim the oldest QUEUED execution for an agent.
+
+        Uses a single SQL UPDATE with a subquery that selects the oldest row
+        by queued_at, filtered WHERE status='queued'. RETURNING gives us the
+        full row so the caller can reconstruct the request. This is race-safe
+        under concurrent drain callbacks — only one caller wins the update.
+
+        Returns:
+            Dict of the claimed row (id, agent_name, message, backlog_metadata, ...)
+            or None if the backlog is empty for this agent.
+        """
+        now = utc_now_iso()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    started_at = ?,
+                    queued_at = NULL
+                WHERE id = (
+                    SELECT id FROM schedule_executions
+                    WHERE status = ? AND agent_name = ?
+                    ORDER BY queued_at ASC
+                    LIMIT 1
+                )
+                RETURNING id, agent_name, message, backlog_metadata,
+                          source_user_id, source_user_email, source_agent_name,
+                          source_mcp_key_id, source_mcp_key_name, subscription_id
+                """,
+                (TaskExecutionStatus.RUNNING, now, TaskExecutionStatus.QUEUED, agent_name),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+
+    def release_claim_to_queued(self, execution_id: str) -> bool:
+        """Release a claimed row back to QUEUED state.
+
+        Used when drain_next() acquired a slot, claimed a row, but then something
+        downstream failed (e.g. slot released concurrently, spawn failed) and we
+        need to put the row back in the backlog.
+
+        Returns:
+            True if the row transitioned back to queued, False otherwise.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    queued_at = started_at
+                WHERE id = ? AND status = ?
+                """,
+                (TaskExecutionStatus.QUEUED, execution_id, TaskExecutionStatus.RUNNING),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_queued_count(self, agent_name: str) -> int:
+        """Count queued backlog items for an agent."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*) as c FROM schedule_executions
+                WHERE agent_name = ? AND status = ?
+                """,
+                (agent_name, TaskExecutionStatus.QUEUED),
+            )
+            row = cursor.fetchone()
+            return int(row["c"]) if row else 0
+
+    def cancel_queued_execution(self, execution_id: str, reason: str = "cancelled") -> bool:
+        """Cancel a single queued execution. No container interaction.
+
+        Returns:
+            True if the row was still queued and is now cancelled, False otherwise.
+        """
+        now = utc_now_iso()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    completed_at = ?,
+                    error = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    TaskExecutionStatus.CANCELLED,
+                    now,
+                    reason,
+                    execution_id,
+                    TaskExecutionStatus.QUEUED,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def cancel_queued_for_agent(self, agent_name: str, reason: str = "agent_deleted") -> int:
+        """Bulk-cancel all queued executions for an agent.
+
+        Used on agent deletion so orphan queued rows don't linger.
+
+        Returns:
+            Count of rows moved from QUEUED to CANCELLED.
+        """
+        now = utc_now_iso()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    completed_at = ?,
+                    error = ?
+                WHERE agent_name = ? AND status = ?
+                """,
+                (
+                    TaskExecutionStatus.CANCELLED,
+                    now,
+                    reason,
+                    agent_name,
+                    TaskExecutionStatus.QUEUED,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def expire_stale_queued(self, max_age_hours: float = 24) -> int:
+        """Mark queued executions older than max_age_hours as FAILED.
+
+        Runs from the 60s maintenance task. Uses ISO-8601 string comparison on
+        queued_at, matching how stale running executions are handled elsewhere.
+
+        Returns:
+            Count of queued rows expired.
+        """
+        now = utc_now_iso()
+        threshold = (
+            datetime.now(timezone.utc) - timedelta(hours=float(max_age_hours))
+        ).strftime('%Y-%m-%dT%H:%M:%S')
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    completed_at = ?,
+                    error = 'Backlog expired: queued longer than ' || ? || ' hours'
+                WHERE status = ? AND queued_at IS NOT NULL AND queued_at < ?
+                """,
+                (
+                    TaskExecutionStatus.FAILED,
+                    now,
+                    str(max_age_hours),
+                    TaskExecutionStatus.QUEUED,
+                    threshold,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def list_agents_with_queued(self) -> List[str]:
+        """Return the list of agent names that currently have queued backlog items.
+
+        Used by the 60s maintenance task to drain orphans after a restart
+        (backend crashed between enqueue and drain, or drain callback was lost).
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT agent_name FROM schedule_executions
+                WHERE status = ?
+                """,
+                (TaskExecutionStatus.QUEUED,),
+            )
+            return [row["agent_name"] for row in cursor.fetchall()]
+
     def update_execution_status(
         self,
         execution_id: str,
@@ -705,7 +989,7 @@ class ScheduleOperations:
                     duration_ms, message, triggered_by, context_used, context_max, cost,
                     source_user_id, source_user_email, source_agent_name,
                     source_mcp_key_id, source_mcp_key_name, claude_session_id, model_used,
-                    fan_out_id
+                    fan_out_id, business_status, validation_execution_id
                 FROM schedule_executions
                 WHERE agent_name = ?
                 ORDER BY started_at DESC
@@ -1272,3 +1556,146 @@ class ScheduleOperations:
                 ORDER BY agent_name
             """)
             return [self._row_to_git_config(row) for row in cursor.fetchall()]
+
+    # =========================================================================
+    # Business Validation (VALIDATE-001)
+    # =========================================================================
+
+    def create_validation_execution(
+        self,
+        validates_execution_id: str,
+        agent_name: str,
+        schedule_id: str,
+        message: str,
+        timeout_seconds: int = 120,
+    ) -> Optional[ScheduleExecution]:
+        """Create a validation execution record linked to the original execution.
+
+        Args:
+            validates_execution_id: The execution being validated.
+            agent_name: The agent running validation.
+            schedule_id: The schedule that triggered the original execution.
+            message: The validation prompt message.
+            timeout_seconds: Timeout for validation task.
+
+        Returns:
+            The created validation execution record.
+        """
+        execution_id = self._generate_id()
+        now = utc_now_iso()
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO schedule_executions (
+                    id, schedule_id, agent_name, status, started_at, message, triggered_by,
+                    validates_execution_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                execution_id,
+                schedule_id,
+                agent_name,
+                TaskExecutionStatus.RUNNING,
+                now,
+                message,
+                "validation",  # New trigger type for validation
+                validates_execution_id,
+            ))
+            conn.commit()
+
+            return ScheduleExecution(
+                id=execution_id,
+                schedule_id=schedule_id,
+                agent_name=agent_name,
+                status=TaskExecutionStatus.RUNNING,
+                started_at=datetime.fromisoformat(now),
+                message=message,
+                triggered_by="validation",
+                validates_execution_id=validates_execution_id,
+            )
+
+    def update_business_status(
+        self,
+        execution_id: str,
+        business_status: str,
+        validation_execution_id: Optional[str] = None,
+    ) -> bool:
+        """Update the business validation status of an execution.
+
+        Args:
+            execution_id: The execution to update.
+            business_status: The new business status (pending_validation, validated, failed_validation, skipped).
+            validation_execution_id: Optional FK to the validation execution record.
+
+        Returns:
+            True if the row was updated.
+        """
+        now = utc_now_iso()
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            if validation_execution_id:
+                cursor.execute("""
+                    UPDATE schedule_executions
+                    SET business_status = ?, validated_at = ?, validation_execution_id = ?
+                    WHERE id = ?
+                """, (business_status, now, validation_execution_id, execution_id))
+            else:
+                cursor.execute("""
+                    UPDATE schedule_executions
+                    SET business_status = ?, validated_at = ?
+                    WHERE id = ?
+                """, (business_status, now, execution_id))
+
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_executions_pending_validation(self, agent_name: str = None) -> List[ScheduleExecution]:
+        """Get executions that are pending validation.
+
+        Used for startup recovery to retry failed validation attempts.
+
+        Args:
+            agent_name: Optional filter by agent name.
+
+        Returns:
+            List of executions with business_status = 'pending_validation'.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            if agent_name:
+                cursor.execute("""
+                    SELECT * FROM schedule_executions
+                    WHERE business_status = 'pending_validation' AND agent_name = ?
+                    ORDER BY started_at ASC
+                """, (agent_name,))
+            else:
+                cursor.execute("""
+                    SELECT * FROM schedule_executions
+                    WHERE business_status = 'pending_validation'
+                    ORDER BY started_at ASC
+                """)
+
+            return [self._row_to_schedule_execution(row) for row in cursor.fetchall()]
+
+    def get_validation_execution(self, validates_execution_id: str) -> Optional[ScheduleExecution]:
+        """Get the validation execution record for a given original execution.
+
+        Args:
+            validates_execution_id: The original execution ID.
+
+        Returns:
+            The validation execution record, or None if not found.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM schedule_executions
+                WHERE validates_execution_id = ?
+                ORDER BY started_at DESC
+                LIMIT 1
+            """, (validates_execution_id,))
+            row = cursor.fetchone()
+            return self._row_to_schedule_execution(row) if row else None

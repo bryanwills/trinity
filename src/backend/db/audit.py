@@ -1,0 +1,271 @@
+"""
+Platform Audit Log database operations (SEC-001 / Issue #20 — Phase 1).
+
+Append-only access to the `audit_log` table. Distinct from the Process Engine's
+`AuditService` (`services/process_engine/services/audit.py`) which tracks
+process workflow events in a separate `audit_entries` table.
+
+Insertions go through this layer; UPDATE and DELETE are blocked by SQLite
+triggers in `db/schema.py` and `db/migrations.py` to enforce immutability.
+"""
+
+import json
+from typing import Any, Dict, List, Optional
+
+from .connection import get_db_connection
+
+
+class PlatformAuditOperations:
+    """Database operations for the platform audit log."""
+
+    # ---------------------------------------------------------------------
+    # Write
+    # ---------------------------------------------------------------------
+
+    def create_audit_entry(self, entry: Dict[str, Any]) -> None:
+        """Insert an audit log entry (append-only).
+
+        The `entry` dict must contain at least `event_id`, `event_type`,
+        `event_action`, `actor_type`, `timestamp`, and `source`. All other
+        fields are optional — missing keys are stored as NULL.
+
+        The caller is expected to JSON-encode `details` before passing it
+        in. Hash chain fields (`previous_hash`, `entry_hash`) are optional;
+        Phase 4 enables them.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO audit_log (
+                    event_id, event_type, event_action,
+                    actor_type, actor_id, actor_email, actor_ip,
+                    mcp_key_id, mcp_key_name, mcp_scope,
+                    target_type, target_id,
+                    timestamp, details, request_id, source, endpoint,
+                    previous_hash, entry_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry["event_id"],
+                    entry["event_type"],
+                    entry["event_action"],
+                    entry["actor_type"],
+                    entry.get("actor_id"),
+                    entry.get("actor_email"),
+                    entry.get("actor_ip"),
+                    entry.get("mcp_key_id"),
+                    entry.get("mcp_key_name"),
+                    entry.get("mcp_scope"),
+                    entry.get("target_type"),
+                    entry.get("target_id"),
+                    entry["timestamp"],
+                    entry.get("details"),
+                    entry.get("request_id"),
+                    entry["source"],
+                    entry.get("endpoint"),
+                    entry.get("previous_hash"),
+                    entry.get("entry_hash"),
+                ),
+            )
+            conn.commit()
+
+    # ---------------------------------------------------------------------
+    # Read
+    # ---------------------------------------------------------------------
+
+    def get_audit_entries(
+        self,
+        event_type: Optional[str] = None,
+        actor_type: Optional[str] = None,
+        actor_id: Optional[str] = None,
+        target_type: Optional[str] = None,
+        target_id: Optional[str] = None,
+        source: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Query audit entries with optional filters, newest first."""
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        if event_type:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        if actor_type:
+            conditions.append("actor_type = ?")
+            params.append(actor_type)
+        if actor_id:
+            conditions.append("actor_id = ?")
+            params.append(actor_id)
+        if target_type:
+            conditions.append("target_type = ?")
+            params.append(target_type)
+        if target_id:
+            conditions.append("target_id = ?")
+            params.append(target_id)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if start_time:
+            conditions.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time:
+            conditions.append("timestamp <= ?")
+            params.append(end_time)
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        params.extend([int(limit), int(offset)])
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT * FROM audit_log
+                WHERE {where_clause}
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+    def count_audit_entries(
+        self,
+        event_type: Optional[str] = None,
+        actor_type: Optional[str] = None,
+        actor_id: Optional[str] = None,
+        target_type: Optional[str] = None,
+        target_id: Optional[str] = None,
+        source: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> int:
+        """Return total count for a filter (independent of limit/offset)."""
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        if event_type:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        if actor_type:
+            conditions.append("actor_type = ?")
+            params.append(actor_type)
+        if actor_id:
+            conditions.append("actor_id = ?")
+            params.append(actor_id)
+        if target_type:
+            conditions.append("target_type = ?")
+            params.append(target_type)
+        if target_id:
+            conditions.append("target_id = ?")
+            params.append(target_id)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if start_time:
+            conditions.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time:
+            conditions.append("timestamp <= ?")
+            params.append(end_time)
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT COUNT(*) FROM audit_log WHERE {where_clause}",
+                params,
+            )
+            return int(cursor.fetchone()[0])
+
+    def get_audit_entry(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Look up a single entry by its UUID event_id."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM audit_log WHERE event_id = ?",
+                (event_id,),
+            )
+            row = cursor.fetchone()
+            return self._row_to_dict(row) if row else None
+
+    def get_audit_entries_range(self, start_id: int, end_id: int) -> List[Dict[str, Any]]:
+        """Return entries by primary key range (used by Phase 4 hash-chain verification)."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM audit_log WHERE id BETWEEN ? AND ? ORDER BY id",
+                (int(start_id), int(end_id)),
+            )
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+    def get_audit_stats(
+        self,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Aggregate counts by event_type and actor_type for the dashboard."""
+        time_filter = ""
+        params: List[Any] = []
+        if start_time:
+            time_filter += " AND timestamp >= ?"
+            params.append(start_time)
+        if end_time:
+            time_filter += " AND timestamp <= ?"
+            params.append(end_time)
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"SELECT COUNT(*) FROM audit_log WHERE 1=1 {time_filter}",
+                params,
+            )
+            total = int(cursor.fetchone()[0])
+
+            cursor.execute(
+                f"""
+                SELECT event_type, COUNT(*) as cnt FROM audit_log
+                WHERE 1=1 {time_filter}
+                GROUP BY event_type ORDER BY cnt DESC
+                """,
+                params,
+            )
+            by_event_type = {row["event_type"]: int(row["cnt"]) for row in cursor.fetchall()}
+
+            cursor.execute(
+                f"""
+                SELECT actor_type, COUNT(*) as cnt FROM audit_log
+                WHERE 1=1 {time_filter}
+                GROUP BY actor_type ORDER BY cnt DESC
+                """,
+                params,
+            )
+            by_actor_type = {row["actor_type"]: int(row["cnt"]) for row in cursor.fetchall()}
+
+            return {
+                "total": total,
+                "by_event_type": by_event_type,
+                "by_actor_type": by_actor_type,
+            }
+
+    # ---------------------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_dict(row) -> Dict[str, Any]:
+        """Convert a sqlite3.Row to a plain dict, parsing the JSON `details` column."""
+        result = {key: row[key] for key in row.keys()}
+        details = result.get("details")
+        if details:
+            try:
+                result["details"] = json.loads(details)
+            except (TypeError, ValueError):
+                # Leave as raw string if it isn't valid JSON.
+                pass
+        return result

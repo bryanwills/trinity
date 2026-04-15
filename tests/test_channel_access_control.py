@@ -30,10 +30,10 @@ from utils.assertions import (
 
 
 def _reset_policy(api_client: TrinityApiClient, agent_name: str) -> None:
-    """Restore default policy (both flags off) to avoid cross-test pollution."""
+    """Restore default policy (all flags off) to avoid cross-test pollution."""
     api_client.put(
         f"/api/agents/{agent_name}/access-policy",
-        json={"require_email": False, "open_access": False},
+        json={"require_email": False, "open_access": False, "group_auth_mode": "none"},
     )
 
 
@@ -132,9 +132,10 @@ class TestGetAccessPolicy:
         )
         assert_status(response, 200)
         data = assert_json_response(response)
-        assert_has_fields(data, ["require_email", "open_access"])
+        assert_has_fields(data, ["require_email", "open_access", "group_auth_mode"])
         assert isinstance(data["require_email"], bool)
         assert isinstance(data["open_access"], bool)
+        assert isinstance(data["group_auth_mode"], str)
 
     @pytest.mark.smoke
     def test_get_policy_default_values(
@@ -142,7 +143,7 @@ class TestGetAccessPolicy:
         api_client: TrinityApiClient,
         created_agent,
     ):
-        """New agents default to both flags off (legacy permissive behavior)."""
+        """New agents default to all flags off (legacy permissive behavior)."""
         _reset_policy(api_client, created_agent["name"])
         response = api_client.get(
             f"/api/agents/{created_agent['name']}/access-policy"
@@ -151,6 +152,7 @@ class TestGetAccessPolicy:
         data = response.json()
         assert data["require_email"] is False
         assert data["open_access"] is False
+        assert data["group_auth_mode"] == "none"
 
     @pytest.mark.smoke
     def test_get_policy_nonexistent_agent_returns_404(
@@ -199,6 +201,8 @@ class TestUpdateAccessPolicy:
             data = response.json()
             assert data["require_email"] is True
             assert data["open_access"] is False
+            # group_auth_mode defaults to "none" when not provided
+            assert data["group_auth_mode"] == "none"
 
             # Verify persisted via GET
             get_response = api_client.get(
@@ -224,6 +228,8 @@ class TestUpdateAccessPolicy:
             data = response.json()
             assert data["open_access"] is True
             assert data["require_email"] is False
+            # group_auth_mode defaults to "none" when not provided
+            assert data["group_auth_mode"] == "none"
         finally:
             _reset_policy(api_client, agent_name)
 
@@ -243,6 +249,8 @@ class TestUpdateAccessPolicy:
             data = response.json()
             assert data["require_email"] is True
             assert data["open_access"] is True
+            # group_auth_mode defaults to "none" when not provided
+            assert data["group_auth_mode"] == "none"
         finally:
             _reset_policy(api_client, agent_name)
 
@@ -270,6 +278,77 @@ class TestUpdateAccessPolicy:
             json={"require_email": "yes please", "open_access": False},
         )
         assert_status_in(response, [400, 422])
+
+    @pytest.mark.smoke
+    def test_put_policy_sets_group_auth_mode_any_verified(
+        self,
+        api_client: TrinityApiClient,
+        created_agent,
+    ):
+        """Setting group_auth_mode to 'any_verified' requires at least one verified member."""
+        agent_name = created_agent["name"]
+        try:
+            response = api_client.put(
+                f"/api/agents/{agent_name}/access-policy",
+                json={"require_email": True, "open_access": False, "group_auth_mode": "any_verified"},
+            )
+            assert_status(response, 200)
+            data = response.json()
+            assert data["group_auth_mode"] == "any_verified"
+            assert data["require_email"] is True
+
+            # Verify persisted via GET
+            get_response = api_client.get(
+                f"/api/agents/{agent_name}/access-policy"
+            )
+            assert get_response.json()["group_auth_mode"] == "any_verified"
+        finally:
+            _reset_policy(api_client, agent_name)
+
+    @pytest.mark.smoke
+    def test_put_policy_group_auth_mode_none(
+        self,
+        api_client: TrinityApiClient,
+        created_agent,
+    ):
+        """Setting group_auth_mode to 'none' (default) allows unrestricted group access."""
+        agent_name = created_agent["name"]
+        try:
+            # First set to any_verified
+            api_client.put(
+                f"/api/agents/{agent_name}/access-policy",
+                json={"require_email": True, "open_access": False, "group_auth_mode": "any_verified"},
+            )
+            # Then reset to none
+            response = api_client.put(
+                f"/api/agents/{agent_name}/access-policy",
+                json={"require_email": True, "open_access": False, "group_auth_mode": "none"},
+            )
+            assert_status(response, 200)
+            data = response.json()
+            assert data["group_auth_mode"] == "none"
+        finally:
+            _reset_policy(api_client, agent_name)
+
+    @pytest.mark.smoke
+    def test_put_policy_invalid_group_auth_mode_falls_back_to_none(
+        self,
+        api_client: TrinityApiClient,
+        created_agent,
+    ):
+        """Invalid group_auth_mode values silently fall back to 'none' for backwards compatibility."""
+        agent_name = created_agent["name"]
+        try:
+            response = api_client.put(
+                f"/api/agents/{agent_name}/access-policy",
+                json={"require_email": False, "open_access": False, "group_auth_mode": "invalid_mode"},
+            )
+            assert_status(response, 200)
+            data = response.json()
+            # Invalid values fall back to "none" rather than failing
+            assert data["group_auth_mode"] == "none"
+        finally:
+            _reset_policy(api_client, agent_name)
 
     @pytest.mark.smoke
     def test_put_policy_nonexistent_agent_returns_404(

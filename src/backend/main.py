@@ -14,9 +14,11 @@ Refactored for better concern separation:
 """
 import asyncio
 import json
+import os
 from datetime import datetime
 from typing import List
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
@@ -25,6 +27,17 @@ from config import CORS_ORIGINS, VOICE_ENABLED, GEMINI_API_KEY
 from models import User
 from dependencies import get_current_user
 from services.docker_service import docker_client, list_all_agents_fast
+
+# OpenTelemetry imports for distributed tracing (RELIABILITY-002)
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.redis import RedisInstrumentor
 
 # Import routers
 from routers.auth import router as auth_router
@@ -60,6 +73,7 @@ from routers.triggers import router as triggers_router
 from routers.alerts import router as alerts_router
 from routers.process_templates import router as process_templates_router
 from routers.audit import router as audit_router
+from routers.audit_log import router as audit_log_router  # SEC-001 / Issue #20
 from routers.docs import router as docs_router
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router
@@ -231,6 +245,49 @@ set_websocket_publisher_broadcast(manager.broadcast)
 set_cleanup_ws_manager(manager)
 
 
+def setup_opentelemetry(app: FastAPI) -> bool:
+    """
+    Initialize OpenTelemetry distributed tracing (RELIABILITY-002).
+
+    Auto-instruments FastAPI, httpx, and Redis for trace propagation.
+    Traces are exported to the OTel Collector via OTLP/gRPC.
+
+    Returns True if initialization succeeded, False otherwise.
+    """
+    if os.getenv("OTEL_ENABLED", "0") != "1":
+        return False
+
+    try:
+        # Configure sampling: 10% in production, 100% in development
+        sample_rate = float(os.getenv("OTEL_SAMPLE_RATE", "0.1"))
+        sampler = TraceIdRatioBased(sample_rate)
+
+        # Create resource with service metadata
+        resource = Resource.create({
+            "service.name": "trinity-backend",
+            "service.version": "1.0.0",
+            "deployment.environment": os.getenv("ENVIRONMENT", "development"),
+        })
+
+        # Set up tracer provider with sampling and resource
+        provider = TracerProvider(resource=resource, sampler=sampler)
+        trace.set_tracer_provider(provider)
+
+        # Configure OTLP exporter to collector
+        endpoint = os.getenv("OTEL_COLLECTOR_ENDPOINT", "http://trinity-otel-collector:4317")
+        exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+
+        # Auto-instrument frameworks (injects traceparent headers automatically)
+        FastAPIInstrumentor.instrument_app(app)
+        HTTPXClientInstrumentor().instrument()
+        RedisInstrumentor().instrument()
+
+        return True
+    except Exception as e:
+        # Log but don't fail startup — tracing is optional
+        print(f"OpenTelemetry initialization failed: {e}")
+        return False
 
 
 @asynccontextmanager
@@ -238,6 +295,13 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     # Set up structured JSON logging (captured by Vector)
     setup_logging()
+
+    # Report OpenTelemetry status (RELIABILITY-002)
+    if _otel_enabled:
+        sample_rate = float(os.getenv("OTEL_SAMPLE_RATE", "0.1"))
+        logger.info(f"OpenTelemetry tracing enabled (sample rate: {sample_rate * 100:.0f}%)")
+    else:
+        logger.info("OpenTelemetry tracing disabled (set OTEL_ENABLED=1 to enable)")
 
     # Print setup token if first-time setup is not yet complete (SEC #177).
     # Only someone with access to server logs can read this token and complete setup,
@@ -305,6 +369,33 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"Error starting cleanup service: {e}")
     asyncio.create_task(_start_cleanup_delayed())
+
+    # BACKLOG-001: Register backlog drain as a slot-release callback and spawn
+    # a 60s maintenance task. The maintenance loop handles two things:
+    #   1. Expire queued rows older than 24h (-> FAILED)
+    #   2. Drain orphans — queued work that missed its release callback
+    #      (e.g. backend restarted between enqueue and drain).
+    try:
+        from services.slot_service import get_slot_service
+        from services.backlog_service import get_backlog_service
+        _backlog = get_backlog_service()
+        get_slot_service().register_on_release(_backlog.on_slot_released)
+
+        async def _backlog_maintenance_loop():
+            # First tick after a short delay so startup stays snappy.
+            await asyncio.sleep(15)
+            while True:
+                try:
+                    await _backlog.expire_stale(max_age_hours=24)
+                    await _backlog.drain_orphans_all()
+                except Exception as exc:
+                    logger.warning(f"[Backlog] maintenance tick failed: {exc}")
+                await asyncio.sleep(60)
+
+        asyncio.create_task(_backlog_maintenance_loop())
+        print("Backlog service wired (callback + 60s maintenance)")
+    except Exception as e:
+        print(f"Error wiring backlog service: {e}")
 
     # Recover orphaned regular task executions (Issue #128)
     try:
@@ -474,6 +565,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Initialize OpenTelemetry distributed tracing (RELIABILITY-002)
+# Must be called after app creation but before middleware/routers
+_otel_enabled = setup_opentelemetry(app)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -529,7 +624,8 @@ app.include_router(approvals_router)
 app.include_router(triggers_router)
 app.include_router(alerts_router)
 app.include_router(process_templates_router)
-app.include_router(audit_router)  # IT5 P1: Audit logging
+app.include_router(audit_router)  # IT5 P1: Process Engine audit logging
+app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase 1)
 app.include_router(docs_router)   # Process documentation serving
 app.include_router(skills_router) # Skills Management System
 app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)

@@ -450,6 +450,8 @@ User sees response as reply in group
 | welcome_enabled | INTEGER | 0 or 1 |
 | welcome_text | TEXT | Welcome message template |
 | is_active | INTEGER | 1=active, 0=deactivated (bot removed) |
+| verified_by_email | TEXT | Email that verified this group (group_auth_mode support) |
+| verified_at | TEXT | ISO timestamp when group was verified |
 | created_at | TEXT | ISO timestamp |
 | updated_at | TEXT | ISO timestamp |
 
@@ -472,6 +474,30 @@ The `TelegramChannelPanel.vue` component shows group configurations when the bot
 - Welcome message toggle with text input (`{name}` placeholder)
 - Remove button per group (deactivates, doesn't delete)
 
+### Group Authentication Mode (group_auth_mode)
+
+When `group_auth_mode: "any_verified"` is set on the agent's access policy, groups require at least one verified member before the bot responds to anyone:
+
+**Flow:**
+1. Unverified user @mentions the bot in a group
+2. Router checks `db.is_telegram_group_verified(binding_id, chat_id)`
+3. Group not verified → `adapter.prompt_group_auth()` sends: "🔒 This agent requires at least one verified member in the group. Send `/login your@email.com` to verify..."
+4. A user who verified via DM (@mentions the bot)
+5. Router sees user's `verified_email` → calls `adapter.set_group_verified(message, agent_name, email)`
+6. `telegram_group_configs.verified_by_email` is set → group unlocked
+7. All future messages from any group member proceed normally
+
+**New adapter methods** (`src/backend/adapters/telegram_adapter.py`):
+- `is_group_verified(message, agent_name)` → checks `db.is_telegram_group_verified()`
+- `set_group_verified(message, agent_name, email)` → calls `db.set_telegram_group_verified()`
+- `prompt_group_auth(message, agent_name, bot_token)` → sends Telegram-native HTML prompt
+
+**New DB methods** (`src/backend/db/telegram_channels.py`):
+- `is_group_verified(binding_id, chat_id) -> bool`
+- `get_group_verified_email(binding_id, chat_id) -> str | None`
+- `set_group_verified(binding_id, chat_id, email)`
+- `clear_group_verification(binding_id, chat_id)`
+
 ### Security Notes
 
 - **No new attack surface**: Group messages use the same webhook endpoint with the same dual-layer auth
@@ -480,6 +506,7 @@ The `TelegramChannelPanel.vue` component shows group configurations when the bot
 - **Bot loop prevention**: Inherited from DM support — `parse_message()` skips messages from bots (`is_bot` check)
 - **Silent rate limiting**: Rate limit errors are not sent to groups (would be visible to all members)
 - **Membership not verified per message**: Telegram doesn't provide a cheap per-message membership check; this is standard bot behavior and is documented
+- **Group verification persists**: Once a group is verified, `verified_by_email` is stored permanently; clearing requires admin action or bot removal
 
 ### Known Limitations
 
@@ -590,10 +617,18 @@ gate admits (or issues access-request, per policy) → agent executes
 No changes to `src/backend/adapters/transports/telegram_webhook.py`. The transport already dispatches `/`-prefixed messages to `adapter.handle_command` before the router pipeline, so `/login`, `/logout`, and `/whoami` are picked up for free.
 
 ## Related Flows
-- [unified-channel-access-control.md](unified-channel-access-control.md) — Cross-channel access primitive (policy, router gate, access requests) (#311)
+- [unified-channel-access-control.md](unified-channel-access-control.md) — Cross-channel access primitive (policy, router gate, access requests, group_auth_mode) (#311)
 - [agent-sharing.md](agent-sharing.md) — Allow-list / ownership model the gate consults
 - [email-authentication.md](email-authentication.md) — Shared `email_login_codes` infrastructure and `EmailService.send_verification_code`
 - [slack-integration.md](slack-integration.md) — Slack equivalent (SLACK-001)
 - [slack-channel-routing.md](slack-channel-routing.md) — Channel adapter abstraction (SLACK-002)
 - [public-agent-links.md](public-agent-links.md) — Web-based public chat (shares session/execution infrastructure)
 - [task-execution-service.md](task-execution-service.md) — Unified execution path (EXEC-024)
+
+## Revision History
+
+| Date | Changes |
+|------|---------|
+| 2026-04-11 | TGRAM-GROUP: Group chat support added. Trigger modes, welcome messages, member events. |
+| 2026-04-12 | #311: `/login` email verification for DMs integrated with unified access control. |
+| 2026-04-15 | Group authentication mode (`group_auth_mode: "any_verified"`). Groups can require at least one verified member. New columns `verified_by_email`/`verified_at` on `telegram_group_configs`. New adapter methods for group verification. |

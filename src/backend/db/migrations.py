@@ -35,6 +35,8 @@ Migration Order (as of 2026-02-28):
 28. public_user_memory_table - MEM-001 per-user persistent memory for public link agents
 29. subscription_rate_limit_tracking - SUB-003 rate-limit event tracking for auto-switch
 30. execution_fan_out_id - FANOUT-001 fan-out operation linkage
+31. scheduler_retry_support - RETRY-001 scheduler retry mechanism
+32. validation_support - VALIDATE-001 post-execution business validation
 """
 import logging
 import sqlite3
@@ -1087,6 +1089,30 @@ def _migrate_public_link_require_email_unified(cursor, conn):
     conn.commit()
 
 
+def _migrate_email_whitelist_default_role(cursor, conn):
+    """Add default_role column to email_whitelist (#314).
+
+    Before: `get_or_create_email_user()` hardcoded new email users to role
+    `creator`, so anyone whitelisted via access-request approval, /share, or
+    the public CLI self-signup endpoint silently gained agent-creation rights.
+
+    After: whitelist rows carry the intended role. Access-based grants default
+    to `user`; only admin-initiated whitelisting can request `creator`. This
+    migration sets existing rows to `'user'` — a deliberate downgrade of the
+    buggy default going forward. It does NOT touch `users.role`, so users who
+    have already logged in and been promoted keep their current role.
+    """
+    cursor.execute("PRAGMA table_info(email_whitelist)")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if "default_role" not in columns:
+        cursor.execute(
+            "ALTER TABLE email_whitelist ADD COLUMN default_role TEXT NOT NULL DEFAULT 'user'"
+        )
+
+    conn.commit()
+
+
 def _migrate_telegram_group_configs(cursor, conn):
     """Create Telegram group configuration table (TGRAM-GROUP)."""
 
@@ -1118,9 +1144,235 @@ def _migrate_telegram_group_configs(cursor, conn):
     conn.commit()
 
 
+def _migrate_backlog_support(cursor, conn):
+    """BACKLOG-001: Persistent async task backlog.
+
+    Adds:
+    - schedule_executions.queued_at: ISO timestamp for FIFO ordering when status='queued'.
+    - schedule_executions.backlog_metadata: JSON blob capturing full ParallelTaskRequest
+      context (model, system_prompt, allowed_tools, timeout, identity, subscription, etc)
+      so the drain path can reconstitute the request without re-reading auth.
+    - agent_ownership.max_backlog_depth: per-agent cap on queued items (default 50, cap 200).
+    - Partial index on (agent_name, queued_at) WHERE status='queued' for cheap FIFO claim.
+    """
+    # schedule_executions columns
+    cursor.execute("PRAGMA table_info(schedule_executions)")
+    se_cols = {row[1] for row in cursor.fetchall()}
+    if "queued_at" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN queued_at TEXT")
+    if "backlog_metadata" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN backlog_metadata TEXT")
+
+    # agent_ownership column
+    cursor.execute("PRAGMA table_info(agent_ownership)")
+    ao_cols = {row[1] for row in cursor.fetchall()}
+    if "max_backlog_depth" not in ao_cols:
+        cursor.execute(
+            "ALTER TABLE agent_ownership ADD COLUMN max_backlog_depth INTEGER DEFAULT 50"
+        )
+
+    # Partial index for efficient FIFO claim of queued rows
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_queued "
+        "ON schedule_executions(agent_name, queued_at) "
+        "WHERE status = 'queued'"
+    )
+    conn.commit()
+
+
+def _migrate_scheduler_retry_support(cursor, conn):
+    """RETRY-001: Scheduler retry mechanism for failed executions.
+
+    Adds:
+    - agent_schedules.max_retries: max retry attempts (0=disabled, default 1 for new, 0 for existing)
+    - agent_schedules.retry_delay_seconds: delay between retries (default 60, range 30-600)
+    - schedule_executions.attempt_number: which attempt this is (1 = first try)
+    - schedule_executions.retry_of_execution_id: links retry to original execution
+    - schedule_executions.retry_scheduled_at: when retry is scheduled (for restart recovery)
+
+    Note: Existing schedules get max_retries=0 (opt-in) to avoid surprising behavior changes.
+    New schedules default to max_retries=1 (resilient by default).
+    """
+    # agent_schedules columns
+    cursor.execute("PRAGMA table_info(agent_schedules)")
+    as_cols = {row[1] for row in cursor.fetchall()}
+
+    if "max_retries" not in as_cols:
+        # Default 0 for existing schedules (opt-in), schema default 1 for new
+        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN max_retries INTEGER DEFAULT 0")
+    if "retry_delay_seconds" not in as_cols:
+        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN retry_delay_seconds INTEGER DEFAULT 60")
+
+    # schedule_executions columns
+    cursor.execute("PRAGMA table_info(schedule_executions)")
+    se_cols = {row[1] for row in cursor.fetchall()}
+
+    if "attempt_number" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN attempt_number INTEGER DEFAULT 1")
+    if "retry_of_execution_id" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN retry_of_execution_id TEXT")
+    if "retry_scheduled_at" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN retry_scheduled_at TEXT")
+
+    # Index for finding pending retries on startup
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_pending_retry "
+        "ON schedule_executions(retry_scheduled_at) "
+        "WHERE retry_scheduled_at IS NOT NULL AND status = 'pending_retry'"
+    )
+    conn.commit()
+
+
+def _migrate_validation_support(cursor, conn):
+    """VALIDATE-001: Post-execution business validation.
+
+    Adds:
+    - agent_schedules.validation_enabled: enable validation for this schedule (default 0)
+    - agent_schedules.validation_prompt: custom auditor instructions
+    - agent_schedules.validation_timeout_seconds: timeout for validation task (default 120)
+    - schedule_executions.business_status: validation result (pending_validation, validated, failed_validation, skipped)
+    - schedule_executions.validated_at: when validation completed
+    - schedule_executions.validation_execution_id: FK to the validation execution
+    - schedule_executions.validates_execution_id: FK to execution being validated (for validation records)
+    """
+    # agent_schedules columns
+    cursor.execute("PRAGMA table_info(agent_schedules)")
+    as_cols = {row[1] for row in cursor.fetchall()}
+
+    if "validation_enabled" not in as_cols:
+        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN validation_enabled INTEGER DEFAULT 0")
+    if "validation_prompt" not in as_cols:
+        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN validation_prompt TEXT")
+    if "validation_timeout_seconds" not in as_cols:
+        cursor.execute("ALTER TABLE agent_schedules ADD COLUMN validation_timeout_seconds INTEGER DEFAULT 120")
+
+    # schedule_executions columns
+    cursor.execute("PRAGMA table_info(schedule_executions)")
+    se_cols = {row[1] for row in cursor.fetchall()}
+
+    if "business_status" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN business_status TEXT")
+    if "validated_at" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN validated_at TEXT")
+    if "validation_execution_id" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN validation_execution_id TEXT")
+    if "validates_execution_id" not in se_cols:
+        cursor.execute("ALTER TABLE schedule_executions ADD COLUMN validates_execution_id TEXT")
+
+    # Indexes for validation queries
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_business_status "
+        "ON schedule_executions(business_status)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_validates "
+        "ON schedule_executions(validates_execution_id)"
+    )
+    conn.commit()
+
+
+def _migrate_group_auth_mode(cursor, conn):
+    """Add group_auth_mode to agent_ownership and verified_by_email to telegram_group_configs.
+
+    Supports: 'none' (default, current behavior), 'any_verified' (at least one verified member).
+    """
+    # Add group_auth_mode to agent_ownership
+    cursor.execute("PRAGMA table_info(agent_ownership)")
+    ao_cols = {row[1] for row in cursor.fetchall()}
+    if "group_auth_mode" not in ao_cols:
+        cursor.execute(
+            "ALTER TABLE agent_ownership ADD COLUMN group_auth_mode TEXT DEFAULT 'none'"
+        )
+        logger.info("Added group_auth_mode column to agent_ownership")
+
+    # Add verified_by_email to telegram_group_configs
+    cursor.execute("PRAGMA table_info(telegram_group_configs)")
+    tg_cols = {row[1] for row in cursor.fetchall()}
+    if "verified_by_email" not in tg_cols:
+        cursor.execute(
+            "ALTER TABLE telegram_group_configs ADD COLUMN verified_by_email TEXT"
+        )
+        logger.info("Added verified_by_email column to telegram_group_configs")
+    if "verified_at" not in tg_cols:
+        cursor.execute(
+            "ALTER TABLE telegram_group_configs ADD COLUMN verified_at TEXT"
+        )
+        logger.info("Added verified_at column to telegram_group_configs")
+
+    conn.commit()
+
+
 # Ordered list of all migrations. Defined at module level (after all _migrate_* functions)
 # so run_all_migrations and the health check can both reference it.
 # IMPORTANT: append-only — never reorder or remove entries.
+def _migrate_audit_log_table(cursor, conn):
+    """Create audit_log table + indexes + immutability triggers (SEC-001 / Issue #20).
+
+    Phase 1 of the platform audit trail. The table is also defined in
+    db/schema.py for fresh installs; this migration handles existing installs.
+    """
+    cursor.execute("PRAGMA table_info(audit_log)")
+    if cursor.fetchall():
+        return  # already created (fresh install path)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT UNIQUE NOT NULL,
+            event_type TEXT NOT NULL,
+            event_action TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id TEXT,
+            actor_email TEXT,
+            actor_ip TEXT,
+            mcp_key_id TEXT,
+            mcp_key_name TEXT,
+            mcp_scope TEXT,
+            target_type TEXT,
+            target_id TEXT,
+            timestamp TEXT NOT NULL,
+            details TEXT,
+            request_id TEXT,
+            source TEXT NOT NULL,
+            endpoint TEXT,
+            previous_hash TEXT,
+            entry_hash TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    for ddl in [
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_type, actor_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_mcp_key ON audit_log(mcp_key_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_request ON audit_log(request_id)",
+        # Append-only enforcement: block UPDATE on every row, block DELETE within
+        # the 365-day retention window. Operators can purge stale entries after
+        # retention via a one-off script that drops the trigger.
+        """
+        CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+        BEFORE UPDATE ON audit_log
+        BEGIN
+            SELECT RAISE(ABORT, 'Audit log entries cannot be modified');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+        BEFORE DELETE ON audit_log
+        WHEN OLD.timestamp > datetime('now', '-365 days')
+        BEGIN
+            SELECT RAISE(ABORT, 'Audit log entries cannot be deleted within retention period');
+        END
+        """,
+    ]:
+        cursor.execute(ddl)
+
+    conn.commit()
+    print("Created audit_log table with indexes and immutability triggers (SEC-001)")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -1160,5 +1412,11 @@ MIGRATIONS = [
     ("telegram_group_configs", _migrate_telegram_group_configs),
     ("access_control", _migrate_access_control),
     ("public_link_require_email_unified", _migrate_public_link_require_email_unified),
+    ("email_whitelist_default_role", _migrate_email_whitelist_default_role),
+    ("backlog_support", _migrate_backlog_support),
+    ("scheduler_retry_support", _migrate_scheduler_retry_support),
+    ("validation_support", _migrate_validation_support),
+    ("audit_log_table", _migrate_audit_log_table),
+    ("group_auth_mode", _migrate_group_auth_mode),
     ("agent_ownership_guardrails", _migrate_agent_ownership_guardrails),
 ]

@@ -11,6 +11,13 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-04-15 | #311 | Group auth mode — require at least one verified member before bot responds in Telegram groups | [unified-channel-access-control.md](feature-flows/unified-channel-access-control.md), [telegram-integration.md](feature-flows/telegram-integration.md) |
+| 2026-04-14 | #20 | Platform audit trail (SEC-001) Phase 1 + agent lifecycle smoke test — append-only `audit_log` table, `PlatformAuditService`, admin query API at `/api/audit-log`, and create/start/stop/delete audit rows from `routers/agents.py`. Phase 2b–4 to follow. | [audit-trail.md](feature-flows/audit-trail.md) |
+| 2026-04-14 | #171 | Execution context injection — per-invocation metadata (mode/trigger/timeout/schedule/collaborators) added to every agent system prompt, with sanitization and operator kill-switch | [execution-context-injection.md](feature-flows/execution-context-injection.md) |
+| 2026-04-14 | VALIDATE-001 (#294) | Business task validation — post-execution clean-context auditor verifies task completion | [business-validation.md](feature-flows/business-validation.md) |
+| 2026-04-14 | SELF-EXEC-001 (#264) | Agent self-execute — background task on itself during chat, optional result injection | [self-execute.md](feature-flows/self-execute.md) |
+| 2026-04-13 | BACKLOG-001 (#260) | Persistent async task backlog — async `/task` spills to SQLite FIFO at capacity, drains on slot release, restart-durable | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md) |
+| 2026-04-13 | #314 | Whitelist-driven role on first email login — fixes silent promotion to `creator` for cross-channel access grants | [email-authentication.md](feature-flows/email-authentication.md), [agent-sharing.md](feature-flows/agent-sharing.md), [cli-tool.md](feature-flows/cli-tool.md) |
 | 2026-04-12 | #311 | Unified cross-channel access control — verified email as identity, per-agent policy, access requests | [unified-channel-access-control.md](feature-flows/unified-channel-access-control.md) |
 | 2026-04-12 | #309 | Telegram webhook back-fill when `public_chat_url` is saved (self-healing config order) | [telegram-integration.md](feature-flows/telegram-integration.md) |
 | 2026-04-11 | #297 | Telegram group chat support — @mention triggers, welcome messages, per-group config | [telegram-integration.md](feature-flows/telegram-integration.md) |
@@ -115,7 +122,9 @@
 | Execution Termination | [execution-termination.md](feature-flows/execution-termination.md) | Stop running executions via process registry |
 | Parallel Headless Execution | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) | Stateless parallel task execution via POST /task |
 | Parallel Capacity | [parallel-capacity.md](feature-flows/parallel-capacity.md) | Per-agent parallel execution slot tracking |
+| Persistent Task Backlog | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md) | SQLite-backed FIFO backlog for async tasks at capacity (BACKLOG-001) |
 | Task Execution Service | [task-execution-service.md](feature-flows/task-execution-service.md) | Unified execution lifecycle for all task callers (EXEC-024) |
+| Business Validation | [business-validation.md](feature-flows/business-validation.md) | Post-execution auditor verifies task completion (VALIDATE-001) |
 | Fan-Out | [fan-out.md](feature-flows/fan-out.md) | Parallel task dispatch and result collection via semaphore (FANOUT-001) |
 
 ### Dashboard & Monitoring

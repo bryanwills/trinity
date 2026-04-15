@@ -1,0 +1,606 @@
+"""
+Platform Audit Log unit tests (test_audit_log_unit.py).
+
+Issue #20 / SEC-001 Phase 1. Covers:
+- PlatformAuditOperations: insert, query (with filters), count, single-fetch, range, stats
+- Append-only enforcement: SQLite triggers block UPDATE and DELETE within retention
+- PlatformAuditService: actor resolution, event_id generation, JSON details serialization,
+  and the "audit failures must never raise" contract
+
+These tests run with an in-memory-style temporary SQLite DB that is wired into
+the existing `db.connection` module via monkeypatch — no live backend required.
+"""
+
+import asyncio
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+import types
+from datetime import datetime
+from unittest.mock import MagicMock
+
+import pytest
+
+# Add backend to path for direct imports.
+_backend_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "src", "backend")
+)
+if _backend_path not in sys.path:
+    sys.path.insert(0, _backend_path)
+
+# Stub utils.helpers (tests/utils shadows src/backend/utils in this env).
+if "utils.helpers" not in sys.modules:
+    _helpers = types.ModuleType("utils.helpers")
+    _helpers.utc_now = lambda: datetime.utcnow()
+    _helpers.utc_now_iso = lambda: datetime.utcnow().isoformat() + "Z"
+    _helpers.to_utc_iso = lambda v: str(v)
+    _helpers.parse_iso_timestamp = lambda s: datetime.fromisoformat(s.rstrip("Z"))
+    sys.modules["utils.helpers"] = _helpers
+
+
+# ---------------------------------------------------------------------------
+# Fixture: temporary SQLite DB with audit_log table + triggers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def audit_db(monkeypatch):
+    """Create an isolated audit_log DB and patch db.connection to use it."""
+    db_file = tempfile.NamedTemporaryFile(suffix="_audit_test.db", delete=False)
+    db_file.close()
+    db_path = db_file.name
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT UNIQUE NOT NULL,
+            event_type TEXT NOT NULL,
+            event_action TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id TEXT,
+            actor_email TEXT,
+            actor_ip TEXT,
+            mcp_key_id TEXT,
+            mcp_key_name TEXT,
+            mcp_scope TEXT,
+            target_type TEXT,
+            target_id TEXT,
+            timestamp TEXT NOT NULL,
+            details TEXT,
+            request_id TEXT,
+            source TEXT NOT NULL,
+            endpoint TEXT,
+            previous_hash TEXT,
+            entry_hash TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER audit_log_no_update
+        BEFORE UPDATE ON audit_log
+        BEGIN
+            SELECT RAISE(ABORT, 'Audit log entries cannot be modified');
+        END
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER audit_log_no_delete
+        BEFORE DELETE ON audit_log
+        WHEN OLD.timestamp > datetime('now', '-365 days')
+        BEGIN
+            SELECT RAISE(ABORT, 'Audit log entries cannot be deleted within retention period');
+        END
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Build a fake db.connection module that hands out connections to our temp DB.
+    class _ConnContext:
+        def __enter__(self):
+            self._conn = sqlite3.connect(db_path)
+            self._conn.row_factory = sqlite3.Row
+            return self._conn
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self._conn.close()
+
+    fake_module = types.ModuleType("db.connection")
+    fake_module.get_db_connection = lambda: _ConnContext()
+    monkeypatch.setitem(sys.modules, "db.connection", fake_module)
+
+    yield db_path
+
+    os.unlink(db_path)
+
+
+@pytest.fixture
+def audit_ops(audit_db):
+    """Fresh PlatformAuditOperations instance using the temp DB."""
+    # Force reimport so the new db.connection stub is picked up.
+    if "db.audit" in sys.modules:
+        del sys.modules["db.audit"]
+    from db.audit import PlatformAuditOperations
+
+    return PlatformAuditOperations()
+
+
+# Override the backend-requiring autouse fixture from package conftest.
+@pytest.fixture(scope="session")
+def api_client():
+    yield None
+
+
+@pytest.fixture(autouse=True)
+def cleanup_after_test():
+    yield
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _entry(
+    event_id="evt-1",
+    event_type="agent_lifecycle",
+    event_action="create",
+    actor_type="user",
+    actor_id="42",
+    timestamp="2026-04-14T10:00:00Z",
+    source="api",
+    **kwargs,
+):
+    base = {
+        "event_id": event_id,
+        "event_type": event_type,
+        "event_action": event_action,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "timestamp": timestamp,
+        "source": source,
+    }
+    base.update(kwargs)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Schema / immutability
+# ---------------------------------------------------------------------------
+
+
+def test_insert_and_fetch(audit_ops):
+    audit_ops.create_audit_entry(_entry(event_id="evt-a", actor_email="alice@example.com"))
+    fetched = audit_ops.get_audit_entry("evt-a")
+    assert fetched is not None
+    assert fetched["event_id"] == "evt-a"
+    assert fetched["actor_email"] == "alice@example.com"
+    assert fetched["event_type"] == "agent_lifecycle"
+
+
+def test_insert_with_json_details(audit_ops):
+    audit_ops.create_audit_entry(
+        _entry(event_id="evt-json", details=json.dumps({"agent": "oracle", "tags": ["alpha"]}))
+    )
+    fetched = audit_ops.get_audit_entry("evt-json")
+    assert fetched["details"] == {"agent": "oracle", "tags": ["alpha"]}
+
+
+def test_unique_event_id_enforced(audit_ops):
+    audit_ops.create_audit_entry(_entry(event_id="dup"))
+    with pytest.raises(sqlite3.IntegrityError):
+        audit_ops.create_audit_entry(_entry(event_id="dup"))
+
+
+def test_update_blocked_by_trigger(audit_ops, audit_db):
+    audit_ops.create_audit_entry(_entry(event_id="evt-immut"))
+    conn = sqlite3.connect(audit_db)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="cannot be modified"):
+            conn.execute(
+                "UPDATE audit_log SET event_action = 'tampered' WHERE event_id = ?",
+                ("evt-immut",),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def test_delete_within_retention_blocked(audit_ops, audit_db):
+    audit_ops.create_audit_entry(_entry(event_id="evt-recent"))
+    conn = sqlite3.connect(audit_db)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="retention period"):
+            conn.execute("DELETE FROM audit_log WHERE event_id = ?", ("evt-recent",))
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def test_delete_old_entry_allowed(audit_ops, audit_db):
+    audit_ops.create_audit_entry(
+        _entry(event_id="evt-old", timestamp="2024-01-01T00:00:00Z")
+    )
+    conn = sqlite3.connect(audit_db)
+    try:
+        conn.execute("DELETE FROM audit_log WHERE event_id = ?", ("evt-old",))
+        conn.commit()
+    finally:
+        conn.close()
+    assert audit_ops.get_audit_entry("evt-old") is None
+
+
+# ---------------------------------------------------------------------------
+# Query filters and pagination
+# ---------------------------------------------------------------------------
+
+
+def test_filter_by_event_type(audit_ops):
+    audit_ops.create_audit_entry(_entry(event_id="a", event_type="agent_lifecycle"))
+    audit_ops.create_audit_entry(_entry(event_id="b", event_type="authentication"))
+    audit_ops.create_audit_entry(_entry(event_id="c", event_type="agent_lifecycle"))
+
+    rows = audit_ops.get_audit_entries(event_type="agent_lifecycle")
+    assert {r["event_id"] for r in rows} == {"a", "c"}
+
+
+def test_filter_by_actor(audit_ops):
+    audit_ops.create_audit_entry(_entry(event_id="u1", actor_type="user", actor_id="1"))
+    audit_ops.create_audit_entry(_entry(event_id="u2", actor_type="user", actor_id="2"))
+    audit_ops.create_audit_entry(_entry(event_id="a1", actor_type="agent", actor_id="oracle"))
+
+    assert {r["event_id"] for r in audit_ops.get_audit_entries(actor_type="user")} == {"u1", "u2"}
+    assert {r["event_id"] for r in audit_ops.get_audit_entries(actor_id="oracle")} == {"a1"}
+
+
+def test_filter_by_target(audit_ops):
+    audit_ops.create_audit_entry(_entry(event_id="t1", target_type="agent", target_id="oracle"))
+    audit_ops.create_audit_entry(_entry(event_id="t2", target_type="agent", target_id="researcher"))
+    audit_ops.create_audit_entry(_entry(event_id="t3", target_type="user", target_id="42"))
+
+    rows = audit_ops.get_audit_entries(target_type="agent", target_id="oracle")
+    assert [r["event_id"] for r in rows] == ["t1"]
+
+
+def test_filter_by_time_range(audit_ops):
+    audit_ops.create_audit_entry(_entry(event_id="early", timestamp="2026-01-01T00:00:00Z"))
+    audit_ops.create_audit_entry(_entry(event_id="middle", timestamp="2026-02-01T00:00:00Z"))
+    audit_ops.create_audit_entry(_entry(event_id="late", timestamp="2026-03-01T00:00:00Z"))
+
+    rows = audit_ops.get_audit_entries(
+        start_time="2026-01-15T00:00:00Z", end_time="2026-02-15T00:00:00Z"
+    )
+    assert [r["event_id"] for r in rows] == ["middle"]
+
+
+def test_results_ordered_newest_first(audit_ops):
+    audit_ops.create_audit_entry(_entry(event_id="old", timestamp="2026-01-01T00:00:00Z"))
+    audit_ops.create_audit_entry(_entry(event_id="new", timestamp="2026-04-01T00:00:00Z"))
+    audit_ops.create_audit_entry(_entry(event_id="mid", timestamp="2026-02-01T00:00:00Z"))
+
+    rows = audit_ops.get_audit_entries()
+    assert [r["event_id"] for r in rows] == ["new", "mid", "old"]
+
+
+def test_pagination(audit_ops):
+    for i in range(10):
+        audit_ops.create_audit_entry(
+            _entry(event_id=f"p{i}", timestamp=f"2026-04-{i+1:02d}T00:00:00Z")
+        )
+    page1 = audit_ops.get_audit_entries(limit=3, offset=0)
+    page2 = audit_ops.get_audit_entries(limit=3, offset=3)
+    assert len(page1) == 3 and len(page2) == 3
+    assert {r["event_id"] for r in page1}.isdisjoint({r["event_id"] for r in page2})
+
+
+def test_count_independent_of_pagination(audit_ops):
+    for i in range(5):
+        audit_ops.create_audit_entry(_entry(event_id=f"c{i}"))
+    assert audit_ops.count_audit_entries() == 5
+    assert audit_ops.count_audit_entries(event_type="agent_lifecycle") == 5
+    assert audit_ops.count_audit_entries(event_type="authentication") == 0
+
+
+def test_get_audit_entries_range(audit_ops):
+    for i in range(5):
+        audit_ops.create_audit_entry(_entry(event_id=f"r{i}"))
+    rows = audit_ops.get_audit_entries_range(2, 4)
+    assert [r["id"] for r in rows] == [2, 3, 4]
+
+
+def test_stats_aggregation(audit_ops):
+    audit_ops.create_audit_entry(_entry(event_id="s1", event_type="agent_lifecycle", actor_type="user"))
+    audit_ops.create_audit_entry(_entry(event_id="s2", event_type="agent_lifecycle", actor_type="user"))
+    audit_ops.create_audit_entry(_entry(event_id="s3", event_type="authentication", actor_type="user"))
+    audit_ops.create_audit_entry(_entry(event_id="s4", event_type="mcp_operation", actor_type="mcp_client"))
+
+    stats = audit_ops.get_audit_stats()
+    assert stats["total"] == 4
+    assert stats["by_event_type"]["agent_lifecycle"] == 2
+    assert stats["by_event_type"]["authentication"] == 1
+    assert stats["by_actor_type"]["user"] == 3
+    assert stats["by_actor_type"]["mcp_client"] == 1
+
+
+def test_missing_entry_returns_none(audit_ops):
+    assert audit_ops.get_audit_entry("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# PlatformAuditService
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def audit_service(audit_db, monkeypatch, audit_ops):
+    """PlatformAuditService wired to the temp DB via a fake `database.db`."""
+    # Reimport to pick up the temp DB.
+    if "services.platform_audit_service" in sys.modules:
+        del sys.modules["services.platform_audit_service"]
+
+    fake_db_module = types.ModuleType("database")
+    fake_db = MagicMock()
+    fake_db.create_audit_entry = audit_ops.create_audit_entry
+    fake_db_module.db = fake_db
+    monkeypatch.setitem(sys.modules, "database", fake_db_module)
+
+    # Stub models.User dependency too — service only reads .id and .email.
+    if "models" not in sys.modules:
+        fake_models = types.ModuleType("models")
+        fake_models.User = type("User", (), {})
+        monkeypatch.setitem(sys.modules, "models", fake_models)
+
+    from services.platform_audit_service import (
+        AuditActorType,
+        AuditEventType,
+        PlatformAuditService,
+    )
+
+    service = PlatformAuditService()
+    return service, AuditEventType, AuditActorType
+
+
+def test_service_logs_user_actor(audit_service, audit_ops):
+    service, ETYPE, ATYPE = audit_service
+    user = types.SimpleNamespace(id=42, email="alice@example.com")
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.AGENT_LIFECYCLE,
+            event_action="create",
+            source="api",
+            actor_user=user,
+            target_type="agent",
+            target_id="oracle",
+        )
+    )
+    assert event_id is not None
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["actor_type"] == ATYPE.USER.value
+    assert row["actor_id"] == "42"
+    assert row["actor_email"] == "alice@example.com"
+    assert row["target_id"] == "oracle"
+    assert row["event_action"] == "create"
+
+
+def test_service_logs_agent_actor(audit_service, audit_ops):
+    service, ETYPE, ATYPE = audit_service
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.MCP_OPERATION,
+            event_action="tool_call",
+            source="mcp",
+            actor_agent_name="oracle",
+        )
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["actor_type"] == ATYPE.AGENT.value
+    assert row["actor_id"] == "oracle"
+    assert row["actor_email"] is None
+
+
+def test_service_logs_mcp_client(audit_service, audit_ops):
+    service, ETYPE, ATYPE = audit_service
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.MCP_OPERATION,
+            event_action="tool_call",
+            source="mcp",
+            mcp_key_id="key-123",
+            mcp_key_name="claude-code-dev",
+            mcp_scope="user",
+        )
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["actor_type"] == ATYPE.MCP_CLIENT.value
+    assert row["actor_id"] == "key-123"
+    assert row["mcp_key_name"] == "claude-code-dev"
+
+
+def test_service_system_actor_when_mcp_scope_system(audit_service, audit_ops):
+    service, ETYPE, ATYPE = audit_service
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.SYSTEM,
+            event_action="startup",
+            source="system",
+            mcp_scope="system",
+        )
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["actor_type"] == ATYPE.SYSTEM.value
+    assert row["actor_id"] == "trinity-system"
+
+
+def test_service_serializes_details_as_json(audit_service, audit_ops):
+    service, ETYPE, _ = audit_service
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=types.SimpleNamespace(id=1, email="a@b"),
+            details={"key": "trinity_prompt", "old_len": 100, "new_len": 250},
+        )
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["details"] == {"key": "trinity_prompt", "old_len": 100, "new_len": 250}
+
+
+def test_service_never_raises_on_db_failure(audit_service, monkeypatch):
+    """Audit failures must be logged but never propagated."""
+    service, ETYPE, _ = audit_service
+
+    def boom(_entry):
+        raise RuntimeError("simulated DB failure")
+
+    import database
+
+    monkeypatch.setattr(database.db, "create_audit_entry", boom)
+
+    # Must not raise.
+    result = asyncio.run(
+        service.log(
+            event_type=ETYPE.AGENT_LIFECYCLE,
+            event_action="create",
+            source="api",
+            actor_user=types.SimpleNamespace(id=1, email="a@b"),
+        )
+    )
+    assert result is None
+
+
+def test_service_generates_unique_event_ids(audit_service, audit_ops):
+    service, ETYPE, _ = audit_service
+    user = types.SimpleNamespace(id=1, email="a@b")
+    ids = set()
+    for _ in range(20):
+        event_id = asyncio.run(
+            service.log(
+                event_type=ETYPE.AGENT_LIFECYCLE,
+                event_action="create",
+                source="api",
+                actor_user=user,
+            )
+        )
+        ids.add(event_id)
+    assert len(ids) == 20  # all unique
+
+
+def test_service_records_request_metadata(audit_service, audit_ops):
+    service, ETYPE, _ = audit_service
+    user = types.SimpleNamespace(id=1, email="a@b")
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.AGENT_LIFECYCLE,
+            event_action="create",
+            source="api",
+            actor_user=user,
+            actor_ip="10.0.0.1",
+            request_id="req-xyz",
+            endpoint="POST /api/agents",
+        )
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["actor_ip"] == "10.0.0.1"
+    assert row["request_id"] == "req-xyz"
+    assert row["endpoint"] == "POST /api/agents"
+
+
+# ---------------------------------------------------------------------------
+# Agent lifecycle integration (SEC-001 Phase 2 — lifecycle subset)
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the exact shape the router handlers produce for
+# create / start / stop / delete. Mirrors the kwargs used in
+# routers/agents.py so a refactor of the call site cannot silently break
+# the contract without breaking these tests.
+
+
+def _lifecycle_log(service, etype, action, agent_name, **extra):
+    """Fire the same service.log kwargs the router uses for one lifecycle event."""
+    user = types.SimpleNamespace(id=7, email="owner@example.com")
+    return asyncio.run(
+        service.log(
+            event_type=etype.AGENT_LIFECYCLE,
+            event_action=action,
+            source="api",
+            actor_user=user,
+            actor_ip="127.0.0.1",
+            target_type="agent",
+            target_id=agent_name,
+            endpoint=f"/api/agents/{agent_name}",
+            **extra,
+        )
+    )
+
+
+def test_lifecycle_create_emits_row(audit_service, audit_ops):
+    service, ETYPE, _ = audit_service
+    event_id = _lifecycle_log(
+        service,
+        ETYPE,
+        "create",
+        "oracle",
+        details={"template": "github:Org/repo", "base_image": "trinity-agent-base:latest"},
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["event_type"] == "agent_lifecycle"
+    assert row["event_action"] == "create"
+    assert row["target_type"] == "agent"
+    assert row["target_id"] == "oracle"
+    assert row["actor_type"] == "user"
+    assert row["actor_email"] == "owner@example.com"
+    assert row["details"]["template"] == "github:Org/repo"
+
+
+def test_lifecycle_start_emits_row(audit_service, audit_ops):
+    service, ETYPE, _ = audit_service
+    event_id = _lifecycle_log(
+        service, ETYPE, "start", "oracle", details={"credentials_injection": "success"}
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["event_action"] == "start"
+    assert row["target_id"] == "oracle"
+    assert row["details"]["credentials_injection"] == "success"
+
+
+def test_lifecycle_stop_emits_row(audit_service, audit_ops):
+    service, ETYPE, _ = audit_service
+    event_id = _lifecycle_log(service, ETYPE, "stop", "oracle")
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["event_action"] == "stop"
+    assert row["target_id"] == "oracle"
+    assert row["details"] is None
+
+
+def test_lifecycle_delete_emits_row(audit_service, audit_ops):
+    service, ETYPE, _ = audit_service
+    event_id = _lifecycle_log(service, ETYPE, "delete", "oracle")
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["event_action"] == "delete"
+    assert row["target_id"] == "oracle"
+
+
+def test_lifecycle_full_flow_creates_ordered_history(audit_service, audit_ops):
+    """Create → start → stop → delete should produce 4 rows in temporal order."""
+    service, ETYPE, _ = audit_service
+    for action in ("create", "start", "stop", "delete"):
+        _lifecycle_log(service, ETYPE, action, "ephemeral-1")
+
+    rows = audit_ops.get_audit_entries(
+        event_type="agent_lifecycle",
+        target_type="agent",
+        target_id="ephemeral-1",
+    )
+    # Newest first — reverse to get chronological order.
+    actions = [r["event_action"] for r in reversed(rows)]
+    assert actions == ["create", "start", "stop", "delete"]

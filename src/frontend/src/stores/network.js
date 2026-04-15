@@ -231,7 +231,7 @@ export const useNetworkStore = defineStore('network', () => {
 
       // Fetch ALL execution types (not just collaborations)
       const params = {
-        activity_types: 'agent_collaboration,schedule_start,schedule_end,chat_start,chat_end',
+        activity_types: 'agent_collaboration,schedule_start,schedule_end,chat_start,chat_end,self_task',
         start_time: startTime.toISOString(),
         limit: 500
       }
