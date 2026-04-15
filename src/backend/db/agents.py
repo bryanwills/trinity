@@ -177,3 +177,29 @@ class AgentOperations(
         # Check database flag
         owner = self.get_agent_owner(agent_name)
         return owner.get("is_system", False) if owner else False
+
+    # =========================================================================
+    # Voice System Prompt (VOICE-005)
+    # =========================================================================
+
+    def get_voice_system_prompt(self, agent_name: str) -> Optional[str]:
+        """Get the voice system prompt for an agent."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT voice_system_prompt FROM agent_ownership WHERE agent_name = ?",
+                (agent_name,),
+            )
+            row = cursor.fetchone()
+            return row["voice_system_prompt"] if row and row["voice_system_prompt"] else None
+
+    def set_voice_system_prompt(self, agent_name: str, prompt: Optional[str]) -> bool:
+        """Set the voice system prompt for an agent."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE agent_ownership SET voice_system_prompt = ? WHERE agent_name = ?",
+                (prompt or None, agent_name),
+            )
+            conn.commit()
+            return cursor.rowcount > 0

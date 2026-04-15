@@ -148,7 +148,7 @@ async def voice_status(
     return {
         "enabled": VOICE_ENABLED,
         "available": voice_service.is_available(),
-        "voice_prompt_set": bool(_get_voice_system_prompt_raw(name)),
+        "voice_prompt_set": bool(db.agents.get_voice_system_prompt(name)),
     }
 
 
@@ -158,7 +158,7 @@ async def get_voice_prompt(
     current_user: User = Depends(get_current_user),
 ):
     """Get the agent's voice system prompt."""
-    prompt = _get_voice_system_prompt_raw(name)
+    prompt = db.agents.get_voice_system_prompt(name)
     return {"voice_system_prompt": prompt}
 
 
@@ -170,16 +170,7 @@ async def set_voice_prompt(
 ):
     """Set the agent's voice system prompt."""
     prompt = (body or {}).get("voice_system_prompt", "")
-
-    from db.connection import get_db_connection
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE agent_ownership SET voice_system_prompt = ? WHERE agent_name = ?",
-            (prompt or None, name),
-        )
-        conn.commit()
-
+    db.agents.set_voice_system_prompt(name, prompt)
     return {"ok": True, "voice_system_prompt": prompt}
 
 
@@ -297,22 +288,6 @@ async def voice_websocket(
 
 # ── Helper Functions ─────────────────────────────────────────────────────────
 
-def _get_voice_system_prompt_raw(agent_name: str) -> Optional[str]:
-    """Get raw voice_system_prompt from agent_ownership."""
-    from db.connection import get_db_connection
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "SELECT voice_system_prompt FROM agent_ownership WHERE agent_name = ?",
-                (agent_name,),
-            )
-            row = cursor.fetchone()
-            return row["voice_system_prompt"] if row and row["voice_system_prompt"] else None
-        except Exception:
-            return None
-
-
 async def _get_voice_system_prompt(agent_name: str) -> str:
     """Get the voice system prompt.
 
@@ -322,7 +297,7 @@ async def _get_voice_system_prompt(agent_name: str) -> str:
     3. Error if neither exists
     """
     # 1. Check DB override
-    prompt = _get_voice_system_prompt_raw(agent_name)
+    prompt = db.agents.get_voice_system_prompt(agent_name)
     if prompt:
         return prompt
 
