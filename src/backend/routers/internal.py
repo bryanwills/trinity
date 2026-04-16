@@ -19,6 +19,7 @@ import logging
 from models import ActivityState, ActivityType
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
+from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -397,3 +398,64 @@ async def _run_validation_background(
         )
     except Exception as e:
         logger.error(f"Validation failed for execution {execution_id}: {e}")
+
+
+# =============================================================================
+# Audit Logging Endpoint (SEC-001 Phase 3 — MCP server integration)
+# =============================================================================
+
+class InternalAuditRequest(BaseModel):
+    """Request model for audit log entries from MCP server."""
+    event_type: str          # AuditEventType value
+    event_action: str        # e.g. "tool_call"
+    source: str = "mcp"      # Always "mcp" for MCP server calls
+    # MCP auth context
+    mcp_key_id: Optional[str] = None
+    mcp_key_name: Optional[str] = None
+    mcp_scope: Optional[str] = None
+    actor_agent_name: Optional[str] = None
+    # Target
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    # Details
+    details: Optional[Dict] = None
+
+
+@router.post("/audit")
+async def log_audit_entry(request: InternalAuditRequest):
+    """
+    Log an audit entry from the MCP server (SEC-001 Phase 3).
+
+    Called by the MCP server after each tool execution to record
+    tool calls with full MCP auth context (key_id, scope, agent_name).
+    Uses the internal shared-secret auth (C-003), not JWT.
+    """
+    try:
+        event_type_map = {e.value: e for e in AuditEventType}
+        event_type = event_type_map.get(request.event_type)
+        if not event_type:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid event_type: {request.event_type}"
+            )
+
+        event_id = await platform_audit_service.log(
+            event_type=event_type,
+            event_action=request.event_action,
+            source=request.source,
+            mcp_key_id=request.mcp_key_id,
+            mcp_key_name=request.mcp_key_name,
+            mcp_scope=request.mcp_scope,
+            actor_agent_name=request.actor_agent_name,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            details=request.details,
+        )
+
+        return {"event_id": event_id, "status": "logged"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to log audit entry: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

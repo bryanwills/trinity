@@ -1,25 +1,29 @@
 """
-Platform Audit Log API (SEC-001 / Issue #20 — Phase 1).
+Platform Audit Log API (SEC-001 / Issue #20).
 
-Admin-only query interface over the platform `audit_log` table. Phase 1 ships
-read endpoints; integration write paths land in Phase 2 (lifecycle, auth,
-sharing, settings, credentials), Phase 3 (MCP tools), and Phase 4 (hash-chain
-verification, export).
+Admin-only query interface over the platform `audit_log` table.
+Phases 1–2b: schema, service, write integrations.
+Phase 3: MCP tool call audit.
+Phase 4: hash chain verification, CSV/JSON export.
 
 Mounted at `/api/audit-log` rather than `/api/audit` to coexist with the
 existing Process Engine audit router (`routers/audit.py`) without breaking
 URL contracts. A unified surface can be added later.
 """
 
+import csv
+import io
 import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from database import db
 from dependencies import require_admin
 from models import User
+from services.platform_audit_service import platform_audit_service
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +92,104 @@ async def audit_log_stats(
     """Aggregate counts by event_type and actor_type for the time window."""
     stats = db.get_audit_stats(start_time=start_time, end_time=end_time)
     return AuditLogStatsResponse(**stats)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Hash chain verification
+# ---------------------------------------------------------------------------
+
+
+class AuditVerifyResponse(BaseModel):
+    """Hash chain verification result."""
+
+    valid: bool
+    checked: int
+    first_invalid_id: Optional[int] = None
+
+
+@router.post("/verify", response_model=AuditVerifyResponse)
+async def verify_audit_integrity(
+    start_id: int = Query(..., ge=1, description="First row ID to verify"),
+    end_id: int = Query(..., ge=1, description="Last row ID to verify (inclusive)"),
+    _admin: User = Depends(require_admin),
+):
+    """Verify hash chain integrity for a range of audit entries.
+
+    Returns whether the chain is intact. Entries without hashes (written
+    before hash chain was enabled) are skipped.
+    """
+    if end_id < start_id:
+        raise HTTPException(status_code=400, detail="end_id must be >= start_id")
+    result = await platform_audit_service.verify_chain(start_id, end_id)
+    return AuditVerifyResponse(**result)
+
+
+@router.post("/hash-chain/enable")
+async def enable_hash_chain(
+    enabled: bool = Query(True, description="Enable or disable hash chain"),
+    _admin: User = Depends(require_admin),
+):
+    """Enable or disable hash chain computation for new audit entries."""
+    platform_audit_service.enable_hash_chain(enabled)
+    return {"hash_chain_enabled": enabled}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Export
+# ---------------------------------------------------------------------------
+
+
+@router.get("/export")
+async def export_audit_log(
+    start_time: str = Query(..., description="ISO 8601 UTC start (inclusive)"),
+    end_time: str = Query(..., description="ISO 8601 UTC end (inclusive)"),
+    format: str = Query("json", description="Export format: json or csv"),
+    _admin: User = Depends(require_admin),
+):
+    """Export audit log entries for a time range as JSON array or CSV download."""
+    if format not in ("json", "csv"):
+        raise HTTPException(status_code=400, detail="format must be 'json' or 'csv'")
+
+    entries = db.get_audit_entries(
+        start_time=start_time,
+        end_time=end_time,
+        limit=100_000,
+        offset=0,
+    )
+
+    if format == "csv":
+        if not entries:
+            return StreamingResponse(
+                iter(["No entries found\n"]),
+                media_type="text/csv",
+                headers={"Content-Disposition": "attachment; filename=audit_log.csv"},
+            )
+
+        output = io.StringIO()
+        fieldnames = list(entries[0].keys())
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for entry in entries:
+            # Flatten dict fields for CSV
+            row = {}
+            for k, v in entry.items():
+                row[k] = str(v) if isinstance(v, (dict, list)) else v
+            writer.writerow(row)
+
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=audit_log.csv"},
+        )
+
+    # JSON format
+    return {"entries": entries, "count": len(entries), "format": "json"}
+
+
+# ---------------------------------------------------------------------------
+# List + detail endpoints
+# ---------------------------------------------------------------------------
 
 
 @router.get("", response_model=AuditLogListResponse)

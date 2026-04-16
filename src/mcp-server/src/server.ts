@@ -22,6 +22,7 @@ import { createExecutionTools } from "./tools/executions.js";
 import { createEventTools } from "./tools/events.js";
 import { createChannelTools } from "./tools/channels.js";
 import { createMessageTools } from "./tools/messages.js";
+import { withAudit } from "./audit.js";
 import type { McpAuthContext } from "./types.js";
 
 export interface ServerConfig {
@@ -166,128 +167,61 @@ export async function createServer(config: ServerConfig = {}) {
 
   console.log(`MCP API Key authentication: ${requireApiKey ? "ENABLED" : "DISABLED"}`);
 
-  // Register agent management tools
-  // Auth context will be passed via tool execution context (context.session)
-  const agentTools = createAgentTools(client, requireApiKey);
-  server.addTool(agentTools.listAgents);
-  server.addTool(agentTools.getAgent);
-  server.addTool(agentTools.getAgentInfo);
-  server.addTool(agentTools.createAgent);
-  server.addTool(agentTools.renameAgent);  // RENAME-001
-  server.addTool(agentTools.deleteAgent);
-  server.addTool(agentTools.startAgent);
-  server.addTool(agentTools.stopAgent);
-  server.addTool(agentTools.listTemplates);
-  // CRED-002: New credential management tools (replaces old reloadCredentials)
-  server.addTool(agentTools.getCredentialStatus);
-  server.addTool(agentTools.injectCredentials);
-  server.addTool(agentTools.exportCredentials);
-  server.addTool(agentTools.importCredentials);
-  server.addTool(agentTools.getCredentialEncryptionKey);
-  server.addTool(agentTools.getAgentSshAccess);
-  server.addTool(agentTools.deployLocalAgent);
-  server.addTool(agentTools.initializeGithubSync);
-  // #347: Per-agent GitHub PAT tools
-  server.addTool(agentTools.getAgentGithubPatStatus);
-  server.addTool(agentTools.setAgentGithubPat);
+  // SEC-001 Phase 3: Wrap tool execute functions with audit logging.
+  // withAudit captures tool name, auth context, timing, and success/failure,
+  // then fires a non-blocking POST to the backend internal audit endpoint.
+  function addToolWithAudit(tool: any): void {
+    const wrapped = {
+      ...tool,
+      execute: withAudit(tool.name, tool.execute),
+    };
+    server.addTool(wrapped);
+  }
 
-  // Register chat tools with auth context for access control
-  const chatTools = createChatTools(client, requireApiKey);
-  server.addTool(chatTools.chatWithAgent);
-  server.addTool(chatTools.fanOut);
-  server.addTool(chatTools.getChatHistory);
-  server.addTool(chatTools.getAgentLogs);
+  // Helper to register all tools from a tool group with audit wrapping
+  function addAllTools(tools: Record<string, any>): void {
+    for (const tool of Object.values(tools)) {
+      addToolWithAudit(tool);
+    }
+  }
 
-  // Register system management tools (Phase 3)
-  const systemTools = createSystemTools(client, requireApiKey);
-  server.addTool(systemTools.deploySystem);
-  server.addTool(systemTools.listSystems);
-  server.addTool(systemTools.restartSystem);
-  server.addTool(systemTools.getSystemManifest);
+  // Register all tool groups with audit wrapping (SEC-001 Phase 3)
+  addAllTools(createAgentTools(client, requireApiKey));
+  addAllTools(createChatTools(client, requireApiKey));
+  addAllTools(createSystemTools(client, requireApiKey));
+  addAllTools(createDocsTools());
+  addAllTools(createSkillsTools(client, requireApiKey));
+  addAllTools(createScheduleTools(client, requireApiKey));
+  addAllTools(createTagTools(client, requireApiKey));
+  addAllTools(createNotificationTools(client, requireApiKey));
+  addAllTools(createSubscriptionTools(client, requireApiKey));
+  addAllTools(createMonitoringTools(client, requireApiKey));
+  addAllTools(createNeverminedTools(client, requireApiKey));
+  addAllTools(createExecutionTools(client, requireApiKey));
+  addAllTools(createEventTools(client, requireApiKey));
+  addAllTools(createChannelTools(client, requireApiKey));
+  addAllTools(createMessageTools(client, requireApiKey));
 
-  // Register documentation tools
-  const docsTools = createDocsTools();
-  server.addTool(docsTools.getAgentRequirements);
-
-  // Register skills management tools
-  const skillsTools = createSkillsTools(client, requireApiKey);
-  server.addTool(skillsTools.listSkills);
-  server.addTool(skillsTools.getSkill);
-  server.addTool(skillsTools.getSkillsLibraryStatus);
-  server.addTool(skillsTools.assignSkillToAgent);
-  server.addTool(skillsTools.setAgentSkills);
-  server.addTool(skillsTools.syncAgentSkills);
-  server.addTool(skillsTools.getAgentSkills);
-
-  // Register schedule management tools (8 tools)
-  const scheduleTools = createScheduleTools(client, requireApiKey);
-  server.addTool(scheduleTools.listAgentSchedules);
-  server.addTool(scheduleTools.createAgentSchedule);
-  server.addTool(scheduleTools.getAgentSchedule);
-  server.addTool(scheduleTools.updateAgentSchedule);
-  server.addTool(scheduleTools.deleteAgentSchedule);
-  server.addTool(scheduleTools.toggleAgentSchedule);
-  server.addTool(scheduleTools.triggerAgentSchedule);
-  server.addTool(scheduleTools.getScheduleExecutions);
-
-  // Register tag management tools (5 tools) - ORG-001
-  const tagTools = createTagTools(client, requireApiKey);
-  server.addTool(tagTools.listTags);
-  server.addTool(tagTools.getAgentTags);
-  server.addTool(tagTools.tagAgent);
-  server.addTool(tagTools.untagAgent);
-  server.addTool(tagTools.setAgentTags);
-
-  // Register notification tools (1 tool) - NOTIF-001
-  const notificationTools = createNotificationTools(client, requireApiKey);
-  server.addTool(notificationTools.sendNotification);
-
-  // Register subscription management tools (6 tools) - SUB-001
-  const subscriptionTools = createSubscriptionTools(client, requireApiKey);
-  server.addTool(subscriptionTools.registerSubscription);
-  server.addTool(subscriptionTools.listSubscriptions);
-  server.addTool(subscriptionTools.assignSubscription);
-  server.addTool(subscriptionTools.clearAgentSubscription);
-  server.addTool(subscriptionTools.getAgentAuth);
-  server.addTool(subscriptionTools.deleteSubscription);
-
-  // Register monitoring tools (3 tools) - MON-001
-  const monitoringTools = createMonitoringTools(client, requireApiKey);
-  server.addTool(monitoringTools.getFleetHealth);
-  server.addTool(monitoringTools.getAgentHealth);
-  server.addTool(monitoringTools.triggerHealthCheck);
-
-  // Register Nevermined payment tools (4 tools) - NVM-001
-  const neverminedTools = createNeverminedTools(client, requireApiKey);
-  server.addTool(neverminedTools.configureNevermined);
-  server.addTool(neverminedTools.getNeverminedConfig);
-  server.addTool(neverminedTools.toggleNevermined);
-  server.addTool(neverminedTools.getNeverminedPayments);
-
-  // Register execution query tools (3 tools) - MCP-007
-  const executionTools = createExecutionTools(client, requireApiKey);
-  server.addTool(executionTools.listRecentExecutions);
-  server.addTool(executionTools.getExecutionResult);
-  server.addTool(executionTools.getAgentActivitySummary);
-
-  // Register event tools (4 tools) - EVT-001
-  const eventTools = createEventTools(client, requireApiKey);
-  server.addTool(eventTools.emitEvent);
-  server.addTool(eventTools.subscribeToEvent);
-  server.addTool(eventTools.listEventSubscriptions);
-  server.addTool(eventTools.deleteEventSubscription);
-
-  // Register channel tools (2 tools) - Issue #349
-  const channelTools = createChannelTools(client, requireApiKey);
-  server.addTool(channelTools.listChannelGroups);
-  server.addTool(channelTools.sendGroupMessage);
-
-  // Register message tools (1 tool) - Issue #321
-  const messageTools = createMessageTools(client, requireApiKey);
-  server.addTool(messageTools.sendMessage);
-
-  const totalTools = Object.keys(agentTools).length + Object.keys(chatTools).length + Object.keys(systemTools).length + Object.keys(docsTools).length + Object.keys(skillsTools).length + Object.keys(scheduleTools).length + Object.keys(tagTools).length + Object.keys(notificationTools).length + Object.keys(subscriptionTools).length + Object.keys(monitoringTools).length + Object.keys(neverminedTools).length + Object.keys(executionTools).length + Object.keys(eventTools).length + Object.keys(channelTools).length + Object.keys(messageTools).length;
-  console.log(`Registered ${totalTools} tools (${Object.keys(agentTools).length} agent, ${Object.keys(chatTools).length} chat, ${Object.keys(systemTools).length} system, ${Object.keys(docsTools).length} docs, ${Object.keys(skillsTools).length} skills, ${Object.keys(scheduleTools).length} schedule, ${Object.keys(tagTools).length} tags, ${Object.keys(notificationTools).length} notifications, ${Object.keys(subscriptionTools).length} subscriptions, ${Object.keys(monitoringTools).length} monitoring, ${Object.keys(neverminedTools).length} nevermined, ${Object.keys(executionTools).length} executions, ${Object.keys(eventTools).length} events, ${Object.keys(channelTools).length} channels, ${Object.keys(messageTools).length} messages)`);
+  // Count registered tools from all groups
+  const toolGroups = [
+    createAgentTools(client, requireApiKey),
+    createChatTools(client, requireApiKey),
+    createSystemTools(client, requireApiKey),
+    createDocsTools(),
+    createSkillsTools(client, requireApiKey),
+    createScheduleTools(client, requireApiKey),
+    createTagTools(client, requireApiKey),
+    createNotificationTools(client, requireApiKey),
+    createSubscriptionTools(client, requireApiKey),
+    createMonitoringTools(client, requireApiKey),
+    createNeverminedTools(client, requireApiKey),
+    createExecutionTools(client, requireApiKey),
+    createEventTools(client, requireApiKey),
+    createChannelTools(client, requireApiKey),
+    createMessageTools(client, requireApiKey),
+  ];
+  const totalTools = toolGroups.reduce((sum, g) => sum + Object.keys(g).length, 0);
+  console.log(`Registered ${totalTools} tools with audit wrapping (SEC-001 Phase 3)`);
 
   return { server, port, client, requireApiKey };
 }

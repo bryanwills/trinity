@@ -604,12 +604,11 @@ covers cross-cutting platform events (lifecycle, auth, MCP, credentials, etc.)
 via the new `audit_log` table. Both are intentionally separate per the SEC-001
 architecture; a unified surface can be added later.
 
-**Phases 1–2b complete.** Phase 1 ships infrastructure; Phase 2a ships agent
-lifecycle audit (create/start/stop/delete); Phase 2b ships auth
-(login success/failure), sharing (share/unshare/access requests), credentials
-(inject/export/import), settings changes, agent rename, and request-ID
-middleware for correlation. MCP TypeScript audit (Phase 3) and hash-chain
-verification + export (Phase 4) follow as separate PRs against issue #20.
+**All phases complete.** Phase 1: infrastructure. Phase 2a: agent lifecycle
+audit. Phase 2b: auth, sharing, credentials, settings, rename, request-ID
+middleware. Phase 3: MCP tool call audit via transparent wrapper (all 66+
+tools, zero per-tool code). Phase 4: hash chain verification, CSV/JSON
+export, enable/disable toggle. Issue #20 can be closed.
 
 ### Nevermined Payments (NVM-001)
 

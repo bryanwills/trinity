@@ -134,6 +134,7 @@ services:
       - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
       - TRINITY_PASSWORD=${TRINITY_PASSWORD:-}  # Match ADMIN_PASSWORD in .env
       - MCP_REQUIRE_API_KEY=true
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}  # SEC-001: for audit logging to backend
     depends_on:
       - backend
     networks:

@@ -350,6 +350,8 @@ def audit_service(audit_db, monkeypatch, audit_ops):
     fake_db_module = types.ModuleType("database")
     fake_db = MagicMock()
     fake_db.create_audit_entry = audit_ops.create_audit_entry
+    fake_db.get_audit_entries = audit_ops.get_audit_entries
+    fake_db.get_audit_entries_range = audit_ops.get_audit_entries_range
     fake_db_module.db = fake_db
     monkeypatch.setitem(sys.modules, "database", fake_db_module)
 
@@ -851,3 +853,163 @@ def test_phase2b_mixed_events_queryable(audit_service, audit_ops):
 
     stats = audit_ops.get_audit_stats()
     assert stats["total"] >= 5
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — MCP tool call audit
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_tool_call_emits_row(audit_service, audit_ops):
+    """MCP tool calls produce rows with mcp_operation event type."""
+    service, ETYPE, _ = audit_service
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.MCP_OPERATION,
+            event_action="tool_call",
+            source="mcp",
+            mcp_key_id="key-42",
+            mcp_key_name="dev-key",
+            mcp_scope="user",
+            details={"tool": "list_agents", "duration_ms": 150, "success": True},
+        )
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["event_type"] == "mcp_operation"
+    assert row["event_action"] == "tool_call"
+    assert row["source"] == "mcp"
+    assert row["mcp_key_id"] == "key-42"
+    assert row["mcp_key_name"] == "dev-key"
+    assert row["details"]["tool"] == "list_agents"
+    assert row["details"]["success"] is True
+
+
+def test_mcp_tool_call_agent_scope(audit_service, audit_ops):
+    """Agent-scoped MCP tool calls record actor_agent_name."""
+    service, ETYPE, _ = audit_service
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.MCP_OPERATION,
+            event_action="tool_call",
+            source="mcp",
+            mcp_key_id="key-99",
+            mcp_key_name="agent-key",
+            mcp_scope="agent",
+            actor_agent_name="research-bot",
+            details={"tool": "chat_with_agent", "duration_ms": 5000, "success": True},
+        )
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["actor_type"] == "agent"
+    assert row["actor_id"] == "research-bot"
+    assert row["mcp_scope"] == "agent"
+
+
+def test_mcp_tool_call_failure(audit_service, audit_ops):
+    """Failed MCP tool calls include error in details."""
+    service, ETYPE, _ = audit_service
+    event_id = asyncio.run(
+        service.log(
+            event_type=ETYPE.MCP_OPERATION,
+            event_action="tool_call",
+            source="mcp",
+            mcp_key_id="key-1",
+            mcp_key_name="test",
+            mcp_scope="user",
+            details={"tool": "delete_agent", "duration_ms": 30, "success": False, "error": "Not found"},
+        )
+    )
+    row = audit_ops.get_audit_entry(event_id)
+    assert row["details"]["success"] is False
+    assert row["details"]["error"] == "Not found"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — hash chain verification
+# ---------------------------------------------------------------------------
+
+
+def test_hash_chain_produces_hashes(audit_service, audit_ops):
+    """With hash chain enabled, entries get entry_hash and previous_hash."""
+    service, ETYPE, _ = audit_service
+    service.enable_hash_chain(True)
+
+    e1 = asyncio.run(
+        service.log(
+            event_type=ETYPE.SYSTEM,
+            event_action="test_chain_1",
+            source="test",
+        )
+    )
+    e2 = asyncio.run(
+        service.log(
+            event_type=ETYPE.SYSTEM,
+            event_action="test_chain_2",
+            source="test",
+        )
+    )
+
+    row1 = audit_ops.get_audit_entry(e1)
+    row2 = audit_ops.get_audit_entry(e2)
+
+    assert row1["entry_hash"] is not None
+    assert len(row1["entry_hash"]) == 64  # SHA-256 hex
+    assert row2["entry_hash"] is not None
+    assert row2["previous_hash"] == row1["entry_hash"]
+
+    # Disable for other tests
+    service.enable_hash_chain(False)
+
+
+def test_verify_chain_valid(audit_service, audit_ops):
+    """verify_chain returns valid=True for intact chain."""
+    service, ETYPE, _ = audit_service
+    service.enable_hash_chain(True)
+
+    asyncio.run(service.log(event_type=ETYPE.SYSTEM, event_action="v1", source="test"))
+    asyncio.run(service.log(event_type=ETYPE.SYSTEM, event_action="v2", source="test"))
+    asyncio.run(service.log(event_type=ETYPE.SYSTEM, event_action="v3", source="test"))
+
+    # Get ID range
+    entries = audit_ops.get_audit_entries(event_type="system", limit=100)
+    ids = sorted(e["id"] for e in entries if e.get("entry_hash"))
+
+    if len(ids) >= 2:
+        result = asyncio.run(service.verify_chain(ids[0], ids[-1]))
+        assert result["valid"] is True
+        assert result["checked"] >= 2
+
+    service.enable_hash_chain(False)
+
+
+def test_verify_chain_empty_range(audit_service, audit_ops):
+    """verify_chain on empty range returns valid=True, checked=0."""
+    service, _, _ = audit_service
+    result = asyncio.run(service.verify_chain(999999, 999999))
+    assert result["valid"] is True
+    assert result["checked"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — export (db-layer only, no HTTP)
+# ---------------------------------------------------------------------------
+
+
+def test_export_entries_by_time_range(audit_service, audit_ops):
+    """Entries in a time range are retrievable for export."""
+    service, ETYPE, _ = audit_service
+    asyncio.run(
+        service.log(
+            event_type=ETYPE.AGENT_LIFECYCLE,
+            event_action="create",
+            source="api",
+            actor_user=types.SimpleNamespace(id=1, email="a@b"),
+        )
+    )
+    # Fetch with wide time range
+    entries = audit_ops.get_audit_entries(
+        start_time="2020-01-01T00:00:00Z",
+        end_time="2030-01-01T00:00:00Z",
+        limit=100_000,
+    )
+    assert len(entries) >= 1
