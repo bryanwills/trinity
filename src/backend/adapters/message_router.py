@@ -25,9 +25,18 @@ from services.docker_service import get_agent_container
 from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
 from services.docker_utils import container_put_archive, container_exec_run
+from services.platform_audit_service import platform_audit_service, AuditEventType
 from adapters.base import ChannelAdapter, ChannelResponse, FileAttachment, NormalizedMessage, OutboundFile
 
 logger = logging.getLogger(__name__)
+
+# Try to import python-magic for MIME validation; graceful fallback if unavailable
+try:
+    import magic
+    _MAGIC_AVAILABLE = True
+except ImportError:
+    _MAGIC_AVAILABLE = False
+    logger.warning("[ROUTER] python-magic not installed; MIME validation will trust channel metadata")
 
 
 # ---------------------------------------------------------------------------
@@ -629,11 +638,54 @@ class ChannelMessageRouter:
             # Download via adapter (channel-agnostic)
             data = await adapter.download_file(f, message)
             if not data:
-                logger.warning(f"[ROUTER] Failed to download {safe_name} from Slack")
+                logger.warning(f"[ROUTER] Failed to download {safe_name} from {adapter.channel_type}")
                 descriptions.append(f"{safe_name} — download failed")
                 continue
 
-            size_str = _format_file_size(len(data))
+            # Post-download size validation (TOCTOU defense)
+            actual_size = len(data)
+            if actual_size > size_limit:
+                logger.warning(
+                    f"[ROUTER] Rejecting {safe_name}: actual size ({actual_size}) exceeds limit "
+                    f"(metadata claimed {f.size})"
+                )
+                descriptions.append(f"{safe_name} — rejected (actual size exceeds {_format_file_size(size_limit)} limit)")
+                continue
+
+            # Magic-byte MIME validation (if python-magic available)
+            actual_mime = f.mimetype
+            if _MAGIC_AVAILABLE:
+                try:
+                    detected_mime = magic.from_buffer(data, mime=True)
+                    # Allow if detected MIME matches declared, or both are image types
+                    declared_is_image = f.mimetype.startswith("image/")
+                    detected_is_image = detected_mime.startswith("image/")
+
+                    if detected_mime != f.mimetype:
+                        # Accept if both are images (JPEG vs PNG mislabel is common)
+                        if declared_is_image and detected_is_image:
+                            logger.debug(
+                                f"[ROUTER] MIME mismatch for {safe_name}: "
+                                f"declared={f.mimetype}, detected={detected_mime} (both images, allowing)"
+                            )
+                            actual_mime = detected_mime
+                            is_image = True  # Update in case detection is more accurate
+                        # Accept text subtypes (text/plain vs text/csv)
+                        elif f.mimetype.startswith("text/") and detected_mime.startswith("text/"):
+                            logger.debug(f"[ROUTER] Text subtype variation: {f.mimetype} vs {detected_mime}")
+                            actual_mime = detected_mime
+                        else:
+                            logger.warning(
+                                f"[ROUTER] Rejecting {safe_name}: MIME mismatch "
+                                f"(declared={f.mimetype}, detected={detected_mime})"
+                            )
+                            descriptions.append(f"{safe_name} — rejected (file type mismatch)")
+                            continue
+                except Exception as e:
+                    logger.warning(f"[ROUTER] MIME detection failed for {safe_name}: {e}")
+                    # Fall through — use declared MIME
+
+            size_str = _format_file_size(actual_size)
 
             if is_image:
                 # Check total inline image budget
@@ -644,8 +696,25 @@ class ChannelMessageRouter:
 
                 total_image_bytes += len(data)
                 b64 = base64.b64encode(data).decode()
-                descriptions.append(f"![{safe_name}](data:{f.mimetype};base64,{b64})")
+                descriptions.append(f"![{safe_name}](data:{actual_mime};base64,{b64})")
                 logger.info(f"[ROUTER] Embedded {safe_name} ({size_str}) as base64 for {agent_name}")
+
+                # Audit log for image upload
+                await platform_audit_service.log(
+                    event_type=AuditEventType.EXECUTION,
+                    event_action="file_upload",
+                    source=adapter.channel_type,
+                    target_type="agent",
+                    target_id=agent_name,
+                    details={
+                        "filename": safe_name,
+                        "size_bytes": actual_size,
+                        "mime_type": actual_mime,
+                        "storage": "inline_base64",
+                        "sender_id": message.sender_id,
+                        "channel_id": message.channel_id,
+                    },
+                )
             else:
                 # Create per-session upload directory on first non-image file
                 if not dir_created:
@@ -675,8 +744,26 @@ class ChannelMessageRouter:
                         continue
 
                     dest_path = f"{upload_dir}/{safe_name}"
-                    descriptions.append(f"{safe_name} ({size_str}, {f.mimetype}) → {dest_path}")
+                    descriptions.append(f"{safe_name} ({size_str}, {actual_mime}) → {dest_path}")
                     logger.info(f"[ROUTER] Copied {safe_name} ({size_str}) to {agent_name}:{dest_path}")
+
+                    # Audit log for file upload
+                    await platform_audit_service.log(
+                        event_type=AuditEventType.EXECUTION,
+                        event_action="file_upload",
+                        source=adapter.channel_type,
+                        target_type="agent",
+                        target_id=agent_name,
+                        details={
+                            "filename": safe_name,
+                            "size_bytes": actual_size,
+                            "mime_type": actual_mime,
+                            "storage": "container_file",
+                            "dest_path": dest_path,
+                            "sender_id": message.sender_id,
+                            "channel_id": message.channel_id,
+                        },
+                    )
 
                 except Exception as e:
                     logger.error(f"[ROUTER] Error copying {safe_name} to {agent_name}: {e}")

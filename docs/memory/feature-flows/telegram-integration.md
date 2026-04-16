@@ -688,6 +688,94 @@ gate admits (or issues access-request, per policy) → agent executes
 
 No changes to `src/backend/adapters/transports/telegram_webhook.py`. The transport already dispatches `/`-prefixed messages to `adapter.handle_command` before the router pipeline, so `/login`, `/logout`, and `/whoami` are picked up for free.
 
+## File Upload Support (#354)
+
+Phase 1 of issue #354 adds Telegram file upload support, allowing users to send photos and documents to agents via Telegram.
+
+### File Types Supported
+
+| Type | Telegram Field | Extraction Notes |
+|------|----------------|------------------|
+| Photos | `message.photo` | Array of sizes; extracts largest (last) as `photo.jpg` |
+| Documents | `message.document` | Preserves `file_name`, `mime_type` from Telegram |
+
+Voice/video/stickers not yet supported (tracked in #354 Phase 2).
+
+### Adapter Changes (`src/backend/adapters/telegram_adapter.py`)
+
+**`_extract_files(message: dict) -> list[FileAttachment]`** (static method)
+
+Parses Telegram message dict and returns `FileAttachment` objects:
+- Photos: Takes `photo[-1]` (largest size), sets `mimetype="image/jpeg"`, `name="photo.jpg"`
+- Documents: Uses `file_name`, `mime_type`, `file_size` from Telegram
+
+**`async download_file(file: FileAttachment, message: NormalizedMessage) -> bytes | None`**
+
+Two-step Telegram Bot API download:
+1. `POST getFile` with `file_id` → returns `file_path`
+2. `GET /file/bot{token}/{file_path}` → returns raw bytes
+
+Returns `None` on any failure (missing agent_name, API error, download error).
+
+**`parse_message()` changes**
+
+- Calls `_extract_files()` and populates `NormalizedMessage.files`
+- File-only messages (no text, no caption) now accepted with placeholder text `"[File: {filename}]"`
+
+### Message Router Changes (`src/backend/adapters/message_router.py`)
+
+**Post-download security validations:**
+
+1. **Size validation (TOCTOU defense)**: After download, re-checks `len(content) <= MAX_FILE_SIZE` — Telegram's `file_size` is advisory; actual content is authoritative.
+
+2. **Magic-byte MIME validation**: If `python-magic` is available, validates actual content type matches claimed MIME. Logs warning on mismatch but does not reject (graceful degradation).
+
+3. **Audit logging**: Successful file uploads logged via `platform_audit_service.log_event()` with `event_type="file_upload"`.
+
+**`_MAGIC_AVAILABLE` flag**: Set at module load based on `python-magic` import success. Missing library logs warning once, disables magic validation.
+
+### Infrastructure Changes
+
+**`docker/backend/Dockerfile`**:
+- Added `libmagic1` to apt-get (runtime dependency for python-magic)
+- Added `python-magic==0.4.27` to pip install
+
+### Data Flow
+
+```
+User sends photo/document in Telegram
+    |
+    v
+TelegramAdapter.parse_message()
+    |- _extract_files() → [FileAttachment]
+    |- Build NormalizedMessage with files field
+    v
+ChannelMessageRouter.handle_message()
+    |- For each file:
+    |     |- adapter.download_file(file, message)
+    |     |- Size validation (TOCTOU)
+    |     |- Magic-byte MIME validation (if available)
+    |     |- Audit log
+    |     |- [Future: write to agent workspace]
+    v
+Agent receives message with file metadata
+    |- [Phase 2: file content in context]
+```
+
+### Tests
+
+11 unit tests in `tests/unit/test_file_upload.py`:
+- `TestTelegramFileExtraction` (4 tests): Photo/document extraction, edge cases
+- `TestTelegramFileDownload` (3 tests): Bot API interaction, error paths
+- `TestMessageRouterFileValidation` (2 tests): Size formatting, magic flag
+- `TestParseMessageWithFiles` (2 tests): Integration with parse_message
+
+### Limitations (Phase 1)
+
+- Files are validated and logged but **not yet delivered to agent workspace** — that's Phase 2
+- Voice messages, videos, and stickers not supported
+- Slack file upload not yet implemented (tracked separately)
+
 ## Related Flows
 - [unified-channel-access-control.md](unified-channel-access-control.md) — Cross-channel access primitive (policy, router gate, access requests, group_auth_mode) (#311)
 - [agent-sharing.md](agent-sharing.md) — Allow-list / ownership model the gate consults
@@ -705,3 +793,4 @@ No changes to `src/backend/adapters/transports/telegram_webhook.py`. The transpo
 | 2026-04-12 | #311: `/login` email verification for DMs integrated with unified access control. |
 | 2026-04-15 | Group authentication mode (`group_auth_mode: "any_verified"`). Groups can require at least one verified member. New columns `verified_by_email`/`verified_at` on `telegram_group_configs`. New adapter methods for group verification. |
 | 2026-04-15 | #349: Phase 1-3 enhancements. Sender identity in group messages (`_format_group_sender`). Observation mode (`trigger_mode: "observe"`) with `[NO_REPLY]` marker. Proactive group messaging endpoint with rate limiting. MCP tools `list_channel_groups` and `send_group_message`. |
+| 2026-04-16 | #354 Phase 1: Telegram file upload support. `_extract_files()` and `download_file()` in adapter. Post-download size/MIME validation in router. python-magic dependency. 11 unit tests. |

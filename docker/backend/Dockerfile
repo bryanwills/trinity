@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install curl for healthcheck, git for GitHub cloning
-RUN apt-get update && apt-get install -y --no-install-recommends curl git && rm -rf /var/lib/apt/lists/*
+# Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
+RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
     fastapi==0.115.6 \
@@ -35,7 +35,8 @@ RUN pip install --no-cache-dir \
     opentelemetry-exporter-otlp==1.29.0 \
     opentelemetry-instrumentation-fastapi==0.50b0 \
     opentelemetry-instrumentation-httpx==0.50b0 \
-    opentelemetry-instrumentation-redis==0.50b0
+    opentelemetry-instrumentation-redis==0.50b0 \
+    python-magic==0.4.27
 
 # Copy all backend source files
 COPY ../../src/backend/main.py /app/

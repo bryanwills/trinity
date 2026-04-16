@@ -20,7 +20,7 @@ from typing import Optional
 import httpx
 
 from database import db
-from adapters.base import ChannelAdapter, NormalizedMessage, ChannelResponse
+from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
 from services.email_service import EmailService
 
 logger = logging.getLogger(__name__)
@@ -172,13 +172,21 @@ class TelegramAdapter(ChannelAdapter):
         if is_group and bot_username and text:
             text = re.sub(rf'@{re.escape(bot_username)}\b', '', text).strip()
 
-        # Handle media messages — extract caption or description
+        # Extract file attachments (photos, documents)
+        files = self._extract_files(message)
+
+        # Handle media messages — extract caption or description for context
         media_context = self._extract_media_context(message)
         if media_context:
             text = media_context if not text else f"{text}\n\n{media_context}"
 
-        if not text:
+        # Allow messages with files even if no text
+        if not text and not files:
             return None
+
+        # Provide placeholder text for file-only messages
+        if not text and files:
+            text = "(file upload)"
 
         return NormalizedMessage(
             sender_id=user_id,
@@ -186,6 +194,7 @@ class TelegramAdapter(ChannelAdapter):
             channel_id=chat_id,
             thread_id=str(message.get("message_id", "")),
             timestamp=str(message.get("date", "")),
+            files=files,
             metadata={
                 "bot_id": bot_id,
                 "bot_username": bot_username,
@@ -781,3 +790,108 @@ class TelegramAdapter(ChannelAdapter):
             parts.append(f"[User sent a video{': ' + caption if caption else ''}]")
 
         return "\n".join(parts) if parts else None
+
+    @staticmethod
+    def _extract_files(message: dict) -> list:
+        """
+        Extract FileAttachment objects from Telegram message photos/documents.
+
+        Photos: Use the largest available size (last in array).
+        Documents: Use file_id, file_name, mime_type, file_size.
+        """
+        files = []
+
+        # Handle photos — Telegram sends array of sizes, use largest (last)
+        if "photo" in message:
+            photos = message["photo"]
+            if photos:
+                largest = photos[-1]  # Highest resolution
+                file_id = largest.get("file_id", "")
+                file_size = largest.get("file_size", 0)
+                # Telegram photos don't have explicit filenames
+                files.append(FileAttachment(
+                    id=file_id,
+                    name="photo.jpg",  # Telegram photos are always JPEG
+                    mimetype="image/jpeg",
+                    size=file_size,
+                    url=file_id,  # We'll use file_id as URL, download via getFile
+                ))
+
+        # Handle documents (files with explicit names/types)
+        if "document" in message:
+            doc = message["document"]
+            file_id = doc.get("file_id", "")
+            files.append(FileAttachment(
+                id=file_id,
+                name=doc.get("file_name", "document"),
+                mimetype=doc.get("mime_type", "application/octet-stream"),
+                size=doc.get("file_size", 0),
+                url=file_id,  # We'll use file_id as URL, download via getFile
+            ))
+
+        return files
+
+    async def download_file(
+        self, file: FileAttachment, message: NormalizedMessage
+    ) -> Optional[bytes]:
+        """
+        Download a file from Telegram using the Bot API.
+
+        Two-step process:
+        1. Call getFile(file_id) to get the file_path
+        2. Download from https://api.telegram.org/file/bot<token>/<file_path>
+
+        Note: Telegram files are available for ~1 hour after getFile.
+        Max file size via Bot API is 20MB.
+        """
+        agent_name = message.metadata.get("agent_name")
+        if not agent_name:
+            logger.error("[TELEGRAM] No agent_name in message metadata for file download")
+            return None
+
+        bot_token = db.get_telegram_bot_token(agent_name)
+        if not bot_token:
+            logger.error(f"[TELEGRAM] No bot token for agent {agent_name}")
+            return None
+
+        file_id = file.id  # We stored file_id in the id field
+
+        try:
+            # Step 1: Get file path via getFile API
+            get_file_url = f"{TELEGRAM_API_BASE}/bot{bot_token}/getFile"
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(get_file_url, json={"file_id": file_id})
+
+                if resp.status_code != 200:
+                    logger.error(f"[TELEGRAM] getFile failed ({resp.status_code}): {resp.text}")
+                    return None
+
+                result = resp.json()
+                if not result.get("ok"):
+                    logger.error(f"[TELEGRAM] getFile error: {result.get('description')}")
+                    return None
+
+                file_path = result.get("result", {}).get("file_path")
+                if not file_path:
+                    logger.error("[TELEGRAM] No file_path in getFile response")
+                    return None
+
+                # Step 2: Download the actual file
+                # Note: URL contains bot token — never log it
+                download_url = f"{TELEGRAM_API_BASE}/file/bot{bot_token}/{file_path}"
+                download_resp = await client.get(download_url)
+
+                if download_resp.status_code != 200:
+                    logger.error(f"[TELEGRAM] File download failed ({download_resp.status_code})")
+                    return None
+
+                data = download_resp.content
+                logger.info(f"[TELEGRAM] Downloaded {file.name} ({len(data)} bytes)")
+                return data
+
+        except httpx.TimeoutException:
+            logger.error(f"[TELEGRAM] Timeout downloading {file.name}")
+            return None
+        except Exception as e:
+            logger.error(f"[TELEGRAM] Error downloading {file.name}: {e}", exc_info=True)
+            return None

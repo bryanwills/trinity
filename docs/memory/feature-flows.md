@@ -11,6 +11,7 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-04-16 | #354 | Telegram file upload Phase 1 — photo/document extraction, download, size/MIME validation | [telegram-integration.md](feature-flows/telegram-integration.md) |
 | 2026-04-15 | #311 | Group auth mode — require at least one verified member before bot responds in Telegram groups | [unified-channel-access-control.md](feature-flows/unified-channel-access-control.md), [telegram-integration.md](feature-flows/telegram-integration.md) |
 | 2026-04-14 | #20 | Platform audit trail (SEC-001) Phase 1 + agent lifecycle smoke test — append-only `audit_log` table, `PlatformAuditService`, admin query API at `/api/audit-log`, and create/start/stop/delete audit rows from `routers/agents.py`. Phase 2b–4 to follow. | [audit-trail.md](feature-flows/audit-trail.md) |
 | 2026-04-14 | #171 | Execution context injection — per-invocation metadata (mode/trigger/timeout/schedule/collaborators) added to every agent system prompt, with sanitization and operator kill-switch | [execution-context-injection.md](feature-flows/execution-context-injection.md) |
