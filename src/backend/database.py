@@ -887,6 +887,9 @@ class DatabaseManager:
     def grant_default_permissions(self, agent_name: str, owner_username: str):
         return self._permission_ops.grant_default_permissions(agent_name, owner_username)
 
+    def get_all_permission_edges(self, accessible_agents: set = None):
+        return self._permission_ops.get_all_permission_edges(accessible_agents)
+
     # =========================================================================
     # Shared Folder Configuration (delegated to db/shared_folders.py) - Phase 9.11
     # =========================================================================

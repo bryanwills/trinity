@@ -270,6 +270,27 @@ async def get_all_agent_slots(
     )
 
 
+@router.get("/permissions-edges")
+async def get_all_permission_edges(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all permission edges for dashboard graph visualization (bulk endpoint).
+
+    Returns all agent-to-agent permission edges in a single query,
+    filtered to only include edges where the user can access both agents.
+
+    This replaces N per-agent permission calls with 1 bulk call.
+    """
+    # Get accessible agents once (not N times)
+    accessible = {a['name'] for a in get_accessible_agents(current_user)}
+
+    # Single DB query filtered at SQL level
+    edges = db.get_all_permission_edges(accessible)
+
+    return {"edges": edges}
+
+
 @router.get("/{agent_name}")
 async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Get details of a specific agent."""

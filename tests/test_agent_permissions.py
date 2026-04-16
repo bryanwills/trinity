@@ -458,3 +458,134 @@ class TestPermissionAuthorization:
         )
 
         assert_status_in(response, [401, 403])
+
+
+class TestBulkPermissionEdges:
+    """REQ-PERM-008: Bulk permissions-edges endpoint (#359)."""
+
+    def test_get_permissions_edges_returns_structure(
+        self,
+        api_client: TrinityApiClient
+    ):
+        """GET /api/agents/permissions-edges returns correct structure."""
+        response = api_client.get("/api/agents/permissions-edges")
+
+        assert_status(response, 200)
+        data = assert_json_response(response)
+
+        assert "edges" in data
+        assert isinstance(data["edges"], list)
+
+    def test_get_permissions_edges_empty_when_no_permissions(
+        self,
+        api_client: TrinityApiClient,
+        created_agent
+    ):
+        """Bulk endpoint returns empty edges when agent has no permissions."""
+        # Clear any existing permissions
+        api_client.put(
+            f"/api/agents/{created_agent['name']}/permissions",
+            json={"permitted_agents": []}
+        )
+
+        response = api_client.get("/api/agents/permissions-edges")
+
+        assert_status(response, 200)
+        data = response.json()
+
+        # No edges involving our test agent
+        our_edges = [
+            e for e in data["edges"]
+            if e["source"] == created_agent["name"] or e["target"] == created_agent["name"]
+        ]
+        assert len(our_edges) == 0
+
+    def test_get_permissions_edges_includes_granted_permissions(
+        self,
+        api_client: TrinityApiClient,
+        created_agent,
+        request
+    ):
+        """Bulk endpoint includes edges for granted permissions."""
+        # Create a second agent
+        second_agent_name = f"test-bulk-edge-{uuid.uuid4().hex[:6]}"
+        create_response = api_client.post(
+            "/api/agents",
+            json={"name": second_agent_name}
+        )
+
+        if create_response.status_code not in [200, 201]:
+            pytest.skip("Could not create second agent")
+
+        time.sleep(5)
+
+        try:
+            # Grant permission
+            api_client.post(
+                f"/api/agents/{created_agent['name']}/permissions/{second_agent_name}"
+            )
+
+            # Check bulk endpoint
+            response = api_client.get("/api/agents/permissions-edges")
+
+            assert_status(response, 200)
+            data = response.json()
+
+            # Find edge from created_agent to second_agent
+            matching_edges = [
+                e for e in data["edges"]
+                if e["source"] == created_agent["name"] and e["target"] == second_agent_name
+            ]
+            assert len(matching_edges) == 1, "Expected edge for granted permission"
+
+        finally:
+            if not request.config.getoption("--skip-cleanup"):
+                cleanup_test_agent(api_client, second_agent_name)
+
+    def test_get_permissions_edges_edge_structure(
+        self,
+        api_client: TrinityApiClient,
+        created_agent,
+        request
+    ):
+        """Each edge has source and target fields."""
+        # Create a second agent and grant permission
+        second_agent_name = f"test-edge-struct-{uuid.uuid4().hex[:6]}"
+        create_response = api_client.post(
+            "/api/agents",
+            json={"name": second_agent_name}
+        )
+
+        if create_response.status_code not in [200, 201]:
+            pytest.skip("Could not create second agent")
+
+        time.sleep(5)
+
+        try:
+            api_client.post(
+                f"/api/agents/{created_agent['name']}/permissions/{second_agent_name}"
+            )
+
+            response = api_client.get("/api/agents/permissions-edges")
+
+            assert_status(response, 200)
+            data = response.json()
+
+            for edge in data["edges"]:
+                assert "source" in edge, "Edge missing 'source' field"
+                assert "target" in edge, "Edge missing 'target' field"
+                assert isinstance(edge["source"], str)
+                assert isinstance(edge["target"], str)
+
+        finally:
+            if not request.config.getoption("--skip-cleanup"):
+                cleanup_test_agent(api_client, second_agent_name)
+
+    def test_get_permissions_edges_requires_auth(
+        self,
+        unauthenticated_client: TrinityApiClient
+    ):
+        """Bulk endpoint requires authentication."""
+        response = unauthenticated_client.get("/api/agents/permissions-edges")
+
+        assert_status_in(response, [401, 403])

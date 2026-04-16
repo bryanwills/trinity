@@ -154,42 +154,28 @@ export const useNetworkStore = defineStore('network', () => {
       const token = localStorage.getItem('token')
       if (!token) return
 
-      const agentNames = agents.value
-        .filter(a => !a.is_system)
-        .map(a => a.name)
-
-      if (agentNames.length === 0) return
-
-      // Fetch permissions for all agents in parallel, ignore failures (e.g. 403 for inaccessible agents)
-      const results = await Promise.allSettled(
-        agentNames.map(name =>
-          axios.get(`/api/agents/${name}/permissions`, {
-            headers: { Authorization: `Bearer ${token}` }
-          }).then(r => ({ agent: name, permitted: (r.data.permitted_agents || []).map(p => p.name) }))
-        )
-      )
+      // Single bulk API call instead of N per-agent calls (#359)
+      const response = await axios.get('/api/agents/permissions-edges', {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      const edges = response.data.edges || []
 
       // Collect canonical pairs to avoid two overlapping edges for bidirectional permissions
       const pairMap = new Map()
 
-      results.forEach(result => {
-        if (result.status !== 'fulfilled') return
-        const { agent: source, permitted } = result.value
+      edges.forEach(({ source, target }) => {
+        const sourceExists = nodes.value.some(n => n.id === source)
+        const targetExists = nodes.value.some(n => n.id === target)
+        if (!sourceExists || !targetExists) return
 
-        permitted.forEach(target => {
-          const sourceExists = nodes.value.some(n => n.id === source)
-          const targetExists = nodes.value.some(n => n.id === target)
-          if (!sourceExists || !targetExists) return
-
-          const [a, b] = getCanonicalEdgePair(source, target)
-          const key = `perm-${a}-${b}`
-          if (!pairMap.has(key)) {
-            pairMap.set(key, { source: a, target: b, hasForward: false, hasReverse: false })
-          }
-          const pair = pairMap.get(key)
-          if (source === a) pair.hasForward = true
-          else pair.hasReverse = true
-        })
+        const [a, b] = getCanonicalEdgePair(source, target)
+        const key = `perm-${a}-${b}`
+        if (!pairMap.has(key)) {
+          pairMap.set(key, { source: a, target: b, hasForward: false, hasReverse: false })
+        }
+        const pair = pairMap.get(key)
+        if (source === a) pair.hasForward = true
+        else pair.hasReverse = true
       })
 
       const newEdges = []

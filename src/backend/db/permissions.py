@@ -51,6 +51,41 @@ class PermissionOperations:
             """, (source_agent,))
             return [row["target_agent"] for row in cursor.fetchall()]
 
+    def get_all_permission_edges(self, accessible_agents: Optional[set] = None) -> List[dict]:
+        """
+        Get all permission edges for graph visualization (bulk endpoint).
+
+        Args:
+            accessible_agents: Optional set of agent names to filter by.
+                              If provided, only returns edges where BOTH
+                              source and target are in the set.
+
+        Returns list of {"source": str, "target": str} dicts.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            if accessible_agents:
+                # Filter at SQL level to avoid info leakage
+                placeholders = ",".join("?" for _ in accessible_agents)
+                agent_list = list(accessible_agents)
+                cursor.execute(f"""
+                    SELECT source_agent, target_agent FROM agent_permissions
+                    WHERE source_agent IN ({placeholders})
+                      AND target_agent IN ({placeholders})
+                    ORDER BY source_agent, target_agent
+                """, agent_list + agent_list)
+            else:
+                cursor.execute("""
+                    SELECT source_agent, target_agent FROM agent_permissions
+                    ORDER BY source_agent, target_agent
+                """)
+
+            return [
+                {"source": row["source_agent"], "target": row["target_agent"]}
+                for row in cursor.fetchall()
+            ]
+
     def get_permission_details(self, source_agent: str) -> List[AgentPermission]:
         """
         Get full permission details for an agent.
