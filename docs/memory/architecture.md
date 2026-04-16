@@ -140,6 +140,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `paid.py` - x402 payment-gated chat (NVM-001)
 - `nevermined.py` - Nevermined payment config management
 - `slack.py` - Slack integration (OAuth, events, multi-agent channel routing, per-agent channel binding) (SLACK-001/002)
+- `messages.py` - Proactive agent-to-user messaging (#321)
 
 *Subscriptions & Skills:*
 - `subscriptions.py` - Subscription management (SUB-002)
@@ -196,6 +197,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 *Integrations:*
 - `slack_service.py` - Slack API client (OAuth, messaging, verification) (SLACK-001)
 - `nevermined_payment_service.py` - x402 payment verification and settlement (NVM-001)
+- `proactive_message_service.py` - Agent-to-user proactive messaging with rate limiting and audit (#321)
 
 **Channel Adapters (`adapters/`)** — Pluggable external messaging (SLACK-002):
 
@@ -292,7 +294,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - Tools access auth context via `context.session` parameter
 - Agent-to-agent collaboration uses agent-scoped keys for access control
 
-**66 Tools** across 14 tool modules (`src/tools/`):
+**67 Tools** across 15 tool modules (`src/tools/`):
 
 | Module | Tools | Description |
 |--------|-------|-------------|
@@ -309,7 +311,8 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 | `notifications.ts` (1) | `send_notification` | Agent-to-platform notifications |
 | `events.ts` (4) | `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription` | Agent event pub/sub (EVT-001) |
 | `docs.ts` (1) | `get_agent_requirements` | Agent documentation |
-| `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive messaging (#349) |
+| `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging (#349) |
+| `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
 
