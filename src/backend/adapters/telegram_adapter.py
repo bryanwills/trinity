@@ -785,6 +785,9 @@ class TelegramAdapter(ChannelAdapter):
         if "voice" in message:
             parts.append("[User sent a voice message — voice transcription is not yet available]")
 
+        if "video_note" in message:
+            parts.append("[User sent a video note — transcription not yet available]")
+
         if "video" in message:
             caption = message.get("caption", "")
             parts.append(f"[User sent a video{': ' + caption if caption else ''}]")

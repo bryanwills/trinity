@@ -141,13 +141,16 @@ Two routers are registered in `main.py:523-524`:
 - `download_telegram_file(bot_token, file_id)` (line 29) — Two-step download: `getFile` → download from file path. **SSRF prevention**: hostname must be `api.telegram.org` (line 71). **Size limit**: 20MB (line 58).
 - `process_photo(bot_token, photo_sizes)` (line 93) — Downloads largest photo, saves to temp file, returns size description. Temp file always cleaned up.
 - `process_document(bot_token, document)` (line 127) — Downloads and extracts text from plain text files (.txt, .md, .csv, .json, .py, etc.). Truncates at 10,000 chars. Non-text files get metadata-only description.
+- `process_voice(bot_token, voice)` (line 170) — **NEW (Issue #318)**: Downloads OGG voice message and transcribes via Gemini API. **Limits**: 5 minutes max duration, 10MB max size. Returns `🎙️ "transcribed text"` or error placeholder. Falls back to placeholder if GEMINI_API_KEY not configured.
+- `_transcribe_audio_gemini(audio_data, mime_type)` (line 209) — Internal: Calls Gemini 2.0 Flash with inline audio for transcription.
 
 ### Message Router: `src/backend/adapters/message_router.py`
 
-The `ChannelMessageRouter` is channel-agnostic. For Telegram messages it follows the same 13-step pipeline as Slack:
+The `ChannelMessageRouter` is channel-agnostic. For Telegram messages it follows the same 14-step pipeline as Slack:
 
 1. Resolve agent via `adapter.get_agent_name()`
 2. Resolve bot token via `adapter.get_bot_token()`
+2b. **Voice transcription (Telegram only)**: If `raw_message` contains `voice`, call `process_voice()` and replace placeholder in message text with transcription (Issue #318)
 3. Rate limit via `adapter.get_rate_key()` (30 msgs / 60s default)
 4. Check agent container status
 5. Handle verification (default: always verified for Telegram)
@@ -773,7 +776,7 @@ Agent receives message with file metadata
 ### Limitations (Phase 1)
 
 - Files are validated and logged but **not yet delivered to agent workspace** — that's Phase 2
-- Voice messages, videos, and stickers not supported
+- Videos, video notes, and stickers not supported (voice messages supported via Gemini transcription as of #318)
 - Slack file upload not yet implemented (tracked separately)
 
 ## Related Flows
@@ -794,3 +797,4 @@ Agent receives message with file metadata
 | 2026-04-15 | Group authentication mode (`group_auth_mode: "any_verified"`). Groups can require at least one verified member. New columns `verified_by_email`/`verified_at` on `telegram_group_configs`. New adapter methods for group verification. |
 | 2026-04-15 | #349: Phase 1-3 enhancements. Sender identity in group messages (`_format_group_sender`). Observation mode (`trigger_mode: "observe"`) with `[NO_REPLY]` marker. Proactive group messaging endpoint with rate limiting. MCP tools `list_channel_groups` and `send_group_message`. |
 | 2026-04-16 | #354 Phase 1: Telegram file upload support. `_extract_files()` and `download_file()` in adapter. Post-download size/MIME validation in router. python-magic dependency. 11 unit tests. |
+| 2026-04-18 | #318: Voice transcription via Gemini. `process_voice()` in telegram_media.py, voice processing hook in message_router.py. Limits: 5 min duration, 10MB size. 22 unit tests. |

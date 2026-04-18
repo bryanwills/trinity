@@ -159,6 +159,13 @@
       "added": "2026-04-16",
       "categories": ["backend", "api", "messaging", "channels"],
       "description": "Tests for proactive agent messaging (#321): send_message endpoint validation, allow_proactive flag management, proactive shares listing, channel selection, owner authorization, rate limiting info"
+    },
+    {
+      "file": "unit/test_telegram_voice.py",
+      "feature": "Issue #318",
+      "added": "2026-04-18",
+      "categories": ["backend", "unit", "telegram", "voice", "transcription"],
+      "description": "Unit tests for Telegram voice transcription (#318): voice validation (duration/size limits), transcription formatting, placeholder constants, combined validation (22 tests)"
     }
   ]
 }

@@ -4,11 +4,10 @@ Telegram media download and processing service.
 Handles:
 - Photo download via getFile API
 - Document download + text extraction (PDF, TXT)
+- Voice message transcription via Gemini API
 - SSRF prevention: only downloads from api.telegram.org
-- File size limits: 20MB max
+- File size limits: 20MB max (10MB for voice)
 - Temp file cleanup on all paths (success + error)
-
-Voice transcription is deferred to Phase 2.
 """
 
 import logging
@@ -19,10 +18,14 @@ from urllib.parse import urlparse
 
 import httpx
 
+from config import GEMINI_API_KEY
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB — Telegram bot API limit
+MAX_VOICE_SIZE = 10 * 1024 * 1024  # 10MB — soft limit for voice transcription
+MAX_VOICE_DURATION = 300  # 5 minutes max for voice transcription
 ALLOWED_DOWNLOAD_HOST = "api.telegram.org"
 
 
@@ -164,3 +167,94 @@ async def process_document(bot_token: str, document: dict) -> Optional[str]:
     # For other file types, return metadata only
     size_kb = len(data) / 1024
     return f"[Document received: {file_name} ({mime_type}, {size_kb:.0f}KB)]"
+
+
+async def process_voice(bot_token: str, voice: dict) -> str:
+    """
+    Download a voice message and transcribe it via Gemini API.
+
+    Limits:
+    - Duration: 5 minutes max (300 seconds)
+    - File size: 10MB max
+
+    Returns transcribed text with 🎙️ prefix, or error placeholder.
+    """
+    file_id = voice.get("file_id")
+    duration = voice.get("duration", 0)
+    file_size = voice.get("file_size", 0)
+
+    if not file_id:
+        return "[Voice message received but file_id missing]"
+
+    # Check duration limit
+    if duration > MAX_VOICE_DURATION:
+        minutes = duration // 60
+        return f"[Voice message too long ({minutes}+ minutes) — transcription limit is 5 minutes]"
+
+    # Check file size before download
+    if file_size > MAX_VOICE_SIZE:
+        size_mb = file_size / (1024 * 1024)
+        return f"[Voice message too large ({size_mb:.1f}MB) — transcription limit is 10MB]"
+
+    # Check if Gemini API is configured
+    if not GEMINI_API_KEY:
+        return "[Voice message received — transcription not available (API not configured)]"
+
+    # Download the voice file
+    data = await download_telegram_file(bot_token, file_id)
+    if not data:
+        return "[Voice message received but could not be downloaded]"
+
+    # Double-check size after download
+    if len(data) > MAX_VOICE_SIZE:
+        return "[Voice message too large for transcription]"
+
+    # Transcribe via Gemini
+    transcript = await _transcribe_audio_gemini(data, voice.get("mime_type", "audio/ogg"))
+    if transcript:
+        return f"🎙️ \"{transcript}\""
+    else:
+        return "[Voice message received — transcription failed]"
+
+
+async def _transcribe_audio_gemini(audio_data: bytes, mime_type: str = "audio/ogg") -> Optional[str]:
+    """
+    Transcribe audio using Gemini API.
+
+    Uses Gemini's multimodal capability to process inline audio data.
+    """
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        response = await client.aio.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": audio_data,
+                            }
+                        },
+                        {
+                            "text": "Transcribe this audio message. Output only the transcribed text, nothing else. If no speech is detected, respond with [no speech detected]."
+                        },
+                    ]
+                }
+            ],
+        )
+
+        if response and response.text:
+            transcript = response.text.strip()
+            if transcript.lower() == "[no speech detected]":
+                return None
+            return transcript
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Gemini transcription error: {e}", exc_info=True)
+        return None

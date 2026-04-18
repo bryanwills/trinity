@@ -26,6 +26,7 @@ from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
 from services.docker_utils import container_put_archive, container_exec_run
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.telegram_media import process_voice
 from adapters.base import ChannelAdapter, ChannelResponse, FileAttachment, NormalizedMessage, OutboundFile
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,18 @@ class ChannelMessageRouter:
         if not bot_token:
             logger.error(f"[ROUTER:{channel}] No bot token for message in {message.channel_id}")
             return
+
+        # 2b. Process voice messages (Telegram only) — transcribe before agent sees it
+        if channel == "telegram":
+            raw_msg = message.metadata.get("raw_message", {})
+            if "voice" in raw_msg and bot_token:
+                logger.debug(f"[ROUTER:{channel}] Step 2b - transcribing voice message")
+                voice_text = await process_voice(bot_token, raw_msg["voice"])
+                # Replace placeholder in message text with transcription
+                placeholder = "[User sent a voice message — voice transcription is not yet available]"
+                if placeholder in message.text:
+                    message = message.model_copy(update={"text": message.text.replace(placeholder, voice_text)})
+                    logger.info(f"[ROUTER:{channel}] Voice transcribed: {voice_text[:100]}...")
 
         # 3. Rate limiting per channel user
         rate_key = adapter.get_rate_key(message)

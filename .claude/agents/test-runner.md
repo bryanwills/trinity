@@ -184,6 +184,7 @@ The test suite covers:
 - **Context Used Formula** (unit/test_context_used_formula.py) - Verify context_used = input_tokens only, not input+output (#56) [UNIT]
 - **OTel Trace Logging** (unit/test_otel_trace_logging.py) - Trace ID injection in logs, span context correlation (#305, RELIABILITY-002) [UNIT]
 - **File Upload** (unit/test_file_upload.py) - Telegram file extraction, download, message router validation, parse_message with files (#354) [UNIT]
+- **Telegram Voice** (unit/test_telegram_voice.py) - Voice transcription validation (duration/size limits), formatting, placeholder constants (#318) [UNIT]
 
 ### Avatars & Image Generation
 - **Avatars** (test_avatars.py) - Avatar serving, generation, regeneration, deletion, emotions, identity prompts, default generation (AVATAR-001/002/003) [SMOKE + Agent]
@@ -227,7 +228,7 @@ The test suite covers:
 
 **Total Tests**: ~2,200 tests across 119 test files
 **Smoke Tests**: ~578 tests (fast, no agent creation)
-**Unit Tests**: ~57 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload)
+**Unit Tests**: ~79 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription)
 **Core Tests (not slow)**: ~2,069 tests
 **Slow Tests**: ~89 tests (chat execution, fleet ops, system agent ops, execution termination)
 **WebSocket Tests**: ~10 tests (web terminal, execution streaming)
@@ -256,6 +257,21 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 - **Healthy**: >90% pass rate, 0 critical failures
 - **Warning**: 75-90% pass rate, <5 failures
 - **Critical**: <75% pass rate or >5 failures
+
+## Recent Test Additions (2026-04-18)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_telegram_voice.py` | Telegram voice transcription validation (#318) | 22 tests |
+
+**Telegram Voice Transcription (#318)** (`unit/test_telegram_voice.py`):
+
+- `TestDurationValidation` (5 tests) — Duration under/at/over 5 min limit
+- `TestSizeValidation` (5 tests) — File size under/at/over 10MB limit
+- `TestFileIdValidation` (4 tests) — file_id presence/absence/empty/None
+- `TestTranscriptionFormatting` (4 tests) — Emoji prefix, quote wrapping
+- `TestPlaceholderConstants` (2 tests) — Voice/video_note placeholder format
+- `TestCombinedValidation` (2 tests) — Full validation chain, all-invalid case
 
 ## Recent Test Additions (2026-04-17)
 
