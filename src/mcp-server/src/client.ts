@@ -556,8 +556,16 @@ export class TrinityClient {
       chat_session_id: options?.chat_session_id,
     };
 
-    // Async mode returns immediately; sync mode waits for full execution
-    const timeout = options?.async_mode ? 30 : (options?.timeout_seconds || 600) + 10;
+    // Async mode returns immediately; sync mode waits for full execution.
+    //
+    // #418: When timeout_seconds isn't specified the backend falls back to the
+    // target agent's configured execution_timeout_seconds (TIMEOUT-001, default
+    // 900s, max 7200s). The client can't know the target's config, so use a
+    // generous fetch deadline that won't cut off before the backend does.
+    const DEFAULT_SYNC_FETCH_TIMEOUT_S = 7210;
+    const timeout = options?.async_mode
+      ? 30
+      : (options?.timeout_seconds ? options.timeout_seconds + 10 : DEFAULT_SYNC_FETCH_TIMEOUT_S);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);

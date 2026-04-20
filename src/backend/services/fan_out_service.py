@@ -90,7 +90,9 @@ class FanOutService:
             agent_name: Target agent (typically self).
             tasks: List of tasks to execute.
             max_concurrency: Max concurrent subtasks (semaphore size).
-            timeout_seconds: Overall deadline for the entire fan-out.
+            timeout_seconds: Overall deadline for the entire fan-out batch.
+                Per-subtask timeout is resolved independently from the target
+                agent's configured execution_timeout_seconds (#418).
             model: Model override for subtasks.
             system_prompt: System prompt for subtasks.
             allowed_tools: Tool restrictions for subtasks.
@@ -107,7 +109,7 @@ class FanOutService:
 
         logger.info(
             f"[FanOut] Starting {fan_out_id}: {len(tasks)} tasks on '{agent_name}' "
-            f"(concurrency={max_concurrency}, timeout={timeout_seconds}s)"
+            f"(concurrency={max_concurrency}, batch_deadline={timeout_seconds}s)"
         )
 
         async def run_subtask(task: FanOutTaskInput) -> None:
@@ -115,6 +117,11 @@ class FanOutService:
             start = datetime.utcnow()
             async with semaphore:
                 try:
+                    # #418: Don't pass the batch deadline as the per-subtask
+                    # timeout — execute_task resolves to the target agent's
+                    # configured execution_timeout_seconds when None (TIMEOUT-001).
+                    # The batch deadline below (asyncio.timeout) still caps the
+                    # total fan-out wall time.
                     result = await task_service.execute_task(
                         agent_name=agent_name,
                         message=task.message,
@@ -125,7 +132,7 @@ class FanOutService:
                         source_mcp_key_id=source_mcp_key_id,
                         source_mcp_key_name=source_mcp_key_name,
                         model=model,
-                        timeout_seconds=timeout_seconds,
+                        timeout_seconds=None,
                         system_prompt=system_prompt,
                         allowed_tools=allowed_tools,
                         fan_out_id=fan_out_id,
