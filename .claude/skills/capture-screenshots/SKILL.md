@@ -180,40 +180,7 @@ Pick the first available agent (e.g., `acme-scout`).
 2. Wait for template list to load
 3. Take screenshot: `docs/screenshots/18-templates.png`
 
-### Step 19: Processes List
-
-1. Navigate to `http://localhost/processes`
-2. Wait for processes to load
-3. Take screenshot: `docs/screenshots/19-processes-list.png`
-
-### Step 20: Process Editor
-
-1. Click on an existing process (e.g., the first one) to open it
-2. Wait for the process editor/viewer to render
-3. Take screenshot: `docs/screenshots/20-process-editor.png`
-4. Navigate back to processes list
-
-### Step 21: Process Wizard
-
-1. Navigate to `http://localhost/processes/wizard`
-2. Take screenshot: `docs/screenshots/21-process-wizard.png`
-
-### Step 22: Process Dashboard
-
-1. Navigate to `http://localhost/process-dashboard`
-2. Take screenshot: `docs/screenshots/22-process-dashboard.png`
-
-### Step 23: Executions
-
-1. Navigate to `http://localhost/executions`
-2. Take screenshot: `docs/screenshots/23-executions.png`
-
-### Step 24: Approvals
-
-1. Navigate to `http://localhost/approvals`
-2. Take screenshot: `docs/screenshots/24-approvals.png`
-
-### Step 25: Operating Room
+### Step 19: Operating Room
 
 1. Navigate to `http://localhost/operating-room`
 2. Take screenshot of default tab (Needs Response): `docs/screenshots/25-operating-room.png`
@@ -222,18 +189,18 @@ Pick the first available agent (e.g., `acme-scout`).
 5. Click "Cost Alerts" tab
 6. Take screenshot: `docs/screenshots/27-operating-room-cost-alerts.png`
 
-### Step 26: Health Monitoring
+### Step 20: Health Monitoring
 
 1. Navigate to `http://localhost/monitoring`
 2. Wait for health data to load
 3. Take screenshot: `docs/screenshots/28-monitoring.png`
 
-### Step 27: API Keys
+### Step 21: API Keys
 
 1. Navigate to `http://localhost/api-keys`
 2. Take screenshot: `docs/screenshots/29-api-keys.png`
 
-### Step 28: Settings
+### Step 22: Settings
 
 1. Navigate to `http://localhost/settings`
 2. Take screenshot of default view: `docs/screenshots/30-settings.png`
@@ -241,19 +208,14 @@ Pick the first available agent (e.g., `acme-scout`).
    - `docs/screenshots/31-settings-ssh.png`
    - `docs/screenshots/32-settings-skills.png`
 
-### Step 29: Process Documentation
-
-1. Navigate to `http://localhost/processes/docs`
-2. Take screenshot: `docs/screenshots/33-process-docs.png`
-
-### Step 30: Create Agent Dialog
+### Step 23: Create Agent Dialog
 
 1. Navigate to `http://localhost/agents`
 2. Click "Create Agent" button
 3. Take screenshot of the creation dialog/form: `docs/screenshots/34-create-agent.png`
 4. Close/cancel the dialog
 
-### Step 31: Summary
+### Step 24: Summary
 
 After all screenshots are captured, list them:
 
@@ -287,15 +249,10 @@ Always use lowercase, hyphens for spaces. The numeric prefix ensures consistent 
 - [ ] Agents list captured
 - [ ] All agent detail tabs captured (Tasks through Info)
 - [ ] Templates page captured
-- [ ] Processes list + editor + wizard captured
-- [ ] Process dashboard captured
-- [ ] Executions captured
-- [ ] Approvals captured
 - [ ] Operating Room (all tabs) captured
 - [ ] Monitoring captured
 - [ ] API Keys captured
 - [ ] Settings captured
-- [ ] Process docs captured
 - [ ] Create Agent dialog captured
 - [ ] Summary printed
 

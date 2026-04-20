@@ -61,7 +61,7 @@ git commit -m "$(cat <<'EOF'
 
 Closes #N
 
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 )"
 ```

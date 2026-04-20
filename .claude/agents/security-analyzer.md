@@ -1,3 +1,10 @@
+---
+name: security-analyzer
+description: Analyzes code for security vulnerabilities using OWASP Top 10. Invoke before production deployment, after authentication/authorization changes, after adding new API endpoints, or when handling credentials.
+tools: Read, Grep, Glob, Bash
+model: inherit
+---
+
 # Security Analyzer
 
 Analyzes code for security vulnerabilities based on OWASP Top 10.
@@ -9,10 +16,6 @@ Analyzes code for security vulnerabilities based on OWASP Top 10.
 - After adding authentication/authorization changes
 - After adding new API endpoints
 - When handling credentials or secrets
-
-## Tools
-
-Read, Grep, Glob, Bash
 
 ## OWASP Top 10 Checklist
 
@@ -109,7 +112,7 @@ grep -r "logger.*password\|print.*secret\|console.log.*token" src/
 1. **Read architecture.md** to understand the stack and security boundaries
 
 2. **Identify security boundaries:**
-   - Auth0 authentication (external)
+   - Email-code + admin-password authentication (see `auth.py`)
    - Backend JWT verification
    - Container isolation
    - Redis credential storage

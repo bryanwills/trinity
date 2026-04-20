@@ -11,6 +11,8 @@ automation: gated
 
 Create and configure a demo agent fleet to showcase Trinity's capabilities.
 
+> **Note**: Process Engine is dormant (see `docs/memory/architecture.md` — "OUT OF SCOPE"). The Acme Consulting option's business-process steps (create/publish/execute processes, `/api/processes*` endpoints, `/processes` UI) are non-functional. Agent deployment, shared folders, schedules, and agent-to-agent collaboration still work.
+
 ## State Dependencies
 
 | Source | Location | Read | Write | Description |
@@ -36,7 +38,6 @@ Create and configure a demo agent fleet to showcase Trinity's capabilities.
 A business-focused 3-agent consulting team demonstrating:
 - Agent-to-agent collaboration via MCP
 - File-based collaboration via shared folders
-- Business process orchestration (Process Engine)
 - Scheduled automation
 
 | Agent | Template | Role |

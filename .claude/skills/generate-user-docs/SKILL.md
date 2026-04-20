@@ -105,7 +105,6 @@ docs/user-docs/
 │   ├── voice-chat.md                 # Voice via Gemini Live API
 │   ├── image-generation.md           # Platform image generation
 │   ├── agent-avatars.md              # AI-generated avatars
-│   ├── process-engine.md             # BPMN workflows, process templates
 │   └── dynamic-dashboards.md         # Custom agent dashboards
 └── api-reference/
     ├── authentication.md             # JWT tokens, API keys, auth flow

@@ -1,3 +1,10 @@
+---
+name: agent-template-validator
+description: Validates agent template structure and configuration. Invoke when creating, updating, or debugging an agent template, or before publishing a template to GitHub.
+tools: Read, Glob, Bash
+model: inherit
+---
+
 # Agent Template Validator
 
 Validates agent template structure and configuration.
@@ -8,10 +15,6 @@ Validates agent template structure and configuration.
 - Updating existing template
 - Debugging template deployment issues
 - Before publishing template to GitHub
-
-## Tools
-
-Read, Glob, Bash
 
 ## Required Files Check
 

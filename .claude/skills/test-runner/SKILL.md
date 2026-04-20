@@ -1,3 +1,12 @@
+---
+name: test-runner
+description: Run the full Trinity API test suite, analyze results, and generate a comprehensive testing report. Use before merging a PR, after implementing a new feature, or when debugging test failures.
+allowed-tools: [Agent, Bash, Read, Write, Grep, Glob]
+user-invocable: true
+argument-hint: "[<filter>] [--verbose] [--failing]"
+automation: manual
+---
+
 # Test Runner
 
 Run the full Trinity API test suite, analyze results, and generate a comprehensive testing report.

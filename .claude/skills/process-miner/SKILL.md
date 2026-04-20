@@ -13,6 +13,8 @@ automation: manual
 
 # Process Miner Skill
 
+> **Note**: This skill emits Trinity Process YAML definitions. The Process Engine that consumes them is dormant (see `docs/memory/architecture.md` — "OUT OF SCOPE"). The mining/analysis outputs are still useful as standalone reports; the YAML definitions won't run until the Process Engine is reactivated.
+
 You are a Process Mining specialist. Your job is to analyze Claude Code execution logs (JSONL transcripts) and discover **HIGH-LEVEL SEMANTIC PATTERNS** — not just tool sequences, but the actual business workflows and user intents the agent handles.
 
 ## State Dependencies
