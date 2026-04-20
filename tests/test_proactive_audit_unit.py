@@ -111,3 +111,51 @@ def test_audit_send_truncates_long_preview(proactive_service):
     )
     kwargs = audit.log.call_args.kwargs
     assert len(kwargs["details"]["message_preview"]) == 100
+
+
+def test_send_message_success_path_writes_success_audit(proactive_service, monkeypatch):
+    """End-to-end: send_message → successful delivery → audit with success=True.
+
+    Guards against regressions where the success-branch `await self._audit_send(...)`
+    at the end of `send_message` silently drops (e.g. if made sync again, or if
+    the call site forgets to await).
+    """
+    service, audit = proactive_service
+
+    # 1. Authorization passes.
+    from database import db as fake_db
+    fake_db.can_agent_message_email = MagicMock(return_value=True)
+
+    # 2. Rate limit passes (both helpers are sync; stub them).
+    monkeypatch.setattr(service, "_check_rate_limit", lambda a, e: True)
+    monkeypatch.setattr(service, "_increment_rate_limit", lambda a, e: None)
+
+    # 3. Delivery succeeds.
+    from services.proactive_message_service import DeliveryResult
+
+    async def _fake_deliver(agent_name, recipient_email, text, channel, reply_to_thread):
+        return DeliveryResult(success=True, channel=channel, message_id="msg-42")
+
+    monkeypatch.setattr(service, "_deliver_via_channel", _fake_deliver)
+
+    result = asyncio.run(
+        service.send_message(
+            agent_name="bot",
+            recipient_email="friend@example.com",
+            text="a successful hello",
+            channel="telegram",
+        )
+    )
+
+    assert result.success is True
+    assert result.message_id == "msg-42"
+
+    # Audit log called exactly once with success=True — not the failure paths.
+    audit.log.assert_awaited_once()
+    kwargs = audit.log.call_args.kwargs
+    assert kwargs["actor_agent_name"] == "bot"
+    assert kwargs["target_id"] == "friend@example.com"
+    assert kwargs["details"]["success"] is True
+    assert kwargs["details"]["error"] is None
+    assert kwargs["details"]["channel"] == "telegram"
+    assert kwargs["details"]["message_preview"] == "a successful hello"
