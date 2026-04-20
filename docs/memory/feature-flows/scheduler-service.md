@@ -556,6 +556,10 @@ async def _sync_agent_schedules(self):
 
 Identical pattern to agent schedule sync but operates on `_process_schedule_snapshot` and uses `_add_process_job()` / `_remove_process_job()`. Reads from `process_schedules` table via `db.list_all_process_schedules()`.
 
+**Invariant — run-time writes must not bump `updated_at`** (Issue #420):
+
+The sync loop compares `(enabled, updated_at)` to detect config changes. `update_schedule_run_times()` and `update_process_schedule_run_times()` therefore write `last_run_at` / `next_run_at` only — they must NOT touch `updated_at`. Bumping it produced a self-triggering loop where each sync tick saw its own previous `_add_job` write, flagged every schedule as "updated", and re-registered all N jobs once per tick. Legitimate config edits still bump `updated_at` via `update_schedule()` / `set_schedule_enabled()` in the backend, so user-initiated changes are still detected.
+
 ---
 
 ## Flow 7: Manual Trigger (via Dedicated Scheduler)
@@ -758,7 +762,7 @@ On startup, `_recover_pending_retries()` queries executions with `status='pendin
 
 | Method | Line | SQL | Purpose |
 |--------|------|-----|---------|
-| `update_schedule_run_times()` | 166-190 | `UPDATE agent_schedules SET last_run_at, next_run_at` | Track execution times |
+| `update_schedule_run_times()` | 184-215 | `UPDATE agent_schedules SET last_run_at, next_run_at` (does NOT touch `updated_at` — Issue #420) | Track execution times |
 
 ### Agent Execution Operations
 
@@ -781,7 +785,7 @@ On startup, `_recover_pending_retries()` queries executions with `status='pendin
 | `list_all_process_schedules()` | 488-496 | `SELECT * FROM process_schedules` | Sync detection |
 | `list_process_schedules(process_id)` | 498-506 | `SELECT ... WHERE process_id = ?` | Per-process list |
 | `create_process_schedule()` | 508-558 | `INSERT INTO process_schedules` | Create schedule |
-| `update_process_schedule_run_times()` | 560-584 | `UPDATE process_schedules SET last_run_at, next_run_at` | Track run times |
+| `update_process_schedule_run_times()` | 685-715 | `UPDATE process_schedules SET last_run_at, next_run_at` (does NOT touch `updated_at` — Issue #420) | Track run times |
 | `delete_process_schedule()` | 586-592 | `DELETE FROM process_schedules WHERE id = ?` | Delete single |
 | `delete_process_schedules_for_process()` | 594-600 | `DELETE ... WHERE process_id = ?` | Delete all for process |
 | `create_process_schedule_execution()` | 602-639 | `INSERT INTO process_schedule_executions` | Create execution record |
