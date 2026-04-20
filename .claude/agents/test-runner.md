@@ -213,6 +213,7 @@ The test suite covers:
 - **Locking** (scheduler_tests/test_locking.py) - Redis lock acquisition and renewal
 - **Cron** (scheduler_tests/test_cron.py) - Cron expression parsing, next run calculation
 - **Config** (scheduler_tests/test_config.py) - Scheduler configuration loading
+- **Sync Loop** (scheduler_tests/test_sync_loop.py) - Periodic schedule sync idempotence; `updated_at` invariant for run-time writes (#420)
 
 ## Performance Notes (2026-02-05)
 
@@ -227,9 +228,9 @@ The test suite covers:
 
 ## Test Suite Statistics
 
-**Total Tests**: ~2,207 tests across 120 test files
+**Total Tests**: ~2,211 tests across 121 test files
 **Smoke Tests**: ~578 tests (fast, no agent creation)
-**Unit Tests**: ~86 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout)
+**Unit Tests**: ~90 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop)
 **Core Tests (not slow)**: ~2,076 tests
 **Slow Tests**: ~89 tests (chat execution, fleet ops, system agent ops, execution termination)
 **WebSocket Tests**: ~10 tests (web terminal, execution streaming)
@@ -263,7 +264,17 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 
 | Test File | Description | Tests Added |
 |-----------|-------------|-------------|
+| `scheduler_tests/test_sync_loop.py` | Scheduler sync loop idempotence — regression test for self-triggering `updated_at` bump (#420) | 4 tests |
 | `test_inter_agent_timeout_unit.py` | Inter-agent timeout honors per-agent config (#418) | 7 tests |
+
+**Scheduler Sync Loop (#420)** (`scheduler_tests/test_sync_loop.py`):
+
+- `test_update_run_times_does_not_bump_updated_at` — `update_schedule_run_times` must leave `updated_at` unchanged
+- `test_update_process_run_times_does_not_bump_updated_at` — same invariant for process schedules
+- `test_sync_is_noop_when_db_unchanged` — three consecutive `_sync_agent_schedules` ticks with no DB edits produce zero `_add_job` / `_remove_job` calls
+- `test_sync_detects_legitimate_config_change` — a cron edit that bumps `updated_at` still triggers remove-and-re-add (guards against over-correcting)
+
+Direct DB + in-process `SchedulerService` tests using the existing `db_with_data` and `mock_lock_manager` fixtures. No backend container required.
 
 **Inter-Agent Timeout Fix (#418)** (`test_inter_agent_timeout_unit.py`):
 
