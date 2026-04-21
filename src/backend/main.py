@@ -16,7 +16,7 @@ import asyncio
 import json
 import os
 from datetime import datetime
-from typing import List
+from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, Query
@@ -109,89 +109,91 @@ from logging_config import setup_logging
 logger = logging.getLogger(__name__)
 
 
+# Redis Streams event bus replaces the old in-process broadcast. Legacy manager
+# classes are kept as thin shims so the 33 existing broadcast call sites don't
+# change. See docs/memory/feature-flows/websocket-event-bus.md and
+# services/event_bus.py (RELIABILITY-003 / #306).
+from services.event_bus import (
+    event_bus,
+    stream_dispatcher,
+    SCOPE_ALL,
+    SCOPE_SCOPED,
+)
+
+
 class ConnectionManager:
-    """WebSocket connection manager for broadcasting events."""
+    """Thin shim over ``event_bus``: preserves the legacy broadcast-a-JSON-string API.
 
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
+    Connections themselves are tracked by ``StreamDispatcher``; ``connect()``
+    here returns a client id so callers can ``disconnect()`` without juggling
+    the dispatcher directly."""
 
-    async def connect(self, websocket: WebSocket):
+    def __init__(self) -> None:
+        self._client_ids: Dict[WebSocket, str] = {}
+
+    async def connect(self, websocket: WebSocket, last_event_id: Optional[str] = None) -> None:
         await websocket.accept()
-        self.active_connections.append(websocket)
+        async def _send(payload: dict) -> None:
+            await websocket.send_text(json.dumps(payload))
+        client_id = await stream_dispatcher.register(
+            websocket,
+            scope=SCOPE_ALL,
+            send_func=_send,
+            last_event_id=last_event_id,
+        )
+        self._client_ids[websocket] = client_id
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+    def disconnect(self, websocket: WebSocket) -> None:
+        client_id = self._client_ids.pop(websocket, None)
+        if client_id:
+            stream_dispatcher.unregister(client_id)
 
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(message)
-            except:
-                pass
+    async def broadcast(self, message) -> None:
+        """Publish an event for all /ws consumers.
+
+        Accepts either a JSON-encoded string (legacy signature) or a dict
+        (preferred going forward)."""
+        await event_bus.publish(message, scope=SCOPE_ALL)
 
 
 class FilteredWebSocketManager:
-    """
-    WebSocket manager that filters events based on user's accessible agents.
+    """Thin shim over ``event_bus`` for /ws/events (Trinity Connect)."""
 
-    Used by /ws/events endpoint for external listeners (Trinity Connect).
-    Events are filtered server-side based on user's owned and shared agents.
-    """
+    def __init__(self) -> None:
+        self._client_ids: Dict[WebSocket, str] = {}
 
-    def __init__(self):
-        from typing import Dict, Set
-        self.connections: Dict[WebSocket, Dict] = {}  # ws -> {email, is_admin, accessible_agents}
-
-    async def connect(self, websocket: WebSocket, email: str, is_admin: bool, accessible_agents: List[str]):
-        """Register a new connection with its accessible agents."""
-        self.connections[websocket] = {
-            "email": email,
-            "is_admin": is_admin,
-            "accessible_agents": set(accessible_agents)
-        }
-
-    def disconnect(self, websocket: WebSocket):
-        """Remove a connection."""
-        self.connections.pop(websocket, None)
-
-    def update_accessible_agents(self, websocket: WebSocket, accessible_agents: List[str]):
-        """Update the accessible agents list for a connection."""
-        if websocket in self.connections:
-            self.connections[websocket]["accessible_agents"] = set(accessible_agents)
-
-    async def broadcast_filtered(self, event: dict):
-        """
-        Broadcast event only to users who can access the event's agent.
-
-        Extracts agent name from various event fields and checks if
-        each connected user can access that agent.
-        """
-        # Extract agent name from event (different fields for different event types)
-        agent_name = (
-            event.get("agent_name") or
-            event.get("agent") or
-            event.get("name") or  # agent_started/agent_stopped events
-            event.get("source_agent") or
-            (event.get("details") or {}).get("source_agent") or
-            (event.get("details") or {}).get("target_agent")
+    async def connect(
+        self,
+        websocket: WebSocket,
+        email: str,
+        is_admin: bool,
+        accessible_agents: List[str],
+        last_event_id: Optional[str] = None,
+    ) -> None:
+        async def _send(payload: dict) -> None:
+            await websocket.send_json(payload)
+        client_id = await stream_dispatcher.register(
+            websocket,
+            scope=SCOPE_SCOPED,
+            send_func=_send,
+            is_admin=is_admin,
+            accessible_agents=accessible_agents,
+            last_event_id=last_event_id,
         )
+        self._client_ids[websocket] = client_id
 
-        if not agent_name:
-            return  # Can't filter without agent name
+    def disconnect(self, websocket: WebSocket) -> None:
+        client_id = self._client_ids.pop(websocket, None)
+        if client_id:
+            stream_dispatcher.unregister(client_id)
 
-        disconnected = []
-        for websocket, info in self.connections.items():
-            # Admin sees all, otherwise check accessible agents
-            if info["is_admin"] or agent_name in info["accessible_agents"]:
-                try:
-                    await websocket.send_json(event)
-                except Exception:
-                    disconnected.append(websocket)
+    def update_accessible_agents(self, websocket: WebSocket, accessible_agents: List[str]) -> None:
+        client_id = self._client_ids.get(websocket)
+        if client_id:
+            stream_dispatcher.update_accessible_agents(client_id, accessible_agents)
 
-        # Clean up disconnected clients
-        for ws in disconnected:
-            self.disconnect(ws)
+    async def broadcast_filtered(self, event: dict) -> None:
+        await event_bus.publish(event, scope=SCOPE_SCOPED)
 
 
 manager = ConnectionManager()
@@ -279,6 +281,17 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     # Set up structured JSON logging (captured by Vector)
     setup_logging()
+
+    # Start Redis Streams event bus + dispatcher (RELIABILITY-003 / #306).
+    # Must start before the WebSocket endpoints begin accepting clients so the
+    # first connection has a live dispatcher to register with.
+    try:
+        await event_bus.start()
+        await stream_dispatcher.start()
+        logger.info("Redis Streams event bus started (maxlen=%d)",
+                    int(os.getenv("REDIS_STREAM_MAXLEN", "10000")))
+    except Exception as e:
+        logger.error(f"Event bus startup failed (broadcasts will degrade): {e}")
 
     # Report OpenTelemetry status (RELIABILITY-002)
     if _otel_enabled:
@@ -523,6 +536,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error closing agent HTTP client pool: {e}")
 
+    # Drain event bus + stop dispatcher last so late-lifecycle broadcasts
+    # (e.g. "agent_stopped" emitted during service shutdown) still land on
+    # the stream. 2s drain window per #306.
+    try:
+        await stream_dispatcher.stop()
+        await event_bus.stop(drain_timeout=2.0)
+        print("Event bus and stream dispatcher stopped")
+    except Exception as e:
+        print(f"Error stopping event bus/dispatcher: {e}")
+
 
 # Create FastAPI app
 app = FastAPI(
@@ -610,7 +633,11 @@ app.include_router(users_router)  # User Management (ROLE-001)
 
 # WebSocket endpoint
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(default=None)):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(default=None),
+    last_event_id: Optional[str] = Query(default=None, alias="last-event-id"),
+):
     """
     WebSocket endpoint for real-time updates.
 
@@ -620,9 +647,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(default=No
 
     Connections without a valid token are rejected before websocket.accept()
     to prevent any unauthenticated data leakage.
+
+    Reconnect replay (#306): clients may pass ``last-event-id=<stream_id>``
+    to receive events missed during a disconnect. Malformed or too-old ids
+    produce a ``{"type": "resync_required"}`` message — the client must then
+    fetch current state via REST.
     """
     from jose import JWTError, jwt as jose_jwt
     from config import SECRET_KEY, ALGORITHM
+    from services.event_bus import validate_last_event_id
 
     # Reject immediately if no token provided — before accept()
     if not token:
@@ -641,7 +674,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(default=No
         return
 
     # Token validated — now accept the connection
-    await manager.connect(websocket)
+    await manager.connect(websocket, last_event_id=validate_last_event_id(last_event_id))
 
     try:
         while True:
@@ -663,7 +696,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(default=No
 @app.websocket("/ws/events")
 async def websocket_events_endpoint(
     websocket: WebSocket,
-    token: str = Query(None, description="MCP API key for authentication")
+    token: str = Query(None, description="MCP API key for authentication"),
+    last_event_id: Optional[str] = Query(None, alias="last-event-id"),
 ):
     """
     WebSocket endpoint for external event listeners (Trinity Connect).
@@ -686,6 +720,7 @@ async def websocket_events_endpoint(
         - "refresh" -> refreshes accessible agents list
     """
     from database import db
+    from services.event_bus import validate_last_event_id
 
     # Validate MCP API key
     if not token or not token.startswith("trinity_mcp_"):
@@ -713,8 +748,11 @@ async def websocket_events_endpoint(
         "message": "Listening for events. Events filtered to your accessible agents."
     })
 
-    # Add to filtered connections manager
-    await filtered_manager.connect(websocket, user_email, is_admin, accessible_agents)
+    # Add to filtered connections manager — enables reconnect replay via #306.
+    await filtered_manager.connect(
+        websocket, user_email, is_admin, accessible_agents,
+        last_event_id=validate_last_event_id(last_event_id),
+    )
 
     try:
         while True:

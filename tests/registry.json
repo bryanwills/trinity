@@ -173,6 +173,13 @@
       "added": "2026-04-19",
       "categories": ["backend", "unit", "telegram", "access-control"],
       "description": "Unit tests for Telegram /login access gate: verified+shared returns ready, open_access returns ready, verified+restricted upserts access_request and returns 'pending approval', upsert failures don't break the reply, invalid code short-circuits gate"
+    },
+    {
+      "file": "test_event_bus.py",
+      "feature": "RELIABILITY-003 / #306",
+      "added": "2026-04-21",
+      "categories": ["backend", "unit", "websocket", "redis-streams"],
+      "description": "Unit tests for Redis Streams event bus (#306): last-event-id validation + id comparison, scope visibility (SCOPE_ALL vs SCOPE_SCOPED with accessible_agents), EventBus XADD envelope (dict + legacy JSON string + inferred agent_name), Redis-unavailable fallback buffer, StreamDispatcher 3-failure client eviction, slow-consumer queue overflow triggers resync marker, update_accessible_agents mutation, invalid last-event-id queues resync_required"
     }
   ]
 }

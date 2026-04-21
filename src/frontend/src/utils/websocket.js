@@ -5,6 +5,9 @@ import { useOperatorQueueStore } from '../stores/operatorQueue'
 
 const ws = ref(null)
 const isConnected = ref(false)
+// #306 Redis Streams reconnect replay: track the last Redis stream id we saw
+// so a brief disconnect replays missed events rather than dropping them.
+let lastEventId = null
 
 export function useWebSocket() {
   const agentsStore = useAgentsStore()
@@ -20,7 +23,10 @@ export function useWebSocket() {
       return
     }
 
-    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+    let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+    if (lastEventId) {
+      wsUrl += `&last-event-id=${encodeURIComponent(lastEventId)}`
+    }
     ws.value = new WebSocket(wsUrl)
 
     ws.value.onopen = () => {
@@ -31,6 +37,9 @@ export function useWebSocket() {
     ws.value.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
+        if (data._eid) {
+          lastEventId = data._eid
+        }
         handleMessage(data)
       } catch (error) {
         console.error('Failed to parse WebSocket message:', error)
@@ -64,6 +73,16 @@ export function useWebSocket() {
   }
 
   const handleMessage = (data) => {
+    // #306 reconnect replay: server signals "your last-event-id was trimmed,
+    // full-refetch to rehydrate." Clear the cursor so the next reconnect
+    // starts live and refetch anything event-driven.
+    if (data.type === 'resync_required') {
+      console.warn('[WebSocket] resync_required:', data.reason)
+      lastEventId = null
+      try { agentsStore.fetchAgents && agentsStore.fetchAgents() } catch (_) {}
+      try { notificationsStore.fetchPendingCount && notificationsStore.fetchPendingCount() } catch (_) {}
+      return
+    }
     switch (data.event) {
       case 'agent_created':
         // Add to list (createAgent() no longer pushes to avoid race conditions)

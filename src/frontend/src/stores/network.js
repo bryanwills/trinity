@@ -33,6 +33,9 @@ export const useNetworkStore = defineStore('network', () => {
   const websocketHeartbeatInterval = ref(null) // Interval ID for WebSocket keepalive ping
   const runningToggleLoading = ref({}) // Map of agent name -> boolean (loading state for start/stop)
   const schedules = ref([]) // Enabled schedules for timeline markers
+  // #306 Redis Streams reconnect replay: remember the last event id we saw so
+  // a network blip replays missed events instead of dropping them.
+  const lastEventId = ref(null)
 
   // View mode state (graph vs timeline) - default to timeline, persist to localStorage
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
@@ -542,7 +545,10 @@ export const useNetworkStore = defineStore('network', () => {
       return
     }
 
-    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+    let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+    if (lastEventId.value) {
+      wsUrl += `&last-event-id=${encodeURIComponent(lastEventId.value)}`
+    }
 
     // Prevent duplicate connections
     if (websocket.value?.readyState === WebSocket.OPEN) {
@@ -564,7 +570,18 @@ export const useNetworkStore = defineStore('network', () => {
       websocket.value.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
+          if (data._eid) {
+            lastEventId.value = data._eid
+          }
 
+          if (data.type === 'resync_required') {
+            // #306: stream cursor was trimmed (or reject), reload authoritative state.
+            console.warn('[Collaboration] resync_required:', data.reason)
+            lastEventId.value = null
+            try { fetchAgents() } catch (_) {}
+            try { fetchHistoricalCollaborations() } catch (_) {}
+            return
+          }
           if (data.type === 'agent_collaboration') {
             handleCollaborationEvent(data)
           } else if (data.type === 'agent_status') {

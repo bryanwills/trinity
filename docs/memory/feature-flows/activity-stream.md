@@ -146,6 +146,13 @@ class ActivityService:
 | 202-212 | `_notify_subscribers()` | Extensibility for plugins |
 | 214-244 | `_get_action_description()` | Human-readable descriptions |
 
+> **Transport**: `websocket_manager.broadcast(...)` and
+> `filtered_websocket_manager.broadcast_filtered(...)` are thin shims over the
+> Redis Streams event bus introduced in #306 — events are durably logged and
+> replayable on reconnect. See
+> [websocket-event-bus.md](websocket-event-bus.md). The activity service's
+> event shape is unchanged.
+
 **Activity Creation Flow** (`activity_service.py:46-107`)
 ```python
 async def track_activity(
