@@ -97,8 +97,13 @@ async def _perform_auto_switch(
     # Switch subscription in DB
     db.assign_subscription_to_agent(agent_name, new_subscription.id)
 
-    # Clear rate-limit events for the old subscription on this agent
-    db.clear_rate_limit_events(agent_name, old_subscription_id)
+    # NOTE: Do NOT clear rate-limit events for the old subscription here. The
+    # events are the signal that the old subscription is still rate-limited —
+    # `is_subscription_rate_limited()` counts them over a 2h window, and
+    # `select_best_alternative_subscription()` uses that to filter candidates.
+    # Clearing here causes a ping-pong between exhausted subscriptions because
+    # the old sub looks viable on the next cycle (issue #444). Events age out
+    # naturally via the 2h query window and the 24h cleanup job.
 
     # Restart agent container to apply new subscription token
     restart_result = await _restart_agent(agent_name)

@@ -50,6 +50,7 @@ Return switch result to caller → 429 response includes auto_switch info
 | Router | `src/backend/routers/chat.py` | 429 interception in chat proxy + background tasks |
 | Frontend | `src/frontend/src/views/Settings.vue` | Toggle in Subscriptions section |
 | Tests | `tests/test_subscription_auto_switch.py` | Smoke tests |
+| Tests | `tests/unit/test_subscription_auto_switch_pingpong.py` | Unit regression for #444 ping-pong prevention |
 | Spec | `docs/requirements/SUB-003-subscription-auto-switch.md` | Full requirements |
 
 ## Database
@@ -86,8 +87,8 @@ Return switch result to caller → 429 response includes auto_switch info
 
 ## Edge Cases
 
-- **All subscriptions exhausted**: No switch, error surfaces as normal 429
+- **All subscriptions exhausted**: No switch, error surfaces as normal 429. `_perform_auto_switch` does **not** clear rate-limit events for the old subscription — those events are the signal that keeps `is_subscription_rate_limited()` truthful, so the just-drained sub is not offered as a candidate on the next cycle (issue #444).
 - **API key agents**: Auto-switch only applies to subscription-based agents
 - **Flip-flopping**: 2-consecutive-error requirement prevents immediate re-switch
 - **Concurrent switches**: SQLite serialization prevents races
-- **Cleanup**: Records older than 24h are eligible for cleanup
+- **Cleanup**: Records older than 24h are eligible for cleanup; the 2h "is rate-limited" window drives candidate filtering independently of cleanup
