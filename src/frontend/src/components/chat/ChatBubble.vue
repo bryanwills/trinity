@@ -16,8 +16,18 @@
   <!-- Self-task result message (SELF-EXEC-001) - collapsible by default -->
   <div
     v-else-if="source === 'self_task'"
-    class="max-w-[85%]"
+    class="max-w-[85%] group relative"
   >
+    <button
+      type="button"
+      class="absolute top-2 right-2 z-10 p-1.5 rounded-md bg-white/80 dark:bg-gray-700/80 text-gray-500 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-white dark:hover:bg-gray-700 shadow-sm opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+      :title="copied ? 'Copied!' : 'Copy message'"
+      :aria-label="copied ? 'Copied' : 'Copy message'"
+      @click.stop="copyContent"
+    >
+      <svg v-if="!copied" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+      <svg v-else class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+    </button>
     <div class="rounded-xl px-4 py-3 bg-purple-50 dark:bg-purple-900/20 text-gray-900 dark:text-white shadow-sm border border-purple-200 dark:border-purple-800">
       <!-- Self-task header with collapse toggle -->
       <div
@@ -54,8 +64,18 @@
   <!-- Assistant message (markdown rendered) -->
   <div
     v-else
-    class="max-w-[85%]"
+    class="max-w-[85%] group relative"
   >
+    <button
+      type="button"
+      class="absolute top-2 right-2 z-10 p-1.5 rounded-md bg-white/80 dark:bg-gray-700/80 text-gray-500 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-white dark:hover:bg-gray-700 shadow-sm opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+      :title="copied ? 'Copied!' : 'Copy message'"
+      :aria-label="copied ? 'Copied' : 'Copy message'"
+      @click.stop="copyContent"
+    >
+      <svg v-if="!copied" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+      <svg v-else class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+    </button>
     <div class="rounded-xl px-4 py-3 bg-white dark:bg-gray-800 text-gray-900 dark:text-white shadow-sm">
       <div v-if="source === 'voice'" class="flex items-center gap-1.5 mb-1 text-gray-400 dark:text-gray-500">
         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
@@ -96,6 +116,17 @@ const props = defineProps({
 
 // SELF-EXEC-001: Self-task results start collapsed
 const selfTaskExpanded = ref(false)
+
+const copied = ref(false)
+async function copyContent() {
+  try {
+    await navigator.clipboard.writeText(props.content || '')
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  } catch (err) {
+    console.error('Copy failed:', err)
+  }
+}
 
 const renderedContent = computed(() => {
   return renderMarkdown(props.content)
