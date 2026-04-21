@@ -200,13 +200,30 @@ Log events (via stdlib `logging`, captured by Vector):
 - `stream_dispatcher: send failed for <id-prefix> (N/3): <err>` — per-attempt
 - `stream_dispatcher: evicting client <id-prefix> after 3 failures`
 
+### Soak counters (`GET /api/debug/event-bus-stats`, admin-only)
+
+In-memory counters for the #306 soak gates. Monotonic, reset on backend
+restart — compare deltas. Response shape:
+
+- `publisher` — `events_published`, `publish_failures`, `outbound_overflow`,
+  `outbound_queue_depth`, `fallback_buffer_depth`, `redis_ready`, `uptime_seconds`
+- `dispatcher` — `events_delivered`, `send_failures`, `drops_queue_full`,
+  `clients_evicted`, `resyncs_sent`, `client_count`, `last_stream_id`, `uptime_seconds`
+- `watchdog` — `cumulative_orphaned`, `cumulative_auto_terminated`, `last_run_at`
+  (running totals from `CleanupService`)
+
+Gate checks (see orchestration reliability plan, Tier 2.5):
+- Delivery ≥99.9%: `(drops_queue_full + clients_evicted + resyncs_sent) / events_published < 0.001`
+- Zero watchdog recoveries: `watchdog.cumulative_orphaned == 0`
+
 ---
 
 ## Key Files
 
 | Layer | File | Role |
 |-------|------|------|
-| Service | `src/backend/services/event_bus.py` | `EventBus`, `StreamDispatcher`, scope helpers, `validate_last_event_id` |
+| Service | `src/backend/services/event_bus.py` | `EventBus`, `StreamDispatcher`, scope helpers, `validate_last_event_id`, soak-counter `stats()` helpers |
+| Router | `src/backend/routers/debug.py` | Admin-only `GET /api/debug/event-bus-stats` for soak dashboard |
 | Entry | `src/backend/main.py:112-200` | `ConnectionManager` / `FilteredWebSocketManager` shims over the bus |
 | Entry | `src/backend/main.py:634+`, `main.py:697+` | `/ws` and `/ws/events` endpoints with `?last-event-id=` support |
 | Entry | `src/backend/main.py:285-294` | Lifespan `event_bus.start()` + `stream_dispatcher.start()` |

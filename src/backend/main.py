@@ -84,6 +84,7 @@ from routers.operator_queue import router as operator_queue_router, set_websocke
 from routers.voice import router as voice_router
 from routers.event_subscriptions import router as event_subscriptions_router, set_websocket_manager as set_event_subs_ws_manager, set_filtered_websocket_manager as set_event_subs_filtered_ws_manager
 from routers.users import router as users_router
+from routers.debug import router as debug_router  # #306 soak instrumentation
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 
 # Import activity service
@@ -629,6 +630,7 @@ app.include_router(operator_queue_router)  # Operator Queue (OPS-001)
 app.include_router(voice_router)  # Voice Chat (VOICE-001)
 app.include_router(event_subscriptions_router)  # Agent Event Subscriptions (EVT-001)
 app.include_router(users_router)  # User Management (ROLE-001)
+app.include_router(debug_router)  # #306 soak dashboard
 
 
 # WebSocket endpoint

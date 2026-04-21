@@ -92,6 +92,10 @@ class CleanupService:
         self._lock = asyncio.Lock()
         self.last_run_at: Optional[str] = None
         self.last_report: Optional[CleanupReport] = None
+        # Cumulative counters for the #306 soak dashboard. Monotonic, reset on
+        # process restart. Zero orphan recoveries over 2 weeks is the gate.
+        self.cumulative_orphaned: int = 0
+        self.cumulative_auto_terminated: int = 0
 
     def start(self):
         """Start the background cleanup loop."""
@@ -133,6 +137,8 @@ class CleanupService:
             )
             report.orphaned_executions = orphaned
             report.auto_terminated = terminated
+            self.cumulative_orphaned += orphaned
+            self.cumulative_auto_terminated += terminated
             if orphaned > 0:
                 logger.info(f"[Watchdog] Recovered {orphaned} orphaned executions")
             if terminated > 0:

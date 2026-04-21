@@ -135,6 +135,11 @@ class EventBus:
         self._writer_task: Optional[asyncio.Task] = None
         self._redis: Optional["aioredis.Redis"] = None
         self._ready = False
+        # Soak-period counters (#306). Monotonic, reset on process restart.
+        self._started_at: float = time.time()
+        self.events_published: int = 0
+        self.publish_failures: int = 0
+        self.outbound_overflow: int = 0
 
     async def start(self) -> None:
         if self._writer_task is not None:
@@ -212,6 +217,7 @@ class EventBus:
             try:
                 self._outbound.put_nowait(envelope)
             except asyncio.QueueFull:
+                self.outbound_overflow += 1
                 logger.warning("event_bus: outbound queue full, dropping event")
 
     async def _writer_loop(self) -> None:
@@ -246,6 +252,18 @@ class EventBus:
             self._redis = None
             return None
 
+    def stats(self) -> Dict[str, Any]:
+        """Snapshot of publisher-side counters for the #306 soak dashboard."""
+        return {
+            "uptime_seconds": int(time.time() - self._started_at),
+            "events_published": self.events_published,
+            "publish_failures": self.publish_failures,
+            "outbound_overflow": self.outbound_overflow,
+            "outbound_queue_depth": self._outbound.qsize(),
+            "fallback_buffer_depth": len(self._fallback),
+            "redis_ready": self._ready,
+        }
+
     async def _xadd(self, envelope: Dict[str, Any]) -> None:
         redis = await self._get_redis()
         if redis is None:
@@ -262,8 +280,10 @@ class EventBus:
         }
         try:
             await redis.xadd(STREAM_KEY, fields, maxlen=STREAM_MAXLEN, approximate=True)
+            self.events_published += 1
         except Exception as e:
             # Force reconnect on next call.
+            self.publish_failures += 1
             logger.warning("event_bus: XADD failed: %s", e)
             try:
                 await redis.aclose()
@@ -288,6 +308,13 @@ class StreamDispatcher:
         self._last_stream_id: str = "$"   # start at live tip on boot
         self._lock = asyncio.Lock()
         self._shutting_down = False
+        # Soak-period counters (#306). Monotonic, reset on process restart.
+        self._started_at: float = time.time()
+        self.events_delivered: int = 0
+        self.send_failures: int = 0
+        self.drops_queue_full: int = 0
+        self.clients_evicted: int = 0
+        self.resyncs_sent: int = 0
 
     async def start(self) -> None:
         if self._reader_task is not None:
@@ -433,6 +460,7 @@ class StreamDispatcher:
                 slot.queue.put_nowait((entry_id, payload))
             except asyncio.QueueFull:
                 # Slow client — drop and require resync.
+                self.drops_queue_full += 1
                 if not slot.resync_pending:
                     slot.resync_pending = True
                     logger.warning("stream_dispatcher: client %s queue full, marking resync",
@@ -441,6 +469,7 @@ class StreamDispatcher:
                         slot.queue.put_nowait((entry_id, {"type": "resync_required",
                                                           "reason": "slow_consumer",
                                                           "_eid": entry_id}))
+                        self.resyncs_sent += 1
                     except asyncio.QueueFull:
                         pass  # will be evicted by consumer on next failure
 
@@ -454,6 +483,7 @@ class StreamDispatcher:
                 try:
                     await slot.send_func(payload)
                     slot.failure_count = 0
+                    self.events_delivered += 1
                     # Monotonic guard (#306 review C1): even though catchup's
                     # range is capped to avoid overlap with live fan-out, keep
                     # this defensive check so any future ordering bug can't
@@ -468,11 +498,13 @@ class StreamDispatcher:
                     raise
                 except Exception as e:
                     slot.failure_count += 1
+                    self.send_failures += 1
                     logger.info(
                         "stream_dispatcher: send failed for %s (%d/%d): %s",
                         client_id[:8], slot.failure_count, EVICT_AFTER_FAILURES, e,
                     )
                     if slot.failure_count >= EVICT_AFTER_FAILURES:
+                        self.clients_evicted += 1
                         logger.warning("stream_dispatcher: evicting client %s after %d failures",
                                        client_id[:8], EVICT_AFTER_FAILURES)
                         try:
@@ -561,6 +593,7 @@ class StreamDispatcher:
         slot.resync_pending = True
         try:
             slot.queue.put_nowait(("0-0", {"type": "resync_required", "reason": reason}))
+            self.resyncs_sent += 1
         except asyncio.QueueFull:
             pass
 
@@ -577,6 +610,19 @@ class StreamDispatcher:
             logger.warning("stream_dispatcher: Redis unavailable (%s)", e)
             self._redis = None
             return None
+
+    def stats(self) -> Dict[str, Any]:
+        """Snapshot of consumer-side counters for the #306 soak dashboard."""
+        return {
+            "uptime_seconds": int(time.time() - self._started_at),
+            "client_count": len(self._clients),
+            "events_delivered": self.events_delivered,
+            "send_failures": self.send_failures,
+            "drops_queue_full": self.drops_queue_full,
+            "clients_evicted": self.clients_evicted,
+            "resyncs_sent": self.resyncs_sent,
+            "last_stream_id": self._last_stream_id,
+        }
 
 
 def _id_greater_than(a: str, b: str) -> bool:
