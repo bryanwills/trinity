@@ -78,6 +78,7 @@ from routers.subscriptions import router as subscriptions_router
 from routers.monitoring import router as monitoring_router, set_websocket_manager as set_monitoring_ws_manager, set_filtered_websocket_manager as set_monitoring_filtered_ws_manager
 from routers.slack import public_router as slack_public_router, auth_router as slack_auth_router
 from routers.telegram import public_router as telegram_public_router, auth_router as telegram_auth_router
+from routers.whatsapp import public_router as whatsapp_public_router, auth_router as whatsapp_auth_router
 from routers.paid import router as paid_router
 from routers.nevermined import router as nevermined_router
 from routers.image_generation import router as image_generation_router
@@ -512,6 +513,35 @@ async def lifespan(app: FastAPI):
         print(f"Error starting Telegram transport: {e}")
         # Don't fail startup — Telegram is optional
 
+    # Start WhatsApp (Twilio) webhook transport (WHATSAPP-001)
+    try:
+        from adapters.whatsapp_adapter import WhatsAppAdapter
+        from adapters.transports.twilio_webhook import (
+            TwilioWebhookTransport,
+            backfill_webhook_urls as backfill_whatsapp_webhook_urls,
+        )
+        from adapters.message_router import message_router
+        from routers.whatsapp import set_webhook_transport as set_whatsapp_webhook_transport
+
+        _whatsapp_adapter = WhatsAppAdapter()
+        _whatsapp_transport = TwilioWebhookTransport(_whatsapp_adapter, message_router)
+        await _whatsapp_transport.start()
+        set_whatsapp_webhook_transport(_whatsapp_transport)
+        app.state.whatsapp_transport = _whatsapp_transport
+
+        # Backfill webhook_url for existing bindings so UI displays the current URL
+        from services.settings_service import settings_service as _settings_svc
+        public_url = _settings_svc.get_setting("public_chat_url", "")
+        if public_url:
+            backfill_whatsapp_webhook_urls(public_url)
+            bindings = db.get_all_whatsapp_bindings()
+            print(f"WhatsApp transport ready ({len(bindings)} binding(s); webhook URLs refreshed)")
+        else:
+            print("WhatsApp transport ready (no public URL — webhook URLs not computed)")
+    except Exception as e:
+        print(f"Error starting WhatsApp transport: {e}")
+        # Don't fail startup — WhatsApp is optional
+
     yield
 
     # NOTE: Embedded scheduler shutdown removed - scheduler runs in dedicated container
@@ -548,6 +578,15 @@ async def lifespan(app: FastAPI):
             print("Telegram transport stopped")
     except Exception as e:
         print(f"Error stopping Telegram transport: {e}")
+
+    # Shutdown WhatsApp transport
+    try:
+        whatsapp_transport = getattr(app.state, 'whatsapp_transport', None)
+        if whatsapp_transport:
+            await whatsapp_transport.stop()
+            print("WhatsApp transport stopped")
+    except Exception as e:
+        print(f"Error stopping WhatsApp transport: {e}")
 
 
     # Shutdown sync health service (#389)
@@ -681,6 +720,8 @@ app.include_router(slack_public_router)  # Slack Integration Public (SLACK-001)
 app.include_router(slack_auth_router)  # Slack Integration Auth (SLACK-001)
 app.include_router(telegram_public_router)  # Telegram Integration Public (TELEGRAM-001)
 app.include_router(telegram_auth_router)  # Telegram Integration Auth (TELEGRAM-001)
+app.include_router(whatsapp_public_router)  # WhatsApp via Twilio Public (WHATSAPP-001)
+app.include_router(whatsapp_auth_router)  # WhatsApp via Twilio Auth (WHATSAPP-001)
 app.include_router(paid_router)  # Nevermined Paid Chat (NVM-001)
 app.include_router(nevermined_router)  # Nevermined Admin Config (NVM-001)
 app.include_router(image_generation_router)  # Image Generation (IMG-001)

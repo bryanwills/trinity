@@ -857,6 +857,56 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Frontend**: TelegramChannelPanel extended with group list, trigger mode radio, welcome message config
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
 
+### 15.1f WhatsApp via Twilio (WHATSAPP-001)
+- **Status**: 🚧 Phase 1 MVP (2026-04-22)
+- **Requirement ID**: WHATSAPP-001
+- **Priority**: P2
+- **Issue**: #299
+- **Description**: Per-agent WhatsApp integration via Twilio's Programmable Messaging API. Each agent owner brings their own Twilio account + WhatsApp sender number — no platform-level Twilio account required. Extends the `ChannelAdapter` abstraction from SLACK-002.
+- **Phase 1 (shipped — this PR)**:
+  - Direct-message chat: inbound via Twilio webhook → agent → outbound via Twilio REST (`POST /Messages.json`)
+  - Frontend: `WhatsAppChannelPanel.vue` in Agent Detail → Sharing tab (connect form with AccountSid/AuthToken/from-number, sandbox detection, copy-webhook-URL button, disconnect/verify)
+  - Credentials: AuthToken encrypted AES-256-GCM via `CredentialEncryptionService`; AccountSid plaintext (public identifier)
+  - Webhook: dual-factor auth — URL `webhook_secret` routes to binding, `X-Twilio-Signature` HMAC-SHA1 validated via `twilio.request_validator.RequestValidator` (handles Twilio's empty-param inclusion gotcha)
+  - Dedup by `MessageSid` (2048-entry in-memory ring) to absorb Twilio retries
+  - Media inbound: images/audio/PDFs via Twilio-hosted URLs with HTTP Basic auth; SSRF-gated to `*.twilio.com` domain suffix; `follow_redirects=False` with allowlisted single-redirect follow for signed-URL media
+  - Message splitting at 1600-char Twilio WhatsApp limit (paragraph → sentence → word boundaries)
+  - Sandbox auto-detection from well-known number `whatsapp:+14155238886`
+  - Empty TwiML (`<Response/>`) returned to Twilio ack; response delivered asynchronously via REST (no TwiML body response path)
+- **Phase 2 (deferred)**:
+  - `#311` unified access control: `/login <email>` command flow, verified-email gate, `access_requests` pipeline (schema columns `verified_email`/`verified_at` shipped up-front so Phase 2 is application-only)
+- **Phase 3 (deferred)**:
+  - SMS on the same Twilio binding (drop `whatsapp:` prefix)
+  - Message templates for outbound-first conversations outside the 24h customer-service window (Twilio Content Builder)
+  - Interactive buttons and list messages (Twilio Content API)
+  - Voice-note transcription (Whisper API)
+  - Outbound file sharing
+- **Out of scope**:
+  - WhatsApp group chats — not supported by Twilio's WhatsApp API
+  - Meta Cloud API direct integration — future alternative; not this PR
+- **Database Tables**:
+  - `whatsapp_bindings` — One Twilio sender per agent (account_sid, auth_token_encrypted, from_number, messaging_service_sid, is_sandbox, webhook_secret, webhook_url, created_by)
+  - `whatsapp_chat_links` — WhatsApp phone → session map (binding_id, wa_user_phone, wa_user_name, verified_email, verified_at, message_count)
+- **API Endpoints**:
+  - `POST /api/whatsapp/webhook/{webhook_secret}` — Twilio inbound webhook (HMAC-SHA1 validated)
+  - `GET /api/agents/{name}/whatsapp` — Binding status (includes computed webhook URL + warning)
+  - `PUT /api/agents/{name}/whatsapp` — Configure credentials (validates via Twilio Account fetch)
+  - `DELETE /api/agents/{name}/whatsapp` — Remove binding (cascades to chat_links)
+  - `POST /api/agents/{name}/whatsapp/test` — Verify credentials / send test message
+- **Security**:
+  - AuthToken AES-256-GCM encrypted at rest; never logged in full
+  - Webhook signature verification via `twilio>=9.10.5` `RequestValidator` (constant-time compare)
+  - SSRF allowlist on media downloads: `*.twilio.com` only, no redirects to other hosts
+  - Phone number masking in logs: `whatsapp:+141***5309`
+  - Unknown webhook secrets return 200 empty TwiML (no binding-existence oracle)
+  - Rate limiting via `ChannelMessageRouter` defaults (30 msg/min per sender)
+  - Webhook auth requires uvicorn `--proxy-headers --forwarded-allow-ips='*'` so `request.url` reconstructs correctly behind Cloudflare Tunnel + nginx (shipped in this PR's `docker/backend/Dockerfile`)
+- **Deployment prerequisite**:
+  - Cloudflare Tunnel ingress rules must route `/api/whatsapp/webhook/*` to the frontend service (manual dashboard step — see `docs/requirements/PUBLIC_EXTERNAL_ACCESS_SETUP.md`)
+- **Dependencies**:
+  - `twilio==9.10.5` — used only for `RequestValidator` (signature verification); outbound send stays in `httpx` matching the Telegram pattern
+- **Flow**: `docs/memory/feature-flows/whatsapp-integration.md`
+
 ### 15.1d Public Chat Session Memory (PUB-006)
 - **Status**: ⏳ Not Started
 - **Requirement ID**: PUB-006

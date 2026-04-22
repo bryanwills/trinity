@@ -141,6 +141,8 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `paid.py` - x402 payment-gated chat (NVM-001)
 - `nevermined.py` - Nevermined payment config management
 - `slack.py` - Slack integration (OAuth, events, multi-agent channel routing, per-agent channel binding) (SLACK-001/002)
+- `telegram.py` - Telegram bot integration (webhook receiver, bot binding, group config) (TELEGRAM-001/TGRAM-GROUP)
+- `whatsapp.py` - WhatsApp via Twilio (webhook receiver, binding CRUD + test) (WHATSAPP-001)
 - `messages.py` - Proactive agent-to-user messaging (#321)
 
 *Subscriptions & Skills:*
@@ -208,8 +210,18 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `transports/slack_socket.py` - Socket Mode transport (WebSocket, auto-reconnect, default)
 - `transports/slack_webhook.py` - HTTP webhook transport (fallback for production)
 
+*Telegram:*
+- `telegram_adapter.py` - Telegram adapter: DMs, group chats (@mention/observe modes), voice transcription, /login flow
+- `transports/telegram_webhook.py` - Telegram Bot API webhook (inbound POST + setWebhook registration)
+
+*WhatsApp (via Twilio):*
+- `whatsapp_adapter.py` - WhatsApp adapter: DMs via Twilio (WHATSAPP-001); media with SSRF-gated downloads
+- `transports/twilio_webhook.py` - Twilio webhook transport: HMAC-SHA1 signature (via `twilio.request_validator`), MessageSid dedup, form-encoded body
+
 *Database:*
 - `db/slack_channels.py` - Workspace connections (encrypted bot tokens), channel-agent bindings, active threads
+- `db/telegram_channels.py` - Telegram bindings (encrypted bot tokens), group configs, chat links
+- `db/whatsapp_channels.py` - WhatsApp (Twilio) bindings (encrypted AuthToken), chat links
 
 *Content & Media:*
 - `image_generation_service.py` - Platform image generation via Gemini (prompt refinement + image gen) (IMG-001)
@@ -688,7 +700,7 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 8. **Auth Pattern: `Depends(get_current_user)` + `AuthorizedAgent`** — Every authenticated endpoint uses FastAPI `Depends()` for auth. Agent-scoped endpoints use `AuthorizedAgent` or `OwnedAgentByName` for access control. Role-gated endpoints use `require_role("creator")` or `require_admin` (ROLE-001). `internal.py` is the only exception (no auth, for agent-to-backend calls).
 
-9. **Channel Adapter ABC** — External messaging (Slack, Telegram) follows `adapters/base.py` → `ChannelAdapter` ABC with `NormalizedMessage` and `ChannelResponse`. New channels must implement this interface.
+9. **Channel Adapter ABC** — External messaging (Slack, Telegram, WhatsApp/Twilio) follows `adapters/base.py` → `ChannelAdapter` ABC with `NormalizedMessage` and `ChannelResponse`. New channels must implement this interface.
 
 10. **WebSocket Events for Real-Time** — All real-time updates go through WebSocket broadcast (`agent_activity`, `agent_collaboration`). Frontend subscribes via `utils/websocket.js`. Don't poll for state that should be pushed. Transport is the Redis Streams event bus in `services/event_bus.py` (RELIABILITY-003, #306) — `ConnectionManager` / `FilteredWebSocketManager` are thin shims that `XADD` to `trinity:events`; the `StreamDispatcher` runs one `XREAD BLOCK` per backend process and fans out to registered clients. New broadcast sites should continue calling the existing `manager.broadcast(...)` / `filtered_manager.broadcast_filtered(...)` API — do not bypass it to publish directly.
 
@@ -1035,6 +1047,51 @@ CREATE TABLE slack_active_threads (
     UNIQUE(team_id, channel_id, thread_ts)
 );
 ```
+
+**whatsapp_bindings:** (WHATSAPP-001 — Twilio WhatsApp integration, NEW: 2026-04-22)
+```sql
+CREATE TABLE whatsapp_bindings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL UNIQUE,
+    account_sid TEXT NOT NULL,                 -- Twilio AccountSid (public)
+    auth_token_encrypted TEXT NOT NULL,        -- AES-256-GCM
+    from_number TEXT NOT NULL,                 -- 'whatsapp:+E164'
+    messaging_service_sid TEXT,                -- optional; preferred over from_number
+    display_name TEXT,                         -- friendly_name from Twilio Account fetch
+    is_sandbox INTEGER DEFAULT 0,              -- auto-detected from from_number
+    webhook_secret TEXT NOT NULL UNIQUE,       -- 32-byte token_urlsafe
+    webhook_url TEXT,                          -- computed from public_chat_url
+    enabled INTEGER DEFAULT 1,
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+);
+CREATE INDEX idx_whatsapp_bindings_agent ON whatsapp_bindings(agent_name);
+CREATE INDEX idx_whatsapp_bindings_webhook ON whatsapp_bindings(webhook_secret);
+
+CREATE TABLE whatsapp_chat_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    binding_id INTEGER NOT NULL REFERENCES whatsapp_bindings(id),
+    wa_user_phone TEXT NOT NULL,               -- 'whatsapp:+E164'
+    wa_user_name TEXT,                         -- Twilio ProfileName
+    session_id TEXT,
+    verified_email TEXT,                       -- #311 Phase 2 (shipped up-front)
+    verified_at TEXT,
+    message_count INTEGER DEFAULT 0,
+    last_active TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(binding_id, wa_user_phone)
+);
+CREATE INDEX idx_whatsapp_chat_links_binding ON whatsapp_chat_links(binding_id);
+```
+
+**whatsapp_bindings Features:**
+- One Twilio sender per agent; each agent owner brings their own Twilio account (no platform-level Twilio account required)
+- AuthToken encrypted at rest via `CredentialEncryptionService` (same pattern as Slack/Telegram)
+- Webhook verification: dual-factor (URL `webhook_secret` + HMAC-SHA1 via `twilio.request_validator.RequestValidator`)
+- Twilio Sandbox auto-detected from well-known sender `whatsapp:+14155238886`
+- Media downloads SSRF-gated to `*.twilio.com` domain suffix
+- Phase 1 is DMs only (Twilio's WhatsApp API does not support groups); access control wiring columns (`verified_email`, `verified_at`) shipped up-front so Phase 2 (#311) is additive application-only code
 
 **operator_queue:** (OPS-001 - Operating Room, NEW: 2026-03-07)
 ```sql

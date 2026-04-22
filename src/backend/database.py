@@ -128,6 +128,7 @@ from db.nevermined import NeverminedOperations
 from db.operator_queue import OperatorQueueOperations
 from db.event_subscriptions import EventSubscriptionOperations
 from db.telegram_channels import TelegramChannelOperations
+from db.whatsapp_channels import WhatsAppChannelOperations
 from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.sync_state import SyncStateOperations
@@ -281,6 +282,7 @@ class DatabaseManager:
         self._operator_queue_ops = OperatorQueueOperations()
         self._event_subscription_ops = EventSubscriptionOperations()
         self._telegram_channel_ops = TelegramChannelOperations()
+        self._whatsapp_channel_ops = WhatsAppChannelOperations()
         self._access_request_ops = AccessRequestOperations()
         self._audit_ops = PlatformAuditOperations()
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
@@ -1577,6 +1579,46 @@ class DatabaseManager:
 
     def clear_telegram_group_verification(self, binding_id, chat_id):
         return self._telegram_channel_ops.clear_group_verification(binding_id, chat_id)
+
+    # =========================================================================
+    # WhatsApp (Twilio) Integration (delegated to db/whatsapp_channels.py) - WHATSAPP-001
+    # =========================================================================
+
+    def create_whatsapp_binding(self, agent_name, account_sid, auth_token, from_number,
+                                messaging_service_sid=None, display_name=None, created_by=None):
+        return self._whatsapp_channel_ops.create_binding(
+            agent_name, account_sid, auth_token, from_number,
+            messaging_service_sid, display_name, created_by,
+        )
+
+    def get_whatsapp_binding(self, agent_name):
+        return self._whatsapp_channel_ops.get_binding_by_agent(agent_name)
+
+    def get_whatsapp_binding_by_webhook_secret(self, webhook_secret):
+        return self._whatsapp_channel_ops.get_binding_by_webhook_secret(webhook_secret)
+
+    def get_whatsapp_auth_token(self, agent_name):
+        return self._whatsapp_channel_ops.get_decrypted_auth_token(agent_name)
+
+    def get_all_whatsapp_bindings(self):
+        return self._whatsapp_channel_ops.get_all_bindings()
+
+    def update_whatsapp_webhook_url(self, agent_name, webhook_url):
+        return self._whatsapp_channel_ops.update_webhook_url(agent_name, webhook_url)
+
+    def delete_whatsapp_binding(self, agent_name):
+        return self._whatsapp_channel_ops.delete_binding(agent_name)
+
+    def get_or_create_whatsapp_chat_link(self, binding_id, wa_user_phone, wa_user_name=None):
+        return self._whatsapp_channel_ops.get_or_create_chat_link(
+            binding_id, wa_user_phone, wa_user_name
+        )
+
+    def get_whatsapp_verified_email(self, binding_id, wa_user_phone):
+        return self._whatsapp_channel_ops.get_verified_email(binding_id, wa_user_phone)
+
+    def increment_whatsapp_message_count(self, chat_link_id):
+        return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
 
     # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001

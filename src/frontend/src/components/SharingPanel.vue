@@ -216,6 +216,12 @@
     <!-- Divider -->
     <div class="border-t border-gray-200 dark:border-gray-700"></div>
 
+    <!-- WhatsApp (Twilio) Section -->
+    <WhatsAppChannelPanel :agent-name="agentName" />
+
+    <!-- Divider -->
+    <div class="border-t border-gray-200 dark:border-gray-700"></div>
+
     <!-- Public Links Section -->
     <PublicLinksPanel :agent-name="agentName" />
   </div>
@@ -231,6 +237,7 @@ import { useNotification } from '../composables'
 import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
+import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 
 const props = defineProps({
   agentName: {

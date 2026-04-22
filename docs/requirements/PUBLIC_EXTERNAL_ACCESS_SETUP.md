@@ -43,6 +43,7 @@ Configure these paths in Cloudflare dashboard ingress rules:
 | `/chat/*` | `http://frontend:80` | Public chat UI |
 | `/api/public/*` | `http://backend:8000` | Public API + Slack OAuth callback |
 | `/api/telegram/webhook/*` | `http://backend:8000` | Telegram bot webhooks |
+| `/api/whatsapp/webhook/*` | `http://backend:8000` | Twilio WhatsApp inbound webhooks |
 | `/api/paid/*/chat` | `http://backend:8000` | Nevermined paid chat |
 | `/api/paid/*/info` | `http://backend:8000` | Payment info (public) |
 | `/assets/*` | `http://frontend:80` | Static assets (JS, CSS) |
@@ -238,8 +239,8 @@ dig CNAME public.your-domain.com +short
 | **Tunnel (outbound only)** | No inbound ports, no public IP exposure |
 | **Path filtering** | Only public routes exposed via Cloudflare config |
 | **Token security** | 192-bit random strings for public chat links |
-| **Webhook auth** | Dual-layer: URL secret + header secret (Telegram) |
-| **Signature verification** | HMAC-SHA256 (Slack, Process webhooks) |
+| **Webhook auth** | Dual-layer: URL secret + header secret (Telegram), URL secret + HMAC-SHA1 (Twilio/WhatsApp) |
+| **Signature verification** | HMAC-SHA256 (Slack, Process webhooks), HMAC-SHA1 (Twilio — via `twilio.request_validator.RequestValidator`) |
 | **Rate limiting** | 30-60 req/min per IP (backend) |
 
 ---

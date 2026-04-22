@@ -36,7 +36,8 @@ RUN pip install --no-cache-dir \
     opentelemetry-instrumentation-fastapi==0.50b0 \
     opentelemetry-instrumentation-httpx==0.50b0 \
     opentelemetry-instrumentation-redis==0.50b0 \
-    python-magic==0.4.27
+    python-magic==0.4.27 \
+    twilio==9.10.5
 
 # Copy all backend source files
 COPY ../../src/backend/main.py /app/
@@ -65,5 +66,5 @@ RUN chmod -R 644 /app/*.py && \
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--proxy-headers", "--forwarded-allow-ips=*"]
 

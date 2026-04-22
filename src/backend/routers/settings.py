@@ -1281,6 +1281,14 @@ async def update_setting(
         # and receive no messages. Re-registering is idempotent (setWebhook on Telegram).
         if key == "public_chat_url" and body.value:
             await _backfill_telegram_webhooks(body.value)
+            # Same back-fill for WhatsApp — refreshes the URL shown to the user
+            # for pasting into Twilio Console. (Twilio doesn't have a setWebhook
+            # API equivalent — users paste the URL manually.)
+            try:
+                from adapters.transports.twilio_webhook import backfill_webhook_urls as _wa_backfill
+                _wa_backfill(body.value)
+            except Exception as e:
+                logger.warning(f"WhatsApp webhook URL back-fill skipped: {e}")
 
         return setting
     except Exception as e:

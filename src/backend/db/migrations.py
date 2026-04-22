@@ -1513,6 +1513,60 @@ def _find_duplicate_working_branches(cursor):
     return duplicates
 
 
+def _migrate_whatsapp_bindings(cursor, conn):
+    """Create WhatsApp (Twilio) channel tables (WHATSAPP-001).
+
+    - whatsapp_bindings: one Twilio sender per agent (AccountSid + encrypted AuthToken + from_number).
+    - whatsapp_chat_links: WhatsApp user phone → session map, includes verified_email for unified
+      access control (#311). Columns added up-front so Phase 2 is additive code only.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS whatsapp_bindings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL UNIQUE,
+            account_sid TEXT NOT NULL,
+            auth_token_encrypted TEXT NOT NULL,
+            from_number TEXT NOT NULL,
+            messaging_service_sid TEXT,
+            display_name TEXT,
+            is_sandbox INTEGER DEFAULT 0,
+            webhook_secret TEXT NOT NULL UNIQUE,
+            webhook_url TEXT,
+            enabled INTEGER DEFAULT 1,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_whatsapp_bindings_agent ON whatsapp_bindings(agent_name)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_whatsapp_bindings_webhook ON whatsapp_bindings(webhook_secret)"
+    )
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS whatsapp_chat_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            binding_id INTEGER NOT NULL REFERENCES whatsapp_bindings(id),
+            wa_user_phone TEXT NOT NULL,
+            wa_user_name TEXT,
+            session_id TEXT,
+            verified_email TEXT,
+            verified_at TEXT,
+            message_count INTEGER DEFAULT 0,
+            last_active TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(binding_id, wa_user_phone)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_whatsapp_chat_links_binding ON whatsapp_chat_links(binding_id)"
+    )
+
+    conn.commit()
+
+
 def _migrate_agent_git_config_branch_ownership(cursor, conn):
     """Add partial UNIQUE index to agent_git_config enforcing branch ownership (S7 Layer 2 / #382).
 
@@ -1623,4 +1677,5 @@ MIGRATIONS = [
     ("proactive_messaging", _migrate_proactive_messaging),
     ("agent_git_config_branch_ownership", _migrate_agent_git_config_branch_ownership),
     ("sync_health", _migrate_sync_health),
+    ("whatsapp_bindings", _migrate_whatsapp_bindings),
 ]
