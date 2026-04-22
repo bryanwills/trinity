@@ -459,19 +459,17 @@ async def initialize_git_in_container(
     # Otherwise use home directory directly (new standard)
     git_dir = "/home/developer/workspace" if workspace_has_content else "/home/developer"
 
-    # Step 2: Create .gitignore (standard path - /home/developer)
-    if git_dir == "/home/developer":
-        gitignore_content = """# Exclude sensitive and temporary files
-.bash_logout
-.bashrc
-.profile
-.bash_history
-.cache/
-.local/
-.npm/
-.ssh/
-"""
-        execute_command_in_container(...)
+    # Step 2: Append any missing _GITIGNORE_PATTERNS entries to .gitignore
+    # (issue #458). Runs for BOTH /home/developer and the legacy
+    # /home/developer/workspace path. The merge is idempotent — each
+    # pattern is gated by an exact-line `grep -qxF` check — so any
+    # workspace-supplied `.gitignore` (e.g. written by `/trinity:onboard`)
+    # is preserved. Patterns: .bash_logout, .bashrc, .profile,
+    # .bash_history, .cache/, .local/, .npm/, .ssh/, .env, .env.*, .mcp.json.
+    execute_command_in_container(
+        command=_build_gitignore_merge_command(git_dir),
+        timeout=5,
+    )
 
     # Step 3-6: Git commands (lines 329-356)
     commands = [
@@ -1099,8 +1097,9 @@ sqlite3 ~/trinity-data/trinity.db "SELECT key, substr(value, 1, 10) || '...' FRO
 # - Private badge (if selected)
 # - Two branches: main, trinity/test-agent/xxxxxxxx
 # - Commits on both branches
-# - Agent files: CLAUDE.md, .claude/, .trinity/, .mcp.json
-# - .gitignore excludes: .bashrc, .cache/, .ssh/ (if using home directory)
+# - Agent files: CLAUDE.md, .claude/, .trinity/
+# - .gitignore excludes: .bashrc, .cache/, .ssh/, .env, .env.*, .mcp.json
+# - .env and .mcp.json are NOT in the initial commit (#458)
 ```
 
 **Verify in Database**:
@@ -1181,13 +1180,15 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 **Expected**:
 - System uses `/home/developer` directly (no workspace subdirectory)
 - Backend logs: `Using home directory: /home/developer`
-- `.gitignore` created with system file exclusions
-- Agent files (CLAUDE.md, .claude/, .trinity/, .mcp.json) pushed to GitHub
-- System files (.bashrc, .ssh/, .cache/) excluded via .gitignore
+- `.gitignore` contains system file exclusions plus `.env`, `.env.*`, `.mcp.json` (#458)
+- Agent files (CLAUDE.md, .claude/, .trinity/) pushed to GitHub
+- `.env` and `.mcp.json` written by `inject_credentials` are excluded
+- Pre-existing workspace `.gitignore` rules (e.g. from `/trinity:onboard`) are preserved
 
 **LEGACY Case** (agents created before 2026-02):
 - If `/home/developer/workspace/` exists with content, that directory is used
 - Backend logs: `Using workspace directory: /home/developer/workspace`
+- `.gitignore` merge also runs here (#458 — previously skipped)
 
 **Verify**:
 - Check GitHub repo contains agent files but not system files
@@ -1341,6 +1342,21 @@ docker exec agent-{name} bash -c "[ -d /home/developer/.git ] && echo exists || 
 - Fixed timeout issue: Increased frontend timeout to 120 seconds + console logging
 - Fixed verification: Git initialization verified before DB insert
 - Fixed system files: Created .gitignore to exclude .bashrc, .ssh/, etc.
+
+**Bug Fix 2026-04-22 (#458) — P0 credential leak**:
+- Previously `.gitignore` was written with `cat > .gitignore <<EOF` (truncate-
+  and-write), clobbering any pre-existing workspace `.gitignore` (including
+  rules written by `/trinity:onboard`), and the hardcoded list contained only
+  shell/cache entries — so `.env` and `.mcp.json` (written into the container
+  by `inject_credentials`) landed in the initial commit.
+- Fix in `services/git_service.py`: new `_GITIGNORE_PATTERNS` tuple plus
+  `_build_gitignore_merge_command()` helper. The merge uses `touch .gitignore`
+  followed by `grep -qxF <pattern> .gitignore || echo <pattern> >> .gitignore`
+  per entry — idempotent, append-only. The three new patterns beyond the
+  prior shell/cache list are `.env`, `.env.*`, and `.mcp.json` (the files the
+  #458 bug report named). Runs for BOTH `/home/developer` and the legacy
+  `/home/developer/workspace` path (previously the legacy branch skipped it).
+- Regression tests: `tests/unit/test_github_init_gitignore.py`.
 
 **Test Coverage**:
 - Settings UI: PAT configuration and testing

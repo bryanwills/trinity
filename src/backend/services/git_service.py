@@ -11,6 +11,7 @@ import asyncio
 import httpx
 import os
 import re
+import shlex
 import sqlite3
 import uuid
 import logging
@@ -642,6 +643,39 @@ def delete_agent_git_config(agent_name: str) -> bool:
 # Git Initialization in Container
 # ============================================================================
 
+# Hardcoded patterns merged (append-if-missing) into the agent's `.gitignore`
+# at init time. Ordering is preserved in the file so operators reading it see
+# the legacy shell/cache entries first followed by the credential files that
+# `inject_credentials` writes (the trio the #458 bug report named).
+_GITIGNORE_PATTERNS: Tuple[str, ...] = (
+    ".bash_logout",
+    ".bashrc",
+    ".profile",
+    ".bash_history",
+    ".cache/",
+    ".local/",
+    ".npm/",
+    ".ssh/",
+    ".env",
+    ".env.*",
+    ".mcp.json",
+)
+
+
+def _build_gitignore_merge_command(git_dir: str) -> str:
+    """Build a bash command that appends any missing ``_GITIGNORE_PATTERNS``
+    entries to ``{git_dir}/.gitignore`` without clobbering user-supplied
+    rules. Idempotent — each pattern is gated by an exact-line ``grep -qxF``
+    check, so a second run is a no-op.
+    """
+    parts = [f"cd {shlex.quote(git_dir)}", "touch .gitignore"]
+    for p in _GITIGNORE_PATTERNS:
+        q = shlex.quote(p)
+        parts.append(f"(grep -qxF -- {q} .gitignore || echo {q} >> .gitignore)")
+    script = " && ".join(parts)
+    return f"bash -c {shlex.quote(script)}"
+
+
 @dataclass
 class GitInitResult:
     """Result of git initialization in container."""
@@ -714,23 +748,17 @@ async def initialize_git_in_container(
         git_dir = "/home/developer"
         logger.info(f"Using home directory: {git_dir}")
 
-    # Step 2: Create .gitignore (if using home directory)
-    if git_dir == "/home/developer":
-        gitignore_content = """# Exclude sensitive and temporary files
-.bash_logout
-.bashrc
-.profile
-.bash_history
-.cache/
-.local/
-.npm/
-.ssh/
-"""
-        await execute_command_in_container(
-            container_name=container_name,
-            command=f'bash -c "cat > {git_dir}/.gitignore << \'GITIGNORE_EOF\'\n{gitignore_content}\nGITIGNORE_EOF\n"',
-            timeout=5
-        )
+    # Step 2: Append any missing `_GITIGNORE_PATTERNS` entries to the
+    # agent's `.gitignore`. Runs for BOTH `/home/developer` and the legacy
+    # `/home/developer/workspace` path — previously the legacy branch was
+    # skipped entirely, and the home path used `cat > .gitignore` which
+    # clobbered any workspace-supplied rules (including `.env` / `.mcp.json`
+    # added by `/trinity:onboard`). The merge is idempotent.
+    await execute_command_in_container(
+        container_name=container_name,
+        command=_build_gitignore_merge_command(git_dir),
+        timeout=5,
+    )
 
     # Step 3: Initialize git and try to preserve remote history
     # Commands marked required=True will abort on failure;
