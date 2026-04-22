@@ -433,8 +433,10 @@ async def public_chat(
                 status_code=401,
                 detail="Invalid or expired session. Please verify your email again."
             )
-        verified_email = email
-        session_identifier = email.lower()
+        # Defensive normalization (#446): ensure gate compares lowercased emails
+        # even if the stored session email contained unexpected casing/whitespace.
+        verified_email = (email or "").strip().lower()
+        session_identifier = verified_email
         identifier_type = "email"
 
         # Unified cross-channel access gate (#311) — same logic as

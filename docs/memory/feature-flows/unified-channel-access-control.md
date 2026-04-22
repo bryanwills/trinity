@@ -145,21 +145,24 @@ New ops class (not a mixin — `access_requests` is its own domain table):
 | `decide(request_id, approve, decided_by_user_id)` | Sets `status` to `approved` or `denied`, stamps `decided_by` and `decided_at`. |
 | `delete_for_agent(agent_name)` | Cascade delete on agent removal. |
 
-### Extended `AgentSharingMixin` (`src/backend/db/agent_settings/sharing.py:121-148`)
+### Extended `AgentSharingMixin` (`src/backend/db/agent_settings/sharing.py`)
 
-Two new helpers — both are lookups by **email** (not by username), which is the cross-channel identity:
+Two helpers — both are lookups by **email** (not by username), which is the cross-channel identity. Defensive input normalization (`.strip().lower()`) was added at the gate boundary (#446) so mixed-case session emails cannot slip past the allow-list match:
 
 ```python
 def is_agent_shared_with_email(self, agent_name, email) -> bool:
-    """Direct hit on agent_sharing.shared_with_email."""
+    """Direct hit on agent_sharing.shared_with_email (strip+lower input)."""
 
 def email_has_agent_access(self, agent_name, email) -> bool:
     """Cross-channel access check (#311).
     True if email is owner, admin, or in agent_sharing.
+    Normalizes email at the boundary (strip+lower) for #446.
     """
 ```
 
-`email_has_agent_access` is the single function the channel router calls to check authorization.
+`email_has_agent_access` is the single function the channel router calls to check authorization. Both gate call sites (`routers/public.py` and `adapters/message_router.py`) also normalize `verified_email` at the router boundary for #446 defense-in-depth and consistent logging.
+
+**Team share clears stale pending (#446)**: `share_agent` now atomically deletes any `access_requests` row with `status='pending'` for the same `(agent_name, email)` in the same transaction as the `agent_sharing` insert. This ensures the owner's Pending list reflects reality when an email is manually added to Team Sharing after a prior public-chat attempt. Approved/denied rows are left untouched as audit trail.
 
 ### Extended `TelegramChannelOperations` (`src/backend/db/telegram_channels.py:242-309`)
 
@@ -621,6 +624,7 @@ Working. Telegram, Slack, and web public-chat all run the same gate.
 
 | Date | Changes |
 |------|---------|
+| 2026-04-22 | **#446 — team-share gate hardening + Sharing UX**: (1) `share_agent` now deletes any stale pending `access_requests` row for the same `(agent, email)` atomically with the share insert, so a manual Team Share add clears the owner's Pending list. (2) Defense-in-depth email normalization (`.strip().lower()`) added in `email_has_agent_access`, `is_agent_shared_with_email`, `routers/public.py` gate, and both DM+group branches of `adapters/message_router.py` so mixed-case session emails can't bypass the allow-list. (3) `SharingPanel.vue` restructured: new framing banner distinguishes "Identity proof" (verify who the user is) from "Authorization" (allow-list + approval queue); "Team Sharing" heading tagged "— allow-list"; dead-end warning banner when `require_email=true && !open_access && shares.length===0`. New unit tests: `tests/test_team_share_gate_unit.py` (8 tests). |
 | 2026-04-12 | Initial implementation (#311). New migration `access_control`, `AccessPolicyMixin`, `AccessRequestOperations`, ABC additions, Telegram `/login` state machine, Slack `users.info` resolver, four owner endpoints, SharingPanel UI. |
 | 2026-04-13 | Web public-chat unified. `routers/public.py` now runs the same gate as `message_router.py`, keyed on `agent_ownership.require_email` instead of per-link `agent_public_links.require_email`. New migration `public_link_require_email_unified` ORs legacy per-link flags into the agent-level flag. Access requests from web use `channel="web"`. Closes the #252 follow-up. |
 | 2026-04-15 | Group authentication mode. New `group_auth_mode` field (`"none"` or `"any_verified"`) on access policy. When `any_verified`, groups require at least one verified member before the bot responds. New migration `group_auth_mode` adds column to `agent_ownership` and `verified_by_email`/`verified_at` to `telegram_group_configs`. New ABC methods: `is_group_verified()`, `set_group_verified()`, `prompt_group_auth()`. Router gate applies group auth when `is_group=True`. |

@@ -296,6 +296,10 @@ class ChannelMessageRouter:
                         logger.warning(f"[ROUTER:{channel}] resolve_verified_email error: {e}")
                         verified_email = None
 
+                    # #446 defensive normalization at router boundary.
+                    if verified_email:
+                        verified_email = verified_email.strip().lower() or None
+
                     if verified_email:
                         # Sender is verified — unlock the group
                         await adapter.set_group_verified(message, agent_name, verified_email)
@@ -318,6 +322,12 @@ class ChannelMessageRouter:
             except Exception as e:
                 logger.warning(f"[ROUTER:{channel}] resolve_verified_email error: {e}")
                 verified_email = None
+
+            # Defensive normalization (#446): downstream `email_has_agent_access`
+            # already lowercases, but normalizing at the router boundary keeps
+            # all gate checks and any logging consistent.
+            if verified_email:
+                verified_email = verified_email.strip().lower() or None
 
             require_email = policy.get("require_email", False)
             open_access = policy.get("open_access", False)

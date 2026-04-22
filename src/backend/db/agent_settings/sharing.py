@@ -34,6 +34,8 @@ class SharingMixin:
         Share an agent with another user by email.
         - Validates owner has permission to share
         - Creates sharing record with email (user doesn't need to exist yet)
+        - Clears any stale pending access_requests row for the same email+agent
+          so the owner's "Pending Access Requests" list reflects reality (#446).
         - Returns share details or None if failed
         """
         # Get owner and validate permission
@@ -45,9 +47,13 @@ class SharingMixin:
         if not self.can_user_share_agent(owner_username, agent_name):
             return None
 
+        normalized_email = (share_with_email or "").strip().lower()
+        if not normalized_email:
+            return None
+
         # Prevent self-sharing (check if owner's email matches target email)
-        owner_email = owner.get("email") or ""
-        if owner_email and owner_email.lower() == share_with_email.lower():
+        owner_email = (owner.get("email") or "").strip().lower()
+        if owner_email and owner_email == normalized_email:
             return None
 
         now = utc_now_iso()
@@ -58,14 +64,21 @@ class SharingMixin:
                 cursor.execute("""
                     INSERT INTO agent_sharing (agent_name, shared_with_email, shared_by_id, created_at)
                     VALUES (?, ?, ?, ?)
-                """, (agent_name, share_with_email.lower(), owner["id"], now))
+                """, (agent_name, normalized_email, owner["id"], now))
+                # #446: once the email is on the allow-list, any pending access
+                # request for the same (agent, email) is stale — drop it so the
+                # owner's Pending list doesn't double-prompt them.
+                cursor.execute("""
+                    DELETE FROM access_requests
+                    WHERE agent_name = ? AND email = ? AND status = 'pending'
+                """, (agent_name, normalized_email))
                 conn.commit()
                 share_id = cursor.lastrowid
 
                 return AgentShare(
                     id=share_id,
                     agent_name=agent_name,
-                    shared_with_email=share_with_email.lower(),
+                    shared_with_email=normalized_email,
                     shared_by_id=owner["id"],
                     shared_by_email=owner.get("email") or owner.get("username") or "unknown",
                     created_at=datetime.fromisoformat(now)
@@ -123,32 +136,36 @@ class SharingMixin:
 
     def is_agent_shared_with_email(self, agent_name: str, email: str) -> bool:
         """Check if an agent is shared with the given email directly."""
-        if not email:
+        normalized = (email or "").strip().lower()
+        if not normalized:
             return False
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT 1 FROM agent_sharing
                 WHERE agent_name = ? AND shared_with_email = ?
-            """, (agent_name, email.lower()))
+            """, (agent_name, normalized))
             return cursor.fetchone() is not None
 
     def email_has_agent_access(self, agent_name: str, email: str) -> bool:
         """Cross-channel access check (Issue #311).
 
         Returns True when the email is owner, admin, or in agent_sharing for
-        the given agent. Used by the channel router gate.
+        the given agent. Used by the channel router gate. Defensive
+        normalization (#446): strip + lowercase at the boundary so
+        mixed-case session emails can't bypass the allow-list match.
         """
-        if not email:
+        normalized = (email or "").strip().lower()
+        if not normalized:
             return False
-        user = self._user_ops.get_user_by_email(email)
+        user = self._user_ops.get_user_by_email(normalized)
         if user:
             if user.get("role") == "admin":
                 return True
             owner = self.get_agent_owner(agent_name)
             if owner and owner["owner_username"] == user["username"]:
                 return True
-        return self.is_agent_shared_with_email(agent_name, email)
+        return self.is_agent_shared_with_email(agent_name, normalized)
 
     def is_agent_shared_with_user(self, agent_name: str, username: str) -> bool:
         """Check if an agent is shared with a specific user (by their email)."""

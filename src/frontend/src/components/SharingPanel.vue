@@ -1,11 +1,20 @@
 <template>
   <div class="p-6 space-y-8">
+    <!-- Framing: identity vs. authorization (Issue #446) -->
+    <div class="rounded-lg bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-100 dark:border-indigo-900/40 p-4 text-sm text-indigo-900 dark:text-indigo-200">
+      Access to this agent has two layers:
+      <ul class="mt-2 list-disc pl-5 space-y-1">
+        <li><strong>Identity proof</strong> — "Require verified email" (below) forces every user to prove who they are via email verification before chatting. It is enforced on web, Slack, and Telegram.</li>
+        <li><strong>Authorization</strong> — "Team Sharing" (below) is the allow-list of emails who skip the owner-approval queue. Everyone else lands in Pending Access Requests until you approve them.</li>
+      </ul>
+    </div>
+
     <!-- Channel Access Policy (Issue #311) -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Channel Access Policy</h3>
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Identity Proof</h3>
       <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-        Controls who can chat with this agent across web, Telegram, and Slack.
-        The team-sharing list below is the unified allow-list.
+        Require users to prove who they are before chatting, across web, Telegram, and Slack.
+        Identity proof alone does <em>not</em> grant access — see Team Sharing below.
       </p>
 
       <div class="space-y-3">
@@ -21,6 +30,7 @@
             <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Require verified email</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">
               Telegram users must <code>/login</code>; Slack uses workspace email; web requires email verification.
+              This only proves who the user is — it does not authorize them to chat. Use Team Sharing or Open access below for authorization.
             </div>
           </div>
         </label>
@@ -34,13 +44,23 @@
             @change="updatePolicy({ open_access: $event.target.checked })"
           />
           <div>
-            <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Open access</div>
+            <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Open access (anyone verified)</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">
               Anyone with a verified email may chat without owner approval.
-              Off = pending requests must be approved.
+              When off, only users in Team Sharing skip the pending-approval queue.
             </div>
           </div>
         </label>
+      </div>
+
+      <!-- Dead-end configuration warning (#446) -->
+      <div
+        v-if="policy.require_email && !policy.open_access && (!shares || shares.length === 0)"
+        class="mt-4 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 p-3 text-sm text-amber-900 dark:text-amber-200"
+      >
+        <strong>Heads up:</strong> you've required verified email but haven't shared with anyone or enabled Open access.
+        Every verified user will land in Pending Access Requests and stay locked out until you approve them one by one.
+        Add emails to Team Sharing below, or enable Open access, to let people chat.
       </div>
 
       <!-- Pending access requests -->
@@ -48,6 +68,9 @@
         <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
           Pending access requests ({{ pendingRequests.length }})
         </h4>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
+          Users who verified their identity but aren't in Team Sharing. Approving moves them into Team Sharing.
+        </p>
         <ul class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
           <li v-for="req in pendingRequests" :key="req.id" class="px-4 py-3 flex items-center justify-between">
             <div>
@@ -77,9 +100,12 @@
 
     <!-- Team Sharing Section -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Team Sharing</h3>
-      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-        Share this agent with team members by entering their email address.
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Team Sharing <span class="text-sm font-normal text-gray-500 dark:text-gray-400">— allow-list</span></h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">
+        Pre-authorize team members by email. They still verify their identity on first chat, but they skip the owner-approval queue.
+      </p>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+        Applies uniformly across web, Slack, and Telegram. Entries are stored lowercase and matched case-insensitively.
       </p>
 
       <!-- Share Form -->

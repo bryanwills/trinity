@@ -320,33 +320,42 @@ Both `is_agent_shared_with_email` and `email_has_agent_access` are exposed on th
 
 Access-policy storage lives on `agent_ownership` via `AccessPolicyMixin` (`db/agent_settings/access_policy.py`); access requests live in their own table via `db/access_requests.py`.
 
-### Share Agent (`db/agents.py:169-212`)
+### Share Agent (`db/agent_settings/sharing.py`)
+
+`share_agent` now normalizes the email (`.strip().lower()`) and, within the same transaction as the `agent_sharing` insert, deletes any stale pending `access_requests` row for the same `(agent_name, email)` so the owner's Pending list reflects reality after a manual Team Share add (#446). Approved/denied rows are left untouched as audit trail.
+
 ```python
-def share_agent(self, agent_name: str, owner_username: str, share_with_email: str) -> Optional[AgentShare]:
+def share_agent(self, agent_name, owner_username, share_with_email) -> Optional[AgentShare]:
     owner = self._user_ops.get_user_by_username(owner_username)
     if not owner:
         return None
-
-    # Check if user can share (owner or admin)
     if not self.can_user_share_agent(owner_username, agent_name):
         return None
 
-    # Prevent self-sharing
-    owner_email = owner.get("email") or ""
-    if owner_email and owner_email.lower() == share_with_email.lower():
+    normalized_email = (share_with_email or "").strip().lower()
+    if not normalized_email:
         return None
+
+    owner_email = (owner.get("email") or "").strip().lower()
+    if owner_email and owner_email == normalized_email:
+        return None  # self-share
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
-            cursor.execute("""
-                INSERT INTO agent_sharing (agent_name, shared_with_email, shared_by_id, created_at)
-                VALUES (?, ?, ?, ?)
-            """, (agent_name, share_with_email.lower(), owner["id"], now))
+            cursor.execute(
+                "INSERT INTO agent_sharing (agent_name, shared_with_email, shared_by_id, created_at) VALUES (?, ?, ?, ?)",
+                (agent_name, normalized_email, owner["id"], now),
+            )
+            # #446: clear any stale pending access_request for same (agent, email)
+            cursor.execute(
+                "DELETE FROM access_requests WHERE agent_name = ? AND email = ? AND status = 'pending'",
+                (agent_name, normalized_email),
+            )
             conn.commit()
             return AgentShare(...)
         except sqlite3.IntegrityError:
-            return None  # Already shared
+            return None  # already shared
 ```
 
 ### Cascade Delete (`db/agents.py:117-128`)
@@ -455,6 +464,7 @@ Working - Agent sharing fully functional with email-based collaboration
 
 | Date | Changes |
 |------|---------|
+| 2026-04-22 | **#446 — team-share gate hardening + Sharing UX**. `share_agent` now deletes stale pending `access_requests` rows atomically with the share insert (manual Team Share now clears the owner's Pending list). Email normalization (`.strip().lower()`) added in `share_agent`, `is_agent_shared_with_email`, and `email_has_agent_access` as defense-in-depth. `SharingPanel.vue` restructured to distinguish **Identity Proof** (`require_email`) from **Authorization** (Team Sharing allow-list + approval queue); dead-end warning shown when `require_email=true && !open_access && shares.length===0`. New unit test file: `tests/test_team_share_gate_unit.py`. Canonical gate semantics continue to live in [unified-channel-access-control.md](unified-channel-access-control.md). |
 | 2026-04-12 | **Issue #311 — unified cross-channel access control**: `agent_sharing` is now the cross-channel allow-list (web + Telegram + Slack). Added 4 endpoints to `routers/sharing.py` for access policy (`require_email`, `open_access`) and pending access requests (approve/deny). `SharingPanel.vue` gained a Channel Access Policy section + Pending Access Requests list (direct axios, no composable). New `SharingMixin` helpers: `is_agent_shared_with_email`, `email_has_agent_access`. `delete_agent_ownership` now also cascades `access_requests`. Canonical primitive lives in [unified-channel-access-control.md](unified-channel-access-control.md). |
 | 2026-02-18 | **Public Links tab consolidated**: Public Links tab removed from AgentDetail.vue. SharingPanel.vue now includes PublicLinksPanel as embedded component (lines 79-83, 92). Updated tab visibility line numbers (506-509). Single "Sharing" tab now contains both Team Sharing and Public Links sections. |
 | 2026-01-30 | **Git Pull permission update**: Added Git Pull and Git Sync/Init columns to Access Levels table. Shared users can now pull from GitHub (was owner-only). |
