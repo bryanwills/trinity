@@ -139,6 +139,7 @@ The test suite covers:
 - **Agent Chat** (test_agent_chat.py) - Message sending, history, sessions, in-memory activity, model selection
 - **Agent Files** (test_agent_files.py) - File browser, downloads
 - **Agent Sharing** (test_agent_sharing.py) - Share/unshare agents, whitelist auto-add with `default_role="user"` (#314)
+- **Team Share Gate Unit** (test_team_share_gate_unit.py) - Isolated `SharingMixin` tests: team-shared email passes gate, mixed-case normalization, stale pending `access_requests` cleanup on `share_agent`, cleanup scope (#446) [UNIT]
 - **Channel Access Control** (test_channel_access_control.py) - Per-agent access policy (require_email, open_access, group_auth_mode), access requests inbox (#311) [SMOKE + Agent]
 - **Telegram Groups** (test_telegram_groups.py) - Trigger mode validation (mention/all/observe), proactive message endpoint validation (#349) [SMOKE + Agent]
 - **Agent Permissions** (test_agent_permissions.py) - Agent-to-agent permission CRUD, defaults, cascade delete, bulk edges endpoint (#359) (Req 9.10)
@@ -228,10 +229,10 @@ The test suite covers:
 
 ## Test Suite Statistics
 
-**Total Tests**: ~2,211 tests across 121 test files
+**Total Tests**: ~2,219 tests across 122 test files
 **Smoke Tests**: ~578 tests (fast, no agent creation)
-**Unit Tests**: ~90 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop)
-**Core Tests (not slow)**: ~2,076 tests
+**Unit Tests**: ~98 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop, team-share gate)
+**Core Tests (not slow)**: ~2,084 tests
 **Slow Tests**: ~89 tests (chat execution, fleet ops, system agent ops, execution termination)
 **WebSocket Tests**: ~10 tests (web terminal, execution streaming)
 
@@ -259,6 +260,28 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 - **Healthy**: >90% pass rate, 0 critical failures
 - **Warning**: 75-90% pass rate, <5 failures
 - **Critical**: <75% pass rate or >5 failures
+
+## Recent Test Additions (2026-04-22)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `test_team_share_gate_unit.py` | Team-share gate regression for #446 — ensures team-shared emails pass the public-link gate and `share_agent` clears stale pending `access_requests` rows | 8 tests |
+
+**Team Share Gate (#446)** (`test_team_share_gate_unit.py`):
+
+Isolated unit tests over `SharingMixin` using an in-memory `agent_sharing` + `access_requests` SQLite DB (same harness style as `test_sharing_null_email_unit.py`). No backend container required; runs via `python -m pytest` inside the `trinity-backend` image (needs `utils.helpers`).
+
+Gate behavior:
+- `test_team_shared_email_passes_gate_lowercase` — baseline pass for lowercase input
+- `test_team_shared_email_passes_gate_mixed_case` — `Alice@Example.COM` and whitespace-padded input still match the lowercase allow-list (#446 casing defense-in-depth)
+- `test_non_shared_email_still_fails_gate` — no false positives
+- `test_empty_email_returns_false` — None / "" / "   " all rejected
+
+Stale-row cleanup on share:
+- `test_share_agent_clears_stale_pending_request` — adding a user to Team Sharing atomically deletes any pre-existing `status='pending'` row for the same `(agent, email)`
+- `test_share_agent_no_pending_row_is_noop_on_access_requests` — fresh share with no pending row is a safe no-op
+- `test_share_agent_does_not_clear_other_agents_pending` — cleanup scope is exactly `(this agent, this email, status='pending')`
+- `test_share_agent_normalizes_whitespace_and_case` — mixed-case / padded share input lands lowercase and still clears the matching lowercase pending row
 
 ## Recent Test Additions (2026-04-20)
 
