@@ -230,9 +230,10 @@
         <!-- Agents List -->
         <div class="flex flex-col gap-1.5">
           <!-- Column Header (lg+ only) -->
-          <div class="hidden lg:grid lg:grid-cols-[auto_auto_1fr_46px_22rem_180px_auto_auto] lg:gap-x-4 items-center px-4 py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+          <div class="hidden lg:grid lg:grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto] lg:gap-x-4 items-center pl-8 pr-4 py-2 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
             <div class="w-4"></div>
             <div class="w-3"></div>
+            <div class="w-2"></div>
             <div>Name</div>
             <div>Status</div>
             <div>Controls</div>
@@ -246,7 +247,7 @@
             v-for="agent in displayAgents"
             :key="agent.name"
             :class="[
-              'bg-white dark:bg-gray-800 rounded-lg',
+              'relative overflow-visible bg-white dark:bg-gray-800 rounded-lg',
               'transition-colors duration-150 hover:bg-gray-50 dark:hover:bg-gray-750',
               agent.is_system
                 ? 'border-l-3 border-l-purple-500'
@@ -256,12 +257,20 @@
                 : ''
             ]"
           >
+            <!-- Avatar: half out of the box (all breakpoints) -->
+            <div class="absolute left-0 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10">
+              <div class="rounded-full border-2 shadow-md overflow-hidden"
+                   :class="agent.is_system ? 'border-purple-400 dark:border-purple-500' : 'border-indigo-400 dark:border-indigo-500'">
+                <AgentAvatar :name="agent.name" :avatar-url="agent.avatar_url" size="md" />
+              </div>
+            </div>
+
             <!-- Desktop layout (lg+) -->
-            <div class="hidden lg:flex px-4 py-3">
+            <div class="hidden lg:flex pl-8 pr-4 py-3">
               <!-- Two-row content block -->
               <div class="flex flex-col flex-1 min-w-0">
               <!-- Main grid (Row 1) -->
-              <div class="grid grid-cols-[auto_auto_1fr_46px_22rem_180px_auto_auto] gap-x-4 items-center">
+              <div class="grid grid-cols-[auto_auto_auto_1fr_46px_22rem_180px_auto_auto] gap-x-4 items-center">
                 <!-- Checkbox -->
                 <input
                   type="checkbox"
@@ -279,16 +288,14 @@
                   :style="{ backgroundColor: getStatusDotColor(agent.name) }"
                 ></div>
 
-                <!-- #389 Sync health dot (visible only for git-enabled agents) -->
+                <!-- #389 Sync health dot (always in grid to preserve column positions) -->
                 <div
-                  v-if="syncHealthEntry(agent.name)"
-                  :class="['w-2 h-2 rounded-full flex-shrink-0', syncHealthColorClass(agent.name)]"
-                  :title="syncHealthLabel(agent.name)"
+                  :class="['w-2 h-2 rounded-full flex-shrink-0', syncHealthEntry(agent.name) ? syncHealthColorClass(agent.name) : 'invisible']"
+                  :title="syncHealthEntry(agent.name) ? syncHealthLabel(agent.name) : ''"
                 ></div>
 
                 <!-- Name + badges -->
                 <div class="flex items-center min-w-0 gap-2">
-                  <AgentAvatar :name="agent.name" :avatar-url="agent.avatar_url" size="sm" />
                   <router-link
                     :to="`/agents/${agent.name}`"
                     class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-indigo-600 dark:hover:text-indigo-400"
@@ -412,7 +419,7 @@
               </div>
 
               <!-- Bottom row: tags (always rendered for uniform height) -->
-              <div class="flex items-center gap-1 pl-[3.625rem] min-h-[1.375rem] pt-1">
+              <div class="flex items-center gap-1 pl-[5.125rem] min-h-[1.375rem] pt-1">
                 <template v-if="getAgentTags(agent.name).length > 0">
                   <span
                     v-for="tag in getAgentTags(agent.name).slice(0, 3)"
@@ -443,7 +450,7 @@
             </div>
 
             <!-- Tablet layout (md, < lg) -->
-            <div class="hidden md:flex md:flex-col lg:hidden px-4 py-3 gap-2">
+            <div class="hidden md:flex md:flex-col lg:hidden pl-8 pr-4 py-3 gap-2">
               <div class="flex items-center gap-3">
                 <input
                   type="checkbox"
@@ -458,7 +465,6 @@
                   ]"
                   :style="{ backgroundColor: getStatusDotColor(agent.name) }"
                 ></div>
-                <AgentAvatar :name="agent.name" :avatar-url="agent.avatar_url" size="sm" />
                 <router-link
                   :to="`/agents/${agent.name}`"
                   class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-indigo-600 dark:hover:text-indigo-400"
@@ -499,7 +505,7 @@
                   </router-link>
                 </div>
               </div>
-              <div class="flex items-center gap-3 pl-[3.25rem]">
+              <div class="flex items-center gap-3 pl-[3.125rem]">
                 <div class="flex items-center gap-2">
                   <RunningStateToggle
                     :model-value="agent.status === 'running'"
@@ -567,7 +573,7 @@
                 </div>
               </div>
               <!-- Tags row (tablet) -->
-              <div v-if="getAgentTags(agent.name).length > 0" class="flex items-center gap-1 pl-[3.25rem]">
+              <div v-if="getAgentTags(agent.name).length > 0" class="flex items-center gap-1 pl-[3.125rem]">
                 <span
                   v-for="tag in getAgentTags(agent.name).slice(0, 3)"
                   :key="tag"
@@ -586,7 +592,7 @@
             </div>
 
             <!-- Mobile layout (< md) -->
-            <div class="flex flex-col md:hidden px-4 py-3 gap-2">
+            <div class="flex flex-col md:hidden pl-8 pr-4 py-3 gap-2">
               <div class="flex items-center gap-3">
                 <input
                   type="checkbox"
@@ -601,7 +607,6 @@
                   ]"
                   :style="{ backgroundColor: getStatusDotColor(agent.name) }"
                 ></div>
-                <AgentAvatar :name="agent.name" :avatar-url="agent.avatar_url" size="sm" />
                 <router-link
                   :to="`/agents/${agent.name}`"
                   class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-indigo-600 dark:hover:text-indigo-400 flex-1 min-w-0"
