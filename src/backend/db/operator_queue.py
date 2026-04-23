@@ -6,7 +6,7 @@ Supports listing, filtering, responding, and statistics.
 """
 
 import json
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 from datetime import datetime
 
 from .connection import get_db_connection
@@ -108,10 +108,24 @@ class OperatorQueueOperations:
         since: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        accessible_agent_names: Optional[Set[str]] = None,
     ) -> List[Dict]:
-        """List queue items with optional filters."""
+        """List queue items with optional filters.
+
+        accessible_agent_names: if None, no access filter (admin). If a set,
+        only items whose agent_name is in the set are returned. Empty set
+        short-circuits to [] (user has no accessible agents).
+        """
+        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+            return []
+
         query = f"SELECT {self._SELECT_COLS} FROM operator_queue WHERE 1=1"
         params = []
+
+        if accessible_agent_names is not None:
+            placeholders = ",".join(["?"] * len(accessible_agent_names))
+            query += f" AND agent_name IN ({placeholders})"
+            params.extend(sorted(accessible_agent_names))
 
         if status:
             query += " AND status = ?"
@@ -240,59 +254,81 @@ class OperatorQueueOperations:
             conn.commit()
             return cursor.rowcount
 
-    def get_stats(self) -> Dict:
-        """Get queue statistics."""
+    def get_stats(self, accessible_agent_names: Optional[Set[str]] = None) -> Dict:
+        """Get queue statistics.
+
+        accessible_agent_names: if None, no access filter (admin). If a set,
+        only items for accessible agents are counted. Empty set returns zeros.
+        """
+        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+            return {
+                "by_status": {},
+                "by_type": {},
+                "by_priority": {},
+                "by_agent": {},
+                "pending_count": 0,
+                "avg_response_seconds": None,
+                "responded_today": 0,
+            }
+
+        # Build access filter fragment applied to every sub-query
+        access_filter = ""
+        access_params: List = []
+        if accessible_agent_names is not None:
+            placeholders = ",".join(["?"] * len(accessible_agent_names))
+            access_filter = f" AND agent_name IN ({placeholders})"
+            access_params = sorted(accessible_agent_names)
+
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
             # Counts by status
-            cursor.execute("""
-                SELECT status, COUNT(*) FROM operator_queue
-                GROUP BY status
-            """)
+            cursor.execute(
+                f"SELECT status, COUNT(*) FROM operator_queue WHERE 1=1{access_filter} GROUP BY status",
+                access_params,
+            )
             by_status = {row[0]: row[1] for row in cursor.fetchall()}
 
             # Counts by type (pending only)
-            cursor.execute("""
-                SELECT type, COUNT(*) FROM operator_queue
-                WHERE status = 'pending'
-                GROUP BY type
-            """)
+            cursor.execute(
+                f"SELECT type, COUNT(*) FROM operator_queue WHERE status = 'pending'{access_filter} GROUP BY type",
+                access_params,
+            )
             by_type = {row[0]: row[1] for row in cursor.fetchall()}
 
             # Counts by priority (pending only)
-            cursor.execute("""
-                SELECT priority, COUNT(*) FROM operator_queue
-                WHERE status = 'pending'
-                GROUP BY priority
-            """)
+            cursor.execute(
+                f"SELECT priority, COUNT(*) FROM operator_queue WHERE status = 'pending'{access_filter} GROUP BY priority",
+                access_params,
+            )
             by_priority = {row[0]: row[1] for row in cursor.fetchall()}
 
             # Counts by agent (pending only)
-            cursor.execute("""
-                SELECT agent_name, COUNT(*) FROM operator_queue
-                WHERE status = 'pending'
-                GROUP BY agent_name
-            """)
+            cursor.execute(
+                f"SELECT agent_name, COUNT(*) FROM operator_queue WHERE status = 'pending'{access_filter} GROUP BY agent_name",
+                access_params,
+            )
             by_agent = {row[0]: row[1] for row in cursor.fetchall()}
 
             # Average response time (for responded items)
-            cursor.execute("""
-                SELECT AVG(
+            cursor.execute(
+                f"""SELECT AVG(
                     (julianday(responded_at) - julianday(created_at)) * 86400
                 ) FROM operator_queue
-                WHERE responded_at IS NOT NULL
-            """)
+                WHERE responded_at IS NOT NULL{access_filter}""",
+                access_params,
+            )
             avg_row = cursor.fetchone()
             avg_response_seconds = round(avg_row[0], 1) if avg_row[0] else None
 
             # Items responded today
             today = datetime.utcnow().strftime("%Y-%m-%d")
-            cursor.execute("""
-                SELECT COUNT(*) FROM operator_queue
+            cursor.execute(
+                f"""SELECT COUNT(*) FROM operator_queue
                 WHERE responded_at IS NOT NULL
-                  AND responded_at >= ?
-            """, (today,))
+                  AND responded_at >= ?{access_filter}""",
+                [today] + access_params,
+            )
             responded_today = cursor.fetchone()[0]
 
         return {

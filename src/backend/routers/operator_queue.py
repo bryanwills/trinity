@@ -7,7 +7,7 @@ operator_queue_service background poller.
 """
 
 import json
-from typing import Optional
+from typing import Optional, Set
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
@@ -39,6 +39,29 @@ class OperatorResponse(BaseModel):
 
 
 # ============================================================================
+# Access control helper
+# ============================================================================
+
+def _accessible_set(current_user: User) -> Optional[Set[str]]:
+    """Return the set of agent names the user may access in the operator queue.
+
+    Returns None for admins (no filter — sees everything).
+    Returns a set (possibly empty) for regular users.
+    """
+    if current_user.role == "admin":
+        return None
+    user_email = current_user.email or ""
+    names = db.get_accessible_agent_names(user_email, is_admin=False)
+    return set(names)
+
+
+def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:
+    """Raise 403 if the user cannot access the given agent."""
+    if accessible is not None and agent_name not in accessible:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
+# ============================================================================
 # Endpoints
 # ============================================================================
 
@@ -54,6 +77,7 @@ async def list_queue_items(
     current_user: User = Depends(get_current_user),
 ):
     """List operator queue items with optional filters."""
+    accessible = _accessible_set(current_user)
     items = db.list_operator_queue_items(
         status=status,
         type=type,
@@ -62,6 +86,7 @@ async def list_queue_items(
         since=since,
         limit=limit,
         offset=offset,
+        accessible_agent_names=accessible,
     )
     return {"items": items, "count": len(items)}
 
@@ -71,7 +96,8 @@ async def get_queue_stats(
     current_user: User = Depends(get_current_user),
 ):
     """Get queue statistics (counts by status, type, priority, agent)."""
-    return db.get_operator_queue_stats()
+    accessible = _accessible_set(current_user)
+    return db.get_operator_queue_stats(accessible_agent_names=accessible)
 
 
 @router.get("/{item_id}")
@@ -83,6 +109,8 @@ async def get_queue_item(
     item = db.get_operator_queue_item(item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Queue item not found")
+    accessible = _accessible_set(current_user)
+    _assert_agent_accessible(item["agent_name"], accessible)
     return item
 
 
@@ -93,10 +121,12 @@ async def respond_to_queue_item(
     current_user: User = Depends(get_current_user),
 ):
     """Submit an operator response to a pending queue item."""
-    # Check item exists
     existing = db.get_operator_queue_item(item_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Queue item not found")
+
+    accessible = _accessible_set(current_user)
+    _assert_agent_accessible(existing["agent_name"], accessible)
 
     if existing["status"] != "pending":
         raise HTTPException(
@@ -137,6 +167,9 @@ async def cancel_queue_item(
     if not existing:
         raise HTTPException(status_code=404, detail="Queue item not found")
 
+    accessible = _accessible_set(current_user)
+    _assert_agent_accessible(existing["agent_name"], accessible)
+
     if existing["status"] != "pending":
         raise HTTPException(
             status_code=400,
@@ -155,6 +188,8 @@ async def get_agent_queue_items(
     current_user: User = Depends(get_current_user),
 ):
     """Get queue items for a specific agent."""
+    accessible = _accessible_set(current_user)
+    _assert_agent_accessible(agent_name, accessible)
     items = db.list_operator_queue_items(
         agent_name=agent_name,
         status=status,

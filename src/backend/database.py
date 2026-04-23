@@ -1694,8 +1694,8 @@ class DatabaseManager:
     def mark_operator_queue_expired(self):
         return self._operator_queue_ops.mark_expired()
 
-    def get_operator_queue_stats(self):
-        return self._operator_queue_ops.get_stats()
+    def get_operator_queue_stats(self, **kwargs):
+        return self._operator_queue_ops.get_stats(**kwargs)
 
     def get_operator_queue_responded_for_agent(self, agent_name):
         return self._operator_queue_ops.get_responded_items_for_agent(agent_name)

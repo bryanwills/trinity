@@ -3,16 +3,18 @@ Operator Queue Tests (test_operator_queue.py)
 
 Tests for the Operating Room / Operator Queue API endpoints (OPS-001).
 Covers list, get, respond, cancel, stats, agent-specific queries,
-authentication, and input validation.
+authentication, input validation, and cross-user access isolation (#470).
 
 Feature Flow: operating-room.md
 """
 
+import os
+import subprocess
 import pytest
 import uuid
 from datetime import datetime, timezone
 
-from utils.api_client import TrinityApiClient
+from utils.api_client import TrinityApiClient, ApiConfig
 from utils.assertions import (
     assert_status,
     assert_json_response,
@@ -468,3 +470,204 @@ class TestAgentQueueItems:
         assert_status(response, 200)
         data = response.json()
         assert len(data["items"]) <= 1
+
+
+# ============================================================================
+# Cross-User Access Isolation Tests (#470)
+# ============================================================================
+
+_BACKEND_CONTAINER = os.getenv("TRINITY_BACKEND_CONTAINER", "trinity-backend")
+_ISO_USERNAME = f"testuser-opq-{uuid.uuid4().hex[:8]}"
+_ISO_PASSWORD = "test-opq-password-470"
+_ISO_EMAIL = f"{_ISO_USERNAME}@test.example.com"
+_ISO_AGENT = f"test-opq-agent-{uuid.uuid4().hex[:6]}"
+_ISO_ITEM_ID = f"test-opq-item-{uuid.uuid4().hex[:12]}"
+
+
+def _exec_backend(python_code: str) -> str:
+    result = subprocess.run(
+        ["docker", "exec", _BACKEND_CONTAINER, "python3", "-c", python_code],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Backend exec failed: {result.stderr}")
+    return result.stdout.strip()
+
+
+@pytest.fixture(scope="module")
+def _iso_setup(api_client: TrinityApiClient):
+    """Set up cross-user isolation fixtures.
+
+    Creates:
+    - A non-admin user (role='user') directly in the DB
+    - A fake agent ownership row for a sentinel agent owned by admin
+    - A queue item for that sentinel agent
+    """
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Create non-admin user
+    _exec_backend(f"""
+import sqlite3, os
+from pathlib import Path
+from passlib.context import CryptContext
+ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pw = ctx.hash("{_ISO_PASSWORD}")
+db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
+conn = sqlite3.connect(db)
+conn.execute(
+    "INSERT OR IGNORE INTO users (username, password_hash, role, email, created_at, updated_at) "
+    "VALUES (?, ?, 'user', ?, datetime('now'), datetime('now'))",
+    ("{_ISO_USERNAME}", pw, "{_ISO_EMAIL}"),
+)
+conn.commit()
+conn.close()
+print("OK")
+""")
+
+    # Register fake agent ownership under admin's user id
+    _exec_backend(f"""
+import sqlite3, os
+from pathlib import Path
+db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
+conn = sqlite3.connect(db)
+admin_id = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
+conn.execute(
+    "INSERT OR IGNORE INTO agent_ownership (agent_name, owner_id, created_at) VALUES (?, ?, datetime('now'))",
+    ("{_ISO_AGENT}", admin_id),
+)
+conn.commit()
+conn.close()
+print("OK")
+""")
+
+    # Insert a queue item belonging to that agent
+    _exec_backend(f"""
+import sqlite3, os
+from pathlib import Path
+db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
+conn = sqlite3.connect(db)
+conn.execute(
+    "INSERT OR IGNORE INTO operator_queue "
+    "(id, agent_name, type, status, priority, title, question, created_at) "
+    "VALUES (?, ?, 'approval', 'pending', 'high', 'Test item 470', 'Proceed?', ?)",
+    ("{_ISO_ITEM_ID}", "{_ISO_AGENT}", "{now}"),
+)
+conn.commit()
+conn.close()
+print("OK")
+""")
+
+    # Build the non-admin client
+    cfg = ApiConfig(
+        base_url=os.getenv("TRINITY_API_URL", "http://localhost:8000"),
+        username=_ISO_USERNAME,
+        password=_ISO_PASSWORD,
+    )
+    non_admin = TrinityApiClient(cfg)
+    non_admin.authenticate()
+
+    yield {"admin": api_client, "non_admin": non_admin, "item_id": _ISO_ITEM_ID, "agent": _ISO_AGENT}
+
+    non_admin.close()
+
+    # Teardown: remove queue item, agent ownership, user
+    _exec_backend(f"""
+import sqlite3, os
+from pathlib import Path
+db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db"))
+conn = sqlite3.connect(db)
+conn.execute("DELETE FROM operator_queue WHERE id = ?", ("{_ISO_ITEM_ID}",))
+conn.execute("DELETE FROM agent_ownership WHERE agent_name = ?", ("{_ISO_AGENT}",))
+conn.execute("DELETE FROM users WHERE username = ?", ("{_ISO_USERNAME}",))
+conn.commit()
+conn.close()
+print("OK")
+""")
+
+
+class TestOperatorQueueAccessControl:
+    """Cross-user isolation — fixes the pentest finding in issue #470.
+
+    A non-admin user must not be able to read or act on queue items that
+    belong to agents they do not own or have been shared on.
+    """
+
+    pytestmark = pytest.mark.smoke
+
+    def test_non_admin_list_excludes_foreign_items(self, _iso_setup):
+        """Non-admin list must not include items from unowned agents."""
+        non_admin = _iso_setup["non_admin"]
+        item_id = _iso_setup["item_id"]
+
+        response = non_admin.get("/api/operator-queue?limit=500")
+        assert_status(response, 200)
+        data = response.json()
+        ids = {item["id"] for item in data["items"]}
+        assert item_id not in ids, "Non-admin must not see items from unowned agents"
+
+    def test_non_admin_get_item_returns_403(self, _iso_setup):
+        """Non-admin GET /{id} for unowned agent's item returns 403."""
+        non_admin = _iso_setup["non_admin"]
+        item_id = _iso_setup["item_id"]
+
+        response = non_admin.get(f"/api/operator-queue/{item_id}")
+        assert_status(response, 403)
+
+    def test_non_admin_respond_returns_403(self, _iso_setup):
+        """Non-admin POST /{id}/respond for unowned agent's item returns 403."""
+        non_admin = _iso_setup["non_admin"]
+        item_id = _iso_setup["item_id"]
+
+        response = non_admin.post(
+            f"/api/operator-queue/{item_id}/respond",
+            json={"response": "approve"},
+        )
+        assert_status(response, 403)
+
+    def test_non_admin_cancel_returns_403(self, _iso_setup):
+        """Non-admin POST /{id}/cancel for unowned agent's item returns 403."""
+        non_admin = _iso_setup["non_admin"]
+        item_id = _iso_setup["item_id"]
+
+        response = non_admin.post(f"/api/operator-queue/{item_id}/cancel")
+        assert_status(response, 403)
+
+    def test_non_admin_agent_items_returns_403(self, _iso_setup):
+        """Non-admin GET /agents/{name} for unowned agent returns 403."""
+        non_admin = _iso_setup["non_admin"]
+        agent = _iso_setup["agent"]
+
+        response = non_admin.get(f"/api/operator-queue/agents/{agent}")
+        assert_status(response, 403)
+
+    def test_non_admin_stats_excludes_foreign_agents(self, _iso_setup):
+        """Non-admin stats by_agent must not reveal unowned agent names."""
+        non_admin = _iso_setup["non_admin"]
+        agent = _iso_setup["agent"]
+
+        response = non_admin.get("/api/operator-queue/stats")
+        assert_status(response, 200)
+        data = response.json()
+        assert agent not in data.get("by_agent", {}), \
+            "Stats by_agent must not leak unowned agent names"
+
+    def test_admin_still_sees_all_items(self, _iso_setup):
+        """Admin retains full visibility of all queue items (regression)."""
+        admin = _iso_setup["admin"]
+        item_id = _iso_setup["item_id"]
+
+        response = admin.get(f"/api/operator-queue/{item_id}")
+        assert_status(response, 200)
+        data = response.json()
+        assert data["id"] == item_id
+
+    def test_admin_stats_includes_all_agents(self, _iso_setup):
+        """Admin stats by_agent includes items from all agents (regression)."""
+        admin = _iso_setup["admin"]
+        agent = _iso_setup["agent"]
+
+        response = admin.get("/api/operator-queue/stats")
+        assert_status(response, 200)
+        data = response.json()
+        assert agent in data.get("by_agent", {}), \
+            "Admin stats must include the test agent"
