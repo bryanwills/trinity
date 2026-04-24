@@ -658,6 +658,29 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Resume banner in Chat tab showing execution context
 - **Spec**: `docs/requirements/CONTINUE_EXECUTION_AS_CHAT.md`
 
+### 13.10 Outbound File Sharing (FILES-001)
+- **Status**: ✅ Implemented (2026-04-24)
+- **Requirement ID**: FILES-001
+- **GitHub Issue**: #295
+- **Priority**: P1
+- **Description**: Agents publish files to a public download URL with token-based auth, 7-day default expiration, and inheritance of the agent's channel-access policy. The URL is a universal delivery mechanism that works across web, Slack, Telegram, WhatsApp, and email — replacing fragile per-channel workarounds.
+- **Key Features**:
+  - Per-agent opt-in toggle + Docker volume `agent-{name}-public` mounted at `/home/developer/public/`
+  - `share_file` MCP tool (agent-scoped) — publishes a file and returns a download URL
+  - Internal endpoint `POST /api/internal/agent-files/share` (agent-server path, `X-Internal-Secret` auth)
+  - MCP-path endpoint `POST /api/agents/{name}/shared-files` (owner/admin or agent-scoped key)
+  - Public download endpoint `GET /api/files/{file_id}?sig={token}` — 192-bit signed token, constant-time compare, streaming, `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, audit logged as `file_share_download`
+  - List / revoke endpoints for the owner (`GET` / `DELETE /api/agents/{name}/shared-files[/{id}]`)
+  - UI panel in Agent Detail → Sharing tab (toggle, quota, table, copy URL, revoke)
+  - File validation: relative path only, no `..` escapes, 50 MB per file, 500 MB per-agent quota, magic-byte MIME detection with executable blocklist (PE/ELF/Mach-O/shebang)
+  - Agent delete cascades: DB rows + on-disk files + Docker volume all removed
+  - Agent rename cascades: `rename_agent()` in `db/agent_settings/metadata.py` updates our table
+- **Database**: `agent_shared_files` table + `agent_ownership.file_sharing_enabled` column (FK `ON DELETE CASCADE ON UPDATE CASCADE`, though enforcement is via the manual-cascade pattern used platform-wide)
+- **Security (audited)**: path traversal rejection, filesystem isolation (backend never mounts agent workspace; `docker get_archive` only pulls the agent-named file), agent-scope defense (agent-scoped MCP keys can't share files for a different agent), no `download_token` param name (renamed to `sig` to avoid credential-sanitizer redaction)
+- **Deferred (tracked for future)**: one-time download links (schema columns retained), platform-wide storage cap, streaming tar extraction, UUID-prefix directory sharding, dedicated rate-limit bucket
+- **Design doc**: `docs/drafts/amazing-file-outbound.md`
+- **Flow**: `docs/memory/feature-flows/file-sharing-outbound.md`
+
 ---
 
 ## 14. Multi-Runtime Support

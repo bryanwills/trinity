@@ -96,7 +96,8 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 *Core Agent:*
 - `agents.py` - Core CRUD, start/stop, logs, stats, queue, activities, terminal (642 lines)
 - `agent_config.py` - Per-agent settings: autonomy, read-only, resources, capabilities, capacity, timeout, api-key
-- `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders
+- `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders, file-sharing toggle + list/revoke (FILES-001)
+- `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
 - `agent_ssh.py` - SSH access endpoint
 - `credentials.py` - Credential injection/export/import (CRED-002 simplified system)
@@ -199,6 +200,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `slack_service.py` - Slack API client (OAuth, messaging, verification) (SLACK-001)
 - `nevermined_payment_service.py` - x402 payment verification and settlement (NVM-001)
 - `proactive_message_service.py` - Agent-to-user proactive messaging with rate limiting and audit (#321)
+- `agent_shared_files_service.py` - Outbound file sharing: path validation, MIME blocklist, quota, Docker `get_archive` extraction, URL building (FILES-001)
 
 **Channel Adapters (`adapters/`)** — Pluggable external messaging (SLACK-002):
 
@@ -322,6 +324,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 | `docs.ts` (1) | `get_agent_requirements` | Agent documentation |
 | `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging (#349) |
 | `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
+| `files.ts` (1) | `share_file` | Outbound file sharing — publish file from `/home/developer/public/` and return download URL (FILES-001) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
 
@@ -502,6 +505,11 @@ picks up on its next poll. (#389 S1a)
 | PUT | `/api/agents/{name}/timeout` | Set execution timeout (60-7200s, default 900s = 15min) |
 | GET | `/api/agents/{name}/guardrails` | Get per-agent guardrails config (NEW: 2026-04-15) |
 | PUT | `/api/agents/{name}/guardrails` | Set per-agent guardrails overrides (GUARD-001) |
+| GET | `/api/agents/{name}/file-sharing` | Get outbound file-sharing status + quota (NEW: 2026-04-24, FILES-001) |
+| PUT | `/api/agents/{name}/file-sharing` | Enable/disable outbound file sharing (owner-only; returns `restart_required`) |
+| POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key; used by `share_file` MCP tool) |
+| GET | `/api/agents/{name}/shared-files` | List active (non-revoked, non-expired) shared files with download counts |
+| DELETE | `/api/agents/{name}/shared-files/{file_id}` | Revoke a shared file (owner-only; idempotent) |
 
 **Note**: Route ordering is critical. `/context-stats` and `/autonomy-status` must be defined BEFORE `/{name}` catch-all route to avoid 404 errors.
 
@@ -675,6 +683,15 @@ export, enable/disable toggle. Issue #20 can be closed.
 | GET | `/api/nevermined/agents/{name}/payments` | JWT | Payment history |
 | GET | `/api/nevermined/settlement-failures` | Admin | Failed settlements |
 | POST | `/api/nevermined/retry-settlement/{log_id}` | Admin | Retry settlement |
+
+### Outbound File Sharing (FILES-001, NEW: 2026-04-24)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/files/{file_id}` | Token (`?sig=`) | Public download. 401 on bad/missing sig, 404 on unknown id, 410 on revoked/expired, `Content-Disposition: attachment; filename="..."`, `X-Content-Type-Options: nosniff`, rate-limited per IP, audit event `file_share_download` |
+| POST | `/api/internal/agent-files/share` | `X-Internal-Secret` | Agent-server path — mint a download URL (used by agent-server direct calls, not the MCP tool) |
+
+Storage: `/data/agent-files/{file_id}` under the existing `trinity-data` volume (no compose changes). Agent writes to `/home/developer/public/` (Docker volume `agent-{name}-public`); backend uses Docker SDK `get_archive` to extract the named file on demand — never mounts the agent workspace.
 
 ### Platform Settings (3 endpoints)
 
@@ -993,6 +1010,43 @@ CREATE INDEX idx_shared_folders_consume ON agent_shared_folder_config(consume_en
 - Permission-gated: only agents with permissions (via `agent_permissions`) can mount
 - Container recreation on restart when mount config changes
 - Volume ownership automatically fixed to UID 1000
+
+**agent_shared_files:** (FILES-001 — Outbound File Sharing, NEW: 2026-04-24)
+```sql
+CREATE TABLE agent_shared_files (
+    id TEXT PRIMARY KEY,                  -- UUID
+    agent_name TEXT NOT NULL,
+    filename TEXT NOT NULL,               -- Display name in download
+    stored_filename TEXT NOT NULL,        -- UUID filename under /data/agent-files/
+    size_bytes INTEGER NOT NULL,
+    mime_type TEXT,                       -- python-magic detected
+    download_token TEXT UNIQUE NOT NULL,  -- secrets.token_urlsafe(32), 192-bit
+    created_by TEXT NOT NULL,             -- Agent name (or user for admin-created)
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,             -- Default 7d
+    revoked_at TEXT,                      -- Set when manually revoked
+    one_time INTEGER DEFAULT 0,           -- Deferred: one-time link mode (column retained for future)
+    consumed_at TEXT,                     -- Deferred
+    download_count INTEGER DEFAULT 0,
+    last_downloaded_at TEXT,
+    FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+        ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX idx_agent_files_agent ON agent_shared_files(agent_name);
+CREATE INDEX idx_agent_files_token ON agent_shared_files(download_token);
+CREATE INDEX idx_agent_files_expires ON agent_shared_files(expires_at) WHERE revoked_at IS NULL;
+-- Also: agent_ownership.file_sharing_enabled INTEGER DEFAULT 0
+```
+
+**Outbound File Sharing Features:**
+- Per-agent opt-in via `agent_ownership.file_sharing_enabled`
+- Publish dir is a Docker volume `agent-{name}-public` mounted at `/home/developer/public/` inside the agent
+- Backend stores extracted bytes at `/data/agent-files/{file_id}` (under existing `trinity-data` volume — no compose changes)
+- Agent extracts via Docker SDK `get_archive` on demand — backend never mounts the agent workspace (filesystem-isolated blast radius)
+- Query param is `?sig={token}` (NOT `?download_token=`) to avoid the credential sanitizer's `.*TOKEN.*` pattern redacting it in agent transcripts
+- URL format: `{public_chat_url}/api/files/{file_id}?sig={token}` — uses existing `/api/*` proxy rules on Vite dev + prod nginx
+- FK has `ON UPDATE CASCADE` + `ON DELETE CASCADE` (aspirational — platform doesn't `PRAGMA foreign_keys=ON`; the agent delete handler + `rename_agent()` manually cascade as is the platform convention)
+- Manually cascaded in: `routers/agents.py` delete handler (rows + on-disk files + volume), `db/agent_settings/metadata.py:rename_agent` (updates `agent_name` in 17 tables)
 
 **agent_event_subscriptions:** (EVT-001 - Agent Event Pub/Sub)
 ```sql

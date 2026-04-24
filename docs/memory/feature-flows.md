@@ -11,6 +11,7 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-04-24 | FILES-001 (#295) | Outbound file sharing — per-agent opt-in publish volume, `share_file` MCP tool, public download URL (`?sig=` token), UI panel with toggle/list/revoke. Agents publish files to `/home/developer/public/`; backend extracts via Docker SDK `get_archive` on demand; URL format `/api/files/{id}?sig={token}` | [file-sharing-outbound.md](feature-flows/file-sharing-outbound.md) |
 | 2026-04-24 | WEBHOOK-001 (#291) | Webhook triggers — token-authenticated public URL fires schedule executions | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
 | 2026-04-23 | #476 | SQLite lexicographic cutoff bug fix — new `iso_cutoff(hours)` helper replaces `datetime('now', ...)` in 15 sites across rate-limit / dashboard / schedules; `max_retries` default flipped `1 → 0`; `cleanup_old_rate_limit_events` wired into `CleanupService` (phase 6, hourly) | [subscription-auto-switch.md](feature-flows/subscription-auto-switch.md), [cleanup-service.md](feature-flows/cleanup-service.md), [scheduler-service.md](feature-flows/scheduler-service.md) |
 | 2026-04-22 | #458 | `.gitignore` init fix — `initialize_git_in_container` now appends missing patterns instead of truncate-and-write; adds `.env`, `.env.*`, `.mcp.json` to the default list and runs for both `/home/developer` and legacy `/home/developer/workspace` (stops credential leak on first GitHub sync) | [github-repo-initialization.md](feature-flows/github-repo-initialization.md) |
@@ -188,6 +189,7 @@
 | Agent Permissions | [agent-permissions.md](feature-flows/agent-permissions.md) | Agent communication permissions |
 | Agent Sharing | [agent-sharing.md](feature-flows/agent-sharing.md) | Cross-channel email allow-list (web/Slack/Telegram) with access policy and pending requests |
 | Agent Shared Folders | [agent-shared-folders.md](feature-flows/agent-shared-folders.md) | File collaboration via shared volumes |
+| Outbound File Sharing | [file-sharing-outbound.md](feature-flows/file-sharing-outbound.md) | Agents publish files to public download URLs (FILES-001) |
 | Agent Tags & System Views | [agent-tags.md](feature-flows/agent-tags.md) | Tagging and saved filters (ORG-001) |
 | Tag Clouds | [tag-clouds.md](feature-flows/tag-clouds.md) | Visual grouping on Dashboard |
 
