@@ -488,6 +488,30 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     except Exception as e:
         logger.warning(f"Failed to delete shared folder config for agent {agent_name}: {e}")
 
+    # Delete per-agent public volume + shared-file rows + on-disk bytes
+    # (FILES-001). Backend connections don't PRAGMA foreign_keys=ON, so
+    # we can't rely on the FK ON DELETE CASCADE — follow the same explicit
+    # pattern used elsewhere in the codebase (see db.agent_settings.metadata
+    # :rename_agent which also manually updates all 16 child tables).
+    try:
+        stored_filenames = db.delete_shared_files_for_agent(agent_name)
+        for stored in stored_filenames:
+            try:
+                path = Path("/data/agent-files") / stored
+                if path.exists():
+                    path.unlink()
+            except Exception as e:
+                logger.warning(f"Failed to unlink shared file {stored}: {e}")
+
+        public_volume_name = db.get_public_volume_name(agent_name)
+        try:
+            public_volume = await volume_get(public_volume_name)
+            await volume_remove(public_volume)
+        except docker.errors.NotFound:
+            pass
+    except Exception as e:
+        logger.warning(f"Failed to delete public volume for agent {agent_name}: {e}")
+
     # Delete agent tags (ORG-001)
     try:
         db.delete_agent_tags(agent_name)

@@ -406,3 +406,58 @@ class GithubPatPropagationResult(BaseModel):
     updated: List[str]
     skipped: List[AgentPropagationStatus]
     failed: List[AgentPropagationStatus]
+
+
+# =============================================================================
+# Outbound File Sharing (FILES-001)
+# =============================================================================
+
+class ShareFileRequest(BaseModel):
+    """Body for POST /api/internal/agent-files/share (internal, agent-server path)."""
+    agent_name: str
+    filename: str
+    display_name: Optional[str] = None
+    expires_in: Optional[int] = None
+    # NOTE: `one_time` is deferred — the schema retains the columns
+    # so we can re-enable it later without a migration.
+
+
+class ShareFileMcpRequest(BaseModel):
+    """Body for POST /api/agents/{agent_name}/shared-files (MCP path).
+
+    The agent_name lives in the URL, so the body only needs the
+    per-share parameters.
+    """
+    filename: str
+    display_name: Optional[str] = None
+    expires_in: Optional[int] = None
+
+
+class ShareFileResponse(BaseModel):
+    """Response payload for a successful share."""
+    file_id: str
+    url: str
+    expires_at: str
+    size_bytes: int
+    mime_type: Optional[str] = None
+
+
+class SharedFileInfo(BaseModel):
+    """One row in the owner's file-sharing panel."""
+    file_id: str
+    filename: str
+    size_bytes: int
+    mime_type: Optional[str] = None
+    url: str
+    created_at: str
+    expires_at: str
+    download_count: int
+    last_downloaded_at: Optional[str] = None
+
+
+class SharedFilesList(BaseModel):
+    """Response for GET /api/agents/{name}/shared-files."""
+    agent_name: str
+    files: List[SharedFileInfo]
+    total_bytes: int
+    quota_bytes: int

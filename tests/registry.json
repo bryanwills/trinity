@@ -180,6 +180,27 @@
       "added": "2026-04-21",
       "categories": ["backend", "unit", "websocket", "redis-streams"],
       "description": "Unit tests for Redis Streams event bus (#306): last-event-id validation + id comparison, scope visibility (SCOPE_ALL vs SCOPE_SCOPED with accessible_agents), EventBus XADD envelope (dict + legacy JSON string + inferred agent_name), Redis-unavailable fallback buffer, StreamDispatcher 3-failure client eviction, slow-consumer queue overflow triggers resync marker, update_accessible_agents mutation, invalid last-event-id queues resync_required"
+    },
+    {
+      "file": "unit/test_agent_shared_files_migration.py",
+      "feature": "FILES-001 / amazing-file-outbound Step 1",
+      "added": "2026-04-23",
+      "categories": ["backend", "unit", "schema", "migrations", "file-sharing"],
+      "description": "Schema + migration tests for agent_shared_files: table creation on legacy DB, expected columns, file_sharing_enabled added to agent_ownership (default 0), FK carries both ON DELETE CASCADE and ON UPDATE CASCADE, 3 indexes including the partial 'WHERE revoked_at IS NULL', migration idempotent on legacy and fresh DBs, ON UPDATE CASCADE propagates rename, ON DELETE CASCADE removes children, download_token UNIQUE constraint enforced (12 tests)"
+    },
+    {
+      "file": "unit/test_file_sharing_mixin.py",
+      "feature": "FILES-001 / amazing-file-outbound Step 2",
+      "added": "2026-04-23",
+      "categories": ["backend", "unit", "db", "file-sharing"],
+      "description": "FileSharingMixin DB operations: get_file_sharing_enabled default False (missing row, NULL column, 0 column), set/get round-trip (True, False, idempotent repeat), set returns False on unknown agent (rowcount=0), per-agent isolation, static volume-name convention ('agent-{name}-public'), static mount-path constant '/home/developer/public' (12 tests)"
+    },
+    {
+      "file": "unit/test_public_folder_mount_match.py",
+      "feature": "FILES-001 / amazing-file-outbound Step 2",
+      "added": "2026-04-23",
+      "categories": ["backend", "unit", "lifecycle", "file-sharing"],
+      "description": "check_public_folder_mount_matches truth table: enabled+mounted → True, enabled+unmounted → False (needs recreation to attach), disabled+mounted → False (needs recreation to detach), disabled+unmounted → True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
     }
   ]
 }

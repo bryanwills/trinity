@@ -1,0 +1,177 @@
+"""
+Public download endpoint for outbound agent file sharing (FILES-001 Step 4).
+
+Resolves the token-scoped URLs minted by POST /api/internal/agent-files/share.
+Unauthenticated — the download token IS the auth credential. Agent-level
+`require_email` policy additionally requires a valid session_token.
+
+Error matrix:
+- 404 — file_id does not exist
+- 401 — download_token missing or wrong (constant-time compare)
+- 410 — revoked or expired
+- 401 — agent requires email + session_token missing/invalid
+- 429 — IP rate limit
+- 500 — storage file missing on disk
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import secrets
+from datetime import datetime, timezone
+from typing import Optional
+from urllib.parse import quote
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
+
+from database import db
+from services.agent_shared_files_service import STORAGE_ROOT
+from services.platform_audit_service import AuditEventType, platform_audit_service
+from routers.public import (
+    check_public_link_rate_limit,
+    _get_client_ip,
+    _agent_requires_email,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/files", tags=["files"])
+
+_CHUNK_SIZE = 64 * 1024
+
+
+def _iter_file(path: str):
+    """Stream a file in chunks without loading it into memory."""
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            yield chunk
+
+
+def _format_disposition(filename: str) -> str:
+    """
+    RFC 6266 Content-Disposition with UTF-8 fallback.
+    Always `attachment` — never inline (defense against XSS via agent-uploaded HTML).
+    """
+    ascii_name = filename.encode("ascii", "replace").decode("ascii")
+    safe_ascii = ascii_name.replace('"', "").replace("\\", "")
+    utf8_encoded = quote(filename, safe="")
+    return f'attachment; filename="{safe_ascii}"; filename*=UTF-8\'\'{utf8_encoded}'
+
+
+def _parse_expires(value: str) -> datetime:
+    """Parse the ISO timestamp stored in expires_at, guaranteeing tz-aware."""
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+@router.get("/{file_id}")
+async def download_shared_file(
+    file_id: str,
+    request: Request,
+    sig: Optional[str] = None,
+    download_token: Optional[str] = None,
+    session_token: Optional[str] = None,
+):
+    """
+    Serve a file previously registered via POST /api/internal/agent-files/share.
+
+    Query parameters:
+    - sig (required): minted at share time (192-bit entropy)
+    - session_token (required iff the agent has require_email=true)
+
+    `download_token` is accepted as a legacy alias but deprecated —
+    Trinity's credential sanitizer redacts `...TOKEN...=value` query
+    pairs from agent responses, stripping the token in transit. New
+    URLs emit `?sig=...`.
+    """
+    client_ip = _get_client_ip(request)
+    check_public_link_rate_limit(client_ip)  # 429 on limit
+
+    # Accept either `sig` (preferred) or `download_token` (legacy alias)
+    token = sig or download_token
+    if not token:
+        raise HTTPException(status_code=401, detail="sig required")
+    download_token = token  # use same variable below
+
+    row = db.get_agent_shared_file(file_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+
+    # Constant-time compare to prevent timing oracles
+    if not secrets.compare_digest(download_token, row["download_token"]):
+        raise HTTPException(status_code=401, detail="invalid download_token")
+
+    if row["revoked_at"]:
+        raise HTTPException(status_code=410, detail="revoked")
+
+    try:
+        expires = _parse_expires(row["expires_at"])
+    except ValueError:
+        logger.error("[files] malformed expires_at on file_id=%s: %r", file_id, row.get("expires_at"))
+        raise HTTPException(status_code=500, detail="storage error")
+    if datetime.now(timezone.utc) > expires:
+        raise HTTPException(status_code=410, detail="expired")
+
+    # Per-agent channel-access policy gate — same as public chat
+    agent_name = row["agent_name"]
+    if _agent_requires_email(agent_name):
+        if not session_token:
+            raise HTTPException(status_code=401, detail="session_token required")
+        valid, email = db.validate_agent_session(agent_name, session_token)
+        if not valid:
+            raise HTTPException(status_code=401, detail="invalid or expired session_token")
+
+    storage_path = os.path.join(STORAGE_ROOT, row["stored_filename"])
+    if not os.path.exists(storage_path):
+        logger.error(
+            "[files] orphan DB row for file_id=%s — stored_filename=%s missing on disk",
+            file_id, row["stored_filename"],
+        )
+        raise HTTPException(status_code=500, detail="storage error")
+
+    # Counters — best-effort
+    try:
+        db.mark_shared_file_downloaded(file_id)
+    except Exception as e:  # pragma: no cover
+        logger.warning("[files] failed to mark_downloaded for %s: %s", file_id, e)
+
+    # Audit — best-effort
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="file_share_download",
+            source="public",
+            actor_ip=client_ip,
+            target_type="agent",
+            target_id=agent_name,
+            details={
+                "file_id": file_id,
+                "filename": row["filename"],
+                "size_bytes": row["size_bytes"],
+                "mime_type": row["mime_type"],
+                "user_agent": (request.headers.get("user-agent") or "")[:200],
+            },
+            endpoint=str(request.url.path),
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning("[files] audit log failed for %s: %s", file_id, e)
+
+    headers = {
+        "Content-Disposition": _format_disposition(row["filename"]),
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+        "Content-Length": str(row["size_bytes"]),
+    }
+    mime_type = row["mime_type"] or "application/octet-stream"
+    return StreamingResponse(
+        _iter_file(storage_path),
+        media_type=mime_type,
+        headers=headers,
+    )

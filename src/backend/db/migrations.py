@@ -1643,6 +1643,58 @@ def _migrate_agent_schedules_webhook(cursor, conn):
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_webhook_token "
         "ON agent_schedules(webhook_token) WHERE webhook_token IS NOT NULL"
     )
+    conn.commit()
+
+
+def _migrate_agent_shared_files(cursor, conn):
+    """Create agent_shared_files table and add file_sharing_enabled to agent_ownership.
+
+    FILES-001 / amazing-file-outbound: outbound file sharing via public URL that
+    inherits the agent's channel-access policy. Agents call the `share_file` MCP
+    tool; backend extracts the named file via Docker SDK `get_archive` and mints
+    a token-scoped download URL under /api/files/{id}.
+
+    FK uses ON UPDATE CASCADE so rows self-heal if an agent is renamed
+    (defense-in-depth alongside the explicit UPDATE in
+    db.agent_settings.metadata.rename_agent).
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_shared_files (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            mime_type TEXT,
+            download_token TEXT UNIQUE NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            one_time INTEGER DEFAULT 0,
+            consumed_at TEXT,
+            download_count INTEGER DEFAULT 0,
+            last_downloaded_at TEXT,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+                ON DELETE CASCADE ON UPDATE CASCADE
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_files_agent ON agent_shared_files(agent_name)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_files_token ON agent_shared_files(download_token)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_files_expires ON agent_shared_files(expires_at) WHERE revoked_at IS NULL"
+    )
+
+    cursor.execute("PRAGMA table_info(agent_ownership)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "file_sharing_enabled" not in columns:
+        cursor.execute(
+            "ALTER TABLE agent_ownership ADD COLUMN file_sharing_enabled INTEGER DEFAULT 0"
+        )
 
     conn.commit()
 
@@ -1699,4 +1751,5 @@ MIGRATIONS = [
     ("sync_health", _migrate_sync_health),
     ("whatsapp_bindings", _migrate_whatsapp_bindings),
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
+    ("agent_shared_files", _migrate_agent_shared_files),
 ]
