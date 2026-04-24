@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import tarfile
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,12 @@ MAX_AGENT_QUOTA_BYTES = 500 * 1024 * 1024       # 500 MB per agent
 MIN_EXPIRES_IN = 60                             # 1 minute
 MAX_EXPIRES_IN = 7 * 24 * 60 * 60               # 7 days
 DEFAULT_EXPIRES_IN = MAX_EXPIRES_IN
+
+# C3: refuse writes when /data has less than this much free space.
+# 500 MB × (typical concurrent shares + SQLite WAL + Vector logs) is a
+# reasonable floor before the shared `/data` mount starts causing
+# problems for the backend itself (DB writes, Vector, log archives).
+MIN_FREE_DISK_BYTES = 500 * 1024 * 1024
 
 PUBLISH_DIR = "/home/developer/public"
 STORAGE_ROOT = "/data/agent-files"
@@ -255,6 +262,38 @@ def _ensure_storage_dir() -> str:
     return STORAGE_ROOT
 
 
+def check_disk_space(needed_bytes: int, *, root: str = "/data", min_free: int = MIN_FREE_DISK_BYTES) -> None:
+    """
+    Refuse to write if `root` doesn't have `needed_bytes + min_free` free.
+
+    Raises HTTPException(507 Insufficient Storage) on failure. This runs
+    before every share to protect the shared `/data` mount — the same
+    filesystem holds the SQLite DB, Vector logs, and log archives, so
+    letting an agent fill it causes platform-wide outage, not just a
+    failed share.
+    """
+    try:
+        usage = shutil.disk_usage(root)
+    except Exception as e:
+        logger.warning(f"[shared-files] disk_usage({root}) failed: {e} — skipping check")
+        return
+    required = needed_bytes + min_free
+    if usage.free < required:
+        logger.error(
+            "[shared-files] refusing write: /data has %d free bytes, "
+            "need %d (file=%d + floor=%d)",
+            usage.free, required, needed_bytes, min_free,
+        )
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                f"INSUFFICIENT_STORAGE: platform disk is too full to accept "
+                f"a {needed_bytes}-byte share (need {min_free} bytes free after write, "
+                f"have {usage.free})."
+            ),
+        )
+
+
 async def create_share(
     agent_name: str,
     filename: str,
@@ -293,8 +332,11 @@ async def create_share(
     # --- quota ---
     enforce_quota(agent_name, size_bytes)
 
-    # --- persist bytes on disk ---
+    # --- disk-space pre-check (C3) ---
     _ensure_storage_dir()
+    check_disk_space(size_bytes)
+
+    # --- persist bytes on disk ---
     file_id = str(uuid.uuid4())
     stored_filename = file_id  # UUID filename — name is opaque on disk
     stored_path = os.path.join(STORAGE_ROOT, stored_filename)
