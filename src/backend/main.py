@@ -107,12 +107,7 @@ from services.sync_health_service import sync_health_service
 from services.cleanup_service import cleanup_service, set_cleanup_ws_manager
 
 
-# Import process engine WebSocket publisher
-from services.process_engine.events import set_websocket_publisher_broadcast
 from services.platform_audit_service import platform_audit_service, AuditEventType
-
-# Import execution recovery function
-from routers.executions import run_execution_recovery
 
 
 # Import logging configuration

@@ -5,11 +5,6 @@ Single entry point for cross-cutting audit logging across the Trinity
 platform: agent lifecycle, authentication, authorization, configuration,
 credentials, MCP operations, git operations, and system events.
 
-Distinct from the Process Engine's `AuditService`
-(`services/process_engine/services/audit.py`) which records process
-workflow events. The two systems are intentionally separate per the
-SEC-001 architecture document; a unified query layer can span both later.
-
 Phase 1 ships the service surface and the global instance. Phase 2
 will sprinkle `await platform_audit_service.log(...)` calls through the
 existing routers and services.

@@ -191,7 +191,6 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
-import { useAlertsStore } from '../stores/alerts'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useWebSocket } from '../utils/websocket'
@@ -200,7 +199,6 @@ import axios from 'axios'
 const router = useRouter()
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
-const alertsStore = useAlertsStore()
 const notificationsStore = useNotificationsStore()
 const operatorQueueStore = useOperatorQueueStore()
 const { isConnected } = useWebSocket()
@@ -218,11 +216,11 @@ const isAgentSection = computed(() => {
 
 // Combined Ops badge counts
 const combinedOpsCount = computed(() =>
-  operatorQueueStore.pendingCount + notificationsStore.pendingCount + alertsStore.activeCount
+  operatorQueueStore.pendingCount + notificationsStore.pendingCount
 )
 
 const hasCriticalOpsItem = computed(() =>
-  operatorQueueStore.criticalCount > 0 || notificationsStore.hasUrgentPending || alertsStore.activeCount > 0
+  operatorQueueStore.criticalCount > 0 || notificationsStore.hasUrgentPending
 )
 
 // Theme management
@@ -252,8 +250,7 @@ onMounted(async () => {
   // Add click outside listener
   document.addEventListener('click', handleClickOutside)
 
-  // Start polling for alerts and notifications
-  alertsStore.startPolling(60000)
+  // Start polling for notifications
   notificationsStore.startPolling(60000)
 
   // Fetch user role from backend
@@ -269,7 +266,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
-  alertsStore.stopPolling()
   notificationsStore.stopPolling()
 })
 

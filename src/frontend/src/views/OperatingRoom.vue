@@ -50,24 +50,6 @@
           </span>
         </button>
         <button
-          @click="switchTab('cost-alerts')"
-          class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px"
-          :class="activeTab === 'cost-alerts'
-            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-            : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-        >
-          Cost Alerts
-          <span
-            v-if="alertsStore.activeCount > 0"
-            class="ml-1.5 px-1.5 py-0.5 text-xs font-medium rounded-full"
-            :class="activeTab === 'cost-alerts'
-              ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-              : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'"
-          >
-            {{ alertsStore.activeCount }}
-          </span>
-        </button>
-        <button
           @click="switchTab('resolved')"
           class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px"
           :class="activeTab === 'resolved'
@@ -125,11 +107,6 @@
         <NotificationsPanel />
       </div>
 
-      <!-- Cost Alerts Tab -->
-      <div v-if="activeTab === 'cost-alerts'">
-        <CostAlertsPanel />
-      </div>
-
       <!-- Resolved Items Tab -->
       <div v-if="activeTab === 'resolved'">
         <div v-if="operatorQueueStore.resolvedItems.length === 0" class="text-center py-16">
@@ -155,20 +132,17 @@ import NavBar from '../components/NavBar.vue'
 import QueueCard from '../components/operator/QueueCard.vue'
 import ResolvedCard from '../components/operator/ResolvedCard.vue'
 import NotificationsPanel from '../components/operator/NotificationsPanel.vue'
-import CostAlertsPanel from '../components/operator/CostAlertsPanel.vue'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useNotificationsStore } from '../stores/notifications'
-import { useAlertsStore } from '../stores/alerts'
 import { useAgentsStore } from '../stores/agents'
 
 const route = useRoute()
 const router = useRouter()
 const operatorQueueStore = useOperatorQueueStore()
 const notificationsStore = useNotificationsStore()
-const alertsStore = useAlertsStore()
 const agentsStore = useAgentsStore()
 
-const VALID_TABS = ['needs-response', 'notifications', 'cost-alerts', 'resolved']
+const VALID_TABS = ['needs-response', 'notifications', 'resolved']
 
 // Initialize tab from query param or default
 const activeTab = ref(
@@ -178,8 +152,7 @@ const activeTab = ref(
 const subtitle = computed(() => {
   const queueCount = operatorQueueStore.pendingCount
   const notifCount = notificationsStore.pendingCount
-  const alertCount = alertsStore.activeCount
-  const total = queueCount + notifCount + alertCount
+  const total = queueCount + notifCount
 
   if (total === 0) {
     return 'All clear \u2014 your agents are working independently'
@@ -188,7 +161,6 @@ const subtitle = computed(() => {
   const parts = []
   if (queueCount > 0) parts.push(`${queueCount} pending ${queueCount === 1 ? 'response' : 'responses'}`)
   if (notifCount > 0) parts.push(`${notifCount} ${notifCount === 1 ? 'notification' : 'notifications'}`)
-  if (alertCount > 0) parts.push(`${alertCount} cost ${alertCount === 1 ? 'alert' : 'alerts'}`)
   return parts.join(', ')
 })
 
@@ -200,7 +172,6 @@ function switchTab(tab) {
 function refresh() {
   operatorQueueStore.fetchItems()
   notificationsStore.fetchPendingCount()
-  alertsStore.fetchActiveCount()
 }
 
 onMounted(() => {

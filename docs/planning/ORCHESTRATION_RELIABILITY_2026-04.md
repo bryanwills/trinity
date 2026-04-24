@@ -3,7 +3,7 @@
 **Date:** 2026-04-13 (revised 2026-04-20)
 **Status:** Proposed sequencing for execution-time orchestration, event subscriptions, and multi-agent reliability.
 
-**Progress:** Sprint A — **7/7 complete**. Sprint B — **1/1 complete**. Sprint C — **3/5 complete**: #260 (PR #316), #271 (PR #332), #264 (PR #334). **#294 closed** (pause rationale vindicated — see Sprint C row). **#291 remains paused pending #430.** Sprint D — **1/4 complete: #306 shipped.** **Next: #428 (CAPACITY-CONSOLIDATE) after 2-week soak on #306.**
+**Progress:** Sprint A — **7/7 complete**. Sprint B — **1/1 complete**. Sprint C — **3/5 complete**: #260 (PR #316), #271 (PR #332), #264 (PR #334). **#294 closed** (pause rationale vindicated — see Sprint C row). **#291 now unblocked** (was pending #430; #430 now shipped). Sprint D — **2/4 complete: #306 + #430 shipped.** **Next: #428 (CAPACITY-CONSOLIDATE) after 2-week soak on #306.**
 
 **2026-04-20 revision:** After reviewing the accumulated orchestration surface (three queue abstractions, nine cleanup paths, twelve status-column writers, seven dispatch sites), the next priority shifted from finishing Sprint C to **push-based completion (#306) + consolidation** — see *Tier 2.5 — Simplification* below. The cleanup pyramid is load-bearing, so simplification is **additive-first**: new paths ship alongside old ones and the watchdog is retired only after push has soaked.
 
@@ -27,8 +27,9 @@ Shipping #260 on top of today's foundation would produce a *persistent* backlog 
 Sprint A (unblock):     #95 ✅, #285 ✅, #226 ✅, #286 ✅, #61 ✅, #132 ✅, #56 ✅  ← COMPLETE
 Sprint B (trace):       #305 ✅  ← COMPLETE
 Sprint C (orchestrate): #260 ✅ → #271 ✅ → #264 ✅ → [#294 PAUSED] → [#291 PAUSED]
-Sprint D (simplify):    #306 → #428 (CAPACITY-CONSOLIDATE) → #429 (CLEANUP-COLLAPSE) → #430 (PROCESS-ENGINE-DECISION)
-                        (and #408 dissolves once #306 lands)
+Sprint D (simplify):    #306 ✅ → #428 (CAPACITY-CONSOLIDATE) → #429 (CLEANUP-COLLAPSE)
+                        #430 ✅ (parallel — process engine deleted; archive on branch archive/process-engine)
+                        (and #408 dissolves once #428 lands — verified 2026-04-24: long-running call still present, #306 alone insufficient)
 Sprint E (telemetry):   #307
 Sprint F (scale):       #24, #18
 ```
@@ -103,7 +104,7 @@ Sprint F (scale):       #24, #18
 | ~~#271~~ ✅ | ~~Retry mechanism for scheduled executions~~ | **Shipped** in PR #332. Configurable `max_retries` (0-5, default 1) and `retry_delay_seconds` (30-600, default 60). Rate-limited (429) failures use 2x delay. Retries persist to DB and survive scheduler restart via `_recover_pending_retries()`. New status: `pending_retry`. |
 | ~~#294~~ 🚫 | ~~Business task validation (VALIDATE-001)~~ **— CLOSED** | Closed without implementation. Pause rationale held up: a second full Claude session per task is a 2x cost feature that's better subsumed by cheaper in-process primitives (output schemas, post-hoc validators). No new execution machinery shipped. |
 | ~~#264~~ ✅ | ~~Self-execute during chat (SELF-EXEC-001)~~ | **Shipped** in PR #334. Detects source==target, sets `X-Self-Task` header, optionally injects result back into chat session via `inject_result` parameter. Uses backlog for overflow when at capacity. |
-| #291 ⏸️ | Agent webhook triggers (WEBHOOK-001) **— PAUSED pending #430** | External → agent dispatch. The "reuse process-engine triggers vs. parallel surface" decision is easier after #430 (PROCESS-ENGINE-DECISION) (Tier 2.5) resolves whether the engine stays at all. Re-open after that. |
+| #291 | Agent webhook triggers (WEBHOOK-001) **— UNBLOCKED (2026-04-24, #430 shipped)** | External → agent dispatch. Process engine deleted (#430), so "reuse process-engine triggers" option is gone — implement as a new trigger surface that funnels through `TaskExecutionService`. |
 
 ### Architectural shift
 
@@ -152,7 +153,7 @@ Retry and validation are **not new infrastructure** — they're just new trigger
 | ~~#306~~ ✅ | ~~Redis Streams event bus (RELIABILITY-003)~~ — keystone | **Shipped.** `services/event_bus.py` (`EventBus` publisher + `StreamDispatcher` consumer), `XADD`/`XREAD BLOCK`, reconnect replay via `last-event-id` query param (regex-gated, `REPLAY_GAP_LIMIT=5000` → `resync_required`), 3-failure client eviction, MAXLEN-trimmed stream. Frontend tracks `_eid` and handles `resync_required`. `ConnectionManager.broadcast()` now funnels through `XADD`. 2-week soak window before Tier 2.5 consolidation — track push success rate + orphan count. |
 | **NEW** | **#428 (CAPACITY-CONSOLIDATE)** | Merge `ExecutionQueue` + `SlotService` + `BacklogService` into one `CapacityManager` with `(max_concurrent, overflow_policy)` config. `/chat` = `(1, queue_in_memory)`. `/task` = `(N, queue_persistent)`. Depends on #306 so the drain/TTL logic has the event consumer to lean on. |
 | **NEW** | **#429 (CLEANUP-COLLAPSE)** | Once agent is authoritative for "is this running?" (via push), retire Phase 1/1b/1c/3 reconciliation. Slot TTL disappears — capacity is recomputed from DB, not TTL'd. Target: 9 paths → 1 periodic `DB ⟷ agent./api/running` sync. **Do not ship until #306 has been in prod ≥2 weeks with zero observed orphans.** |
-| **NEW** | **#430 (PROCESS-ENGINE-DECISION)** | Today `process_engine/engine/handlers/agent_task.py` bypasses `TaskExecutionService` entirely (architecture.md marks engine as "dormant, out of scope"). Ship one of: (a) fold `agent_task` through TES, or (b) delete the engine. Sitting in the middle means every orchestration invariant has a silent exception. |
+| ~~#430~~ ✅ | ~~Process Engine decision (PROCESS-ENGINE-DECISION)~~ | **Shipped (2026-04-24). Option B — delete.** `services/process_engine/` removed (~8 000 LOC). All PE routers (`processes`, `process_templates`, `executions`, `audit`, `alerts`, `approvals`, `triggers`) deleted. Frontend views/stores/components removed. Dead imports purged from `main.py`. Cost-alerts tab removed from OperatingRoom (was already 404ing). Archive preserved on branch `archive/process-engine`. Every future orchestration invariant now applies universally — no more "except process engine" footnotes. |
 
 ### Architectural shift
 
@@ -336,6 +337,6 @@ New triggers, all funnel into the same executor:
 9. ~~**Next:** Pick up #294 (validation).~~ — **Closed without implementation.**
 10. ~~**Next (2026-04-20):** Pick up **#306**~~ — ✅ **Shipped.** Soak window started on merge date; track push success rate + orphan count.
 11. ~~**Follow-up:** Create and rank the three new issues from Tier 2.5~~ — Issues #428, #429, #430 exist; rank + tier assignment tracked in the Roadmap project board (groomed 2026-04-22).
-12. **Next (current):** Pick up **#428 (CAPACITY-CONSOLIDATE)** once #306 has ≥2 weeks of clean soak (zero orphan recoveries, push success ≥99.9%). In parallel, pick up **#430 (PROCESS-ENGINE-DECISION)** — no soak dependency, unblocks #291.
+12. ~~**Next (current):** Pick up **#428 (CAPACITY-CONSOLIDATE)** once #306 has ≥2 weeks of clean soak (zero orphan recoveries, push success ≥99.9%). In parallel, pick up **#430 (PROCESS-ENGINE-DECISION)** — no soak dependency, unblocks #291.~~ ✅ **#430 shipped (2026-04-24)**: Option B (delete) executed. Process engine archived on `archive/process-engine` branch. **Next:** pick up **#291 (WEBHOOK-001)** — now unblocked — and **#428 (CAPACITY-CONSOLIDATE)** once soak completes.
 13. **Re-evaluate #408** — #306 is live, so the predicted dissolution condition now holds. Verify no long-running HTTP call remains in `TaskExecutionService` and close as dissolved (no direct code change needed).
 14. **Then:** #429 (CLEANUP-COLLAPSE) gated on #428 landing + continued clean soak — the riskiest step per §"Additive-first migration."

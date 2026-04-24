@@ -1,9 +1,8 @@
 """
 Platform Audit Log database operations (SEC-001 / Issue #20 — Phase 1).
 
-Append-only access to the `audit_log` table. Distinct from the Process Engine's
-`AuditService` (`services/process_engine/services/audit.py`) which tracks
-process workflow events in a separate `audit_entries` table.
+Append-only access to the `audit_log` table. The old Process Engine audit
+(`audit_entries` table) was removed in #430 (2026-04-24).
 
 Insertions go through this layer; UPDATE and DELETE are blocked by SQLite
 triggers in `db/schema.py` and `db/migrations.py` to enforce immutability.

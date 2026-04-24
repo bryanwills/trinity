@@ -383,9 +383,6 @@ docker exec trinity-vector sh -c "tail -50 /data/logs/agents.json" | jq .
 └── [template files...]    # Any other files from template
 ```
 
-### Process Engine
-
-> **OUT OF SCOPE**: The Process Engine (`src/backend/services/process_engine/`) is not currently being developed. Code exists but is dormant. See `docs/memory/feature-flows/process-engine/` for historical design docs.
 
 ### Background Services
 
@@ -644,11 +641,7 @@ agent — detects the §P5 silent-clobber setup at fleet level.
 
 **Storage**: append-only `audit_log` table in main SQLite DB. SQLite triggers block UPDATE unconditionally and DELETE within the 365-day retention window.
 
-**Distinct from `/api/audit`**: the existing `/api/audit` router exposes the
-Process Engine's workflow audit (`audit_entries` table). The new `/api/audit-log`
-covers cross-cutting platform events (lifecycle, auth, MCP, credentials, etc.)
-via the new `audit_log` table. Both are intentionally separate per the SEC-001
-architecture; a unified surface can be added later.
+**Note on `/api/audit`**: the old `/api/audit` router was part of the Process Engine (removed 2026-04-24, #430). The platform audit log at `/api/audit-log` is the only audit surface going forward.
 
 **All phases complete.** Phase 1: infrastructure. Phase 2a: agent lifecycle
 audit. Phase 2b: auth, sharing, credentials, settings, rename, request-ID

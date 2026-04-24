@@ -316,29 +316,6 @@
 
 ---
 
-## Process Engine Flows
-
-The Process Engine enables BPMN-inspired workflow orchestration with AI agents.
-
-**Index Document**: [process-engine/README.md](feature-flows/process-engine/README.md)
-
-| Flow | Document | Description |
-|------|----------|-------------|
-| Process Definition | [process-definition.md](feature-flows/process-engine/process-definition.md) | YAML schema, validation, versioning |
-| Process Execution | [process-execution.md](feature-flows/process-engine/process-execution.md) | Execution engine, step handlers, state machine |
-| Process Monitoring | [process-monitoring.md](feature-flows/process-engine/process-monitoring.md) | Real-time WebSocket events |
-| Human Approval | [human-approval.md](feature-flows/process-engine/human-approval.md) | Approval gates, inbox, timeout handling |
-| Process Scheduling | [process-scheduling.md](feature-flows/process-engine/process-scheduling.md) | Cron triggers, timer steps |
-| Process Analytics | [process-analytics.md](feature-flows/process-engine/process-analytics.md) | Cost tracking, metrics, trends |
-| Sub-Processes | [sub-processes.md](feature-flows/process-engine/sub-processes.md) | Parent-child linking, breadcrumbs |
-| Agent Roles (EMI) | [agent-roles-emi.md](feature-flows/process-engine/agent-roles-emi.md) | Executor/Monitor/Informed pattern |
-| Process Templates | [process-templates.md](feature-flows/process-engine/process-templates.md) | Bundled and user templates |
-| Onboarding & Docs | [onboarding-documentation.md](feature-flows/process-engine/onboarding-documentation.md) | Process Wizard, Help panel |
-| Execution List Page | [execution-list-page.md](feature-flows/execution-list-page.md) | `/executions` route |
-| Process Dashboard | [process-dashboard.md](feature-flows/process-dashboard.md) | `/process-dashboard` analytics |
-
----
-
 ## Archived Flows
 
 Preserved in `feature-flows/archive/` for historical reference.
