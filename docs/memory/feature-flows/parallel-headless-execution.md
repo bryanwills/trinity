@@ -565,41 +565,36 @@ async def _run_async_task_with_persistence(
     agent_name: str,
     request: ParallelTaskRequest,
     execution_id: str,
-    task_activity_id: str,
     collaboration_activity_id: Optional[str],
     x_source_agent: Optional[str],
-    release_slot: bool = False,
     user_id: Optional[int] = None,
-    user_email: Optional[str] = None
+    user_email: Optional[str] = None,
+    subscription_id: Optional[str] = None,
+    is_self_task: bool = False,
+    self_task_activity_id: Optional[str] = None,
 ):
     """
-    Background task execution for async mode.
-    Runs the task and updates execution record/activities when complete.
-    Note: This still uses inline logic (not TaskExecutionService) because
-    async mode needs to manage its own activity IDs and collaboration tracking.
+    Async /task background wrapper (issue #95).
+
+    Delegates the full execution lifecycle to TaskExecutionService (single
+    path for slot / activity / sanitization / retry / release with
+    `slot_already_held=True`) and layers on chat-endpoint-specific post-task
+    side effects: chat session persistence (THINK-001), `chat_response_ready`
+    WebSocket broadcast, collaboration activity completion, and SELF-EXEC-001
+    `inject_result` handling.
     """
-    try:
-        # Call agent container (agent_post_with_retry imported from task_execution_service)
-        response = await agent_post_with_retry(agent_name, "/api/task", payload, ...)
+    # Delegate slot+activity+execution lifecycle to the service
+    result = await task_service.execute_task(
+        agent_name=agent_name,
+        message=request.message,
+        execution_id=execution_id,
+        slot_already_held=True,  # caller (router or backlog drain) pre-acquired
+        parent_activity_id=collaboration_activity_id,
+        # ... other passthrough fields
+    )
 
-        # Sanitize + update execution record with success
-        db.update_execution_status(execution_id=execution_id, status="success", ...)
-
-        # Persist to chat session if requested (THINK-001)
-        # Complete activities
-        await activity_service.complete_activity(task_activity_id, ...)
-
-    except Exception as e:
-        # Update execution record with failure
-        db.update_execution_status(execution_id=execution_id, status="failed", error=str(e))
-
-        # Complete activities with failure
-        await activity_service.complete_activity(task_activity_id, status="failed", ...)
-
-    finally:
-        # Release slot when task completes (CAPACITY-001)
-        if slot_service and release_slot:
-            await slot_service.release_slot(agent_name, execution_id)
+    # Post-task: chat session persistence, WS broadcast, collab completion,
+    # self-task activity completion + result injection (if is_self_task).
 ```
 
 **Endpoint Logic — Async branch** (`src/backend/routers/chat.py:735-808`):

@@ -923,7 +923,10 @@ async def execute_parallel_task(
                 x_mcp_key_name=x_mcp_key_name,
                 triggered_by=triggered_by,
                 collaboration_activity_id=collaboration_activity_id,
-                task_activity_id=None,  # chat_start tracked on drain to keep stream clean
+                # #496: thread self-task fields so SELF-EXEC-001 (#264)
+                # inject_result still works when a self-task overflows to backlog.
+                is_self_task=is_self_task,
+                self_task_activity_id=self_task_activity_id,
             )
             if enqueued:
                 logger.info(

@@ -57,7 +57,7 @@ The backlog gives Trinity:
      slot acquired                           slot full
              │                                      │
              ▼                                      ▼
-    _execute_task_background()          backlog.enqueue()
+    _run_async_task_with_persistence()  backlog.enqueue()
              │                                      │
              ▼                          ┌───────────┴───────────┐
      finally: release_slot              │                       │
@@ -87,9 +87,10 @@ The backlog gives Trinity:
       │
       ▼
   asyncio.create_task(
-      _execute_task_background(
-          release_slot=True,
+      _run_async_task_with_persistence(
           identity from backlog_metadata,
+          # is_self_task / self_task_activity_id / inject_result
+          # threaded through so SELF-EXEC-001 (#264) survives queueing
       )
   )
 ```
@@ -149,6 +150,7 @@ identity and request parameters:
   "create_new_session": false,
   "chat_session_id": null,
   "resume_session_id": null,
+  "inject_result": false,
   "user_id": 42,
   "user_email": "user@example.com",
   "subscription_id": "sub-xyz",
@@ -157,7 +159,8 @@ identity and request parameters:
   "x_mcp_key_name": "my-key",
   "triggered_by": "manual",
   "collaboration_activity_id": null,
-  "task_activity_id": null
+  "is_self_task": false,
+  "self_task_activity_id": null
 }
 ```
 
@@ -198,7 +201,8 @@ if not slot_acquired:
         x_mcp_key_name=x_mcp_key_name,
         triggered_by=triggered_by,
         collaboration_activity_id=collaboration_activity_id,
-        task_activity_id=None,
+        is_self_task=is_self_task,
+        self_task_activity_id=self_task_activity_id,
     )
     if enqueued:
         return {"status": "queued", "execution_id": execution_id, ...}
@@ -222,7 +226,7 @@ if _exec_row and _exec_row.status == TaskExecutionStatus.QUEUED:
 | Method | Purpose |
 |---|---|
 | `enqueue(...)` | Check depth, persist `backlog_metadata`, flip row to QUEUED. Returns False if at cap. |
-| `drain_next(agent_name)` | Acquire sentinel slot → atomically claim row → swap to real execution_id slot → reconstruct `ParallelTaskRequest` → spawn `_execute_task_background`. |
+| `drain_next(agent_name)` | Acquire sentinel slot → atomically claim row → swap to real execution_id slot → reconstruct `ParallelTaskRequest` (including `inject_result`) → spawn `_run_async_task_with_persistence` (#496: was `_execute_task_background`, deleted by #95). |
 | `on_slot_released(agent_name)` | Callback registered with SlotService. Tries `drain_next` once per release. |
 | `expire_stale(max_age_hours=24)` | Maintenance: mark old queued rows as FAILED. |
 | `drain_orphans_all()` | Maintenance: iterate agents with queued work, drain one item each. |
@@ -231,8 +235,20 @@ if _exec_row and _exec_row.status == TaskExecutionStatus.QUEUED:
 Design invariants:
 - Slot acquired **before** row is claimed — prevents RUNNING-without-slot orphans.
 - Single-statement `UPDATE ... WHERE id=(SELECT ... LIMIT 1) RETURNING` — atomic claim.
-- `_execute_task_background` is late-imported inside `_spawn_drain` to avoid a
-  `routers.chat` ↔ `services.backlog_service` cycle.
+- `_run_async_task_with_persistence` is late-imported inside `_spawn_drain` to
+  avoid a `routers.chat` ↔ `services.backlog_service` cycle. **#496 regression
+  guard**: `tests/unit/test_backlog.py::TestLazyImportTarget` parses
+  `routers/chat.py` via AST and asserts the import target exists; a paired test
+  asserts the lazy-import string in `services/backlog_service.py` matches the
+  validated allow-list. Catches both directions of drift without booting the
+  backend (the symptom that allowed #496 to ship: a `SimpleNamespace` mock
+  injected the missing symbol back in, masking the production `ImportError`).
+- Drain spawn failures emit a stable log token `backlog_drain_spawn_failed`
+  so log-based detection (Vector / dashboards) can catch import drift or
+  similar spawn-time regressions at fleet scale rather than per-row.
+- Self-task fields (`is_self_task`, `self_task_activity_id`) are captured at
+  enqueue and threaded through drain so SELF-EXEC-001 (#264) `inject_result`
+  semantics survive backlog overflow.
 - Identity replayed from `backlog_metadata`; no re-auth at drain time.
 
 ### Slot Service — `src/backend/services/slot_service.py`
@@ -316,13 +332,13 @@ page if demand emerges.
 | Corrupt `backlog_metadata` JSON | Row marked FAILED with reason, slot released, drain continues with next item. |
 | Slot acquisition fails after claim | Row released back to QUEUED via `release_claim_to_queued`; next callback retries. |
 | Backend crash mid-drain | Row stays RUNNING with no Claude session ID — existing cleanup service recovers it within the timeout window. New queued rows are drained by the 60s maintenance loop on restart. |
-| Agent container gone when drain fires | `_execute_task_background` surfaces an HTTP error, row marked FAILED. |
+| Agent container gone when drain fires | `_run_async_task_with_persistence` surfaces an HTTP error via `TaskExecutionService`, row marked FAILED. |
 | Concurrent drains on same agent | Atomic UPDATE guarantees only one callback wins the row; others get None and release their sentinel slots. |
 | Cancel-while-queued | Terminate endpoint short-circuits, row moves to CANCELLED. The claim SQL's `WHERE status='queued'` filter naturally skips cancelled rows, so the drain path is race-safe. |
 
 ## Testing
 
-Unit tests: `tests/unit/test_backlog.py` (29 tests, no backend/Docker required).
+Unit tests: `tests/unit/test_backlog.py` (33 tests, no backend/Docker required).
 
 Coverage:
 - TaskExecutionStatus.QUEUED enum value
@@ -331,12 +347,18 @@ Coverage:
 - ScheduleOperations backlog queries: transition to queued, atomic FIFO claim,
   agent isolation, release-claim-back, single cancel, bulk cancel for agent,
   stale expiry (normal + tiny-threshold), list agents with queued
-- `BacklogService.enqueue`: under cap succeeds, at cap rejected
+- `BacklogService.enqueue`: under cap succeeds, at cap rejected,
+  self-task fields captured for SELF-EXEC-001 round-trip (#496)
 - `BacklogService.drain_next`: empty noop, failed-claim releases slot,
   corrupt metadata marks failed, slot-acquire-failure noop, happy path
-  spawns background task with reconstructed request
+  spawns background task with reconstructed request,
+  self-task fields threaded through to `_run_async_task_with_persistence` (#496)
 - `SlotService.register_on_release` + `release_slot` fan-out, per-callback
   exception isolation
+- **#496 regression guards**: AST-based check that
+  `_run_async_task_with_persistence` is defined in `routers/chat.py`, and
+  inverse check that the lazy-import string in
+  `services/backlog_service.py` matches the validated allow-list
 
 ### Prerequisites
 
@@ -389,8 +411,15 @@ CANCELLED state; task never runs.
       gets one drain per maintenance tick)
 - [ ] Backlog entries older than 24h — expired to FAILED on next tick
 
-**Last Tested**: 2026-04-13 (unit tests only; manual scenarios pending)
-**Status**: ✅ Unit tests passing; integration testing recommended post-merge
+**Last Tested**: 2026-04-25 (unit tests; manual scenarios pending)
+**Status**: ✅ 33 unit tests passing; integration testing recommended post-merge
+
+## Changelog
+
+| Date | Change |
+|---|---|
+| 2026-04-13 | Initial implementation (PR #316). |
+| 2026-04-25 | **#496 fix**: lazy-import target updated from `_execute_task_background` (deleted by #95) to `_run_async_task_with_persistence`. Drain had been silently failing with `ImportError` since #95 because the existing happy-path test injected a `SimpleNamespace` stub into `sys.modules["routers.chat"]` with whatever attribute name it expected. AST-based regression guards added. Self-task fields (`is_self_task`, `self_task_activity_id`, `inject_result`) now captured at enqueue and rehydrated on drain so SELF-EXEC-001 (#264) survives backlog overflow. Drain spawn failures emit stable log token `backlog_drain_spawn_failed`. Stale `task_activity_id` field dropped from metadata (the post-#95 service tracks CHAT_START itself). |
 
 ## Acceptance Criteria Coverage
 
