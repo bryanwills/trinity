@@ -33,7 +33,7 @@ Read backend routers, frontend views, feature flows, and recent changes to produ
 | Deployment config | `.env.example`, `scripts/deploy/*.sh`, `docker-compose.yml`, `docker-compose.prod.yml`, `deploy.config.example` | Yes | No |
 | Trinity Docs site | `../trinity-docs/app/getting-started/*.tsx` | Yes | No |
 | Abilities repo | `github.com/abilityai/abilities` (README) | Yes | No |
-| Ops runbook (private, pattern source for ops content) | `../trinity-ops/playbooks/*.md`, `../trinity-ops/instances/_template/scripts/*.sh`, `../trinity-ops/instances/_template/CLAUDE.md` | Yes | No |
+| Ops runbook (private, pattern source for ops content) | `../ops-runbook/playbooks/*.md`, `../ops-runbook/instances/_template/scripts/*.sh`, `../ops-runbook/instances/_template/CLAUDE.md` | Yes | No |
 | Git history | `git log --since` | Yes | No |
 | Existing user docs | `docs/user-docs/**/*.md` | Yes | Yes |
 
@@ -60,7 +60,7 @@ These tutorial-style guides walk users through end-to-end tasks. Keep them in sy
 
 **Sync rule**: When the trinity-docs source changes, update the corresponding guide to match. Convert TSX to markdown, preserving structure and content. **Code wins on conflict** — if trinity-docs disagrees with `.env.example`, `scripts/deploy/*.sh`, or `docker-compose.yml`, fix the local guide to match observed repo behavior and note the divergence for upstream.
 
-**Ops-runbook rule**: Pages under `guides/deploying/` (especially `upgrading.md`, `backup-and-restore.md`, `monitoring.md`) draw their *patterns* from the private ops runbook at `../trinity-ops/`. Treat that as a pattern library, not a paste source. See Step 2h for what's safe to import vs. what must stay private.
+**Ops-runbook rule**: Pages under `guides/deploying/` (especially `upgrading.md`, `backup-and-restore.md`, `monitoring.md`) draw their *patterns* from the local private ops runbook. Treat that as a pattern library, not a paste source. See Step 2h for what's safe to import vs. what must stay private.
 
 ### Deployment config reading rules
 
@@ -204,7 +204,7 @@ This identifies what has changed recently and which docs may need updating.
 - User-facing labels and actions
 - State management patterns
 
-**2h. Ops-runbook patterns (for `guides/deploying/upgrading.md`, `backup-and-restore.md`, `monitoring.md`)** — Read `../trinity-ops/playbooks/upgrade-instance.md`, `../trinity-ops/playbooks/monitoring-instance.md`, `../trinity-ops/instances/_template/CLAUDE.md`, and the helper scripts in `../trinity-ops/instances/_template/scripts/` (`update.sh`, `health-check.sh`, `restart.sh`, `status.sh`). Treat as a **pattern library**, not a paste source.
+**2h. Ops-runbook patterns (for `guides/deploying/upgrading.md`, `backup-and-restore.md`, `monitoring.md`)** — Read the local private ops runbook: `playbooks/upgrade-instance.md`, `playbooks/monitoring-instance.md`, `instances/_template/CLAUDE.md`, and the helper scripts in `instances/_template/scripts/` (`update.sh`, `health-check.sh`, `restart.sh`, `status.sh`). Treat as a **pattern library**, not a paste source.
 
 **Safe to import (the rules and shapes that make production work):**
 - The "use `docker compose restart`, never `down/up`" rule and *why* (preserves agent containers and `trinity-agent-network`).
@@ -222,7 +222,7 @@ This identifies what has changed recently and which docs may need updating.
 - Any `sshpass`, `ssh -i`, or `ssh user@host`-prefixed command — local-host examples only.
 - Any reference to specific instance directories (`instances/dgx/` etc.) or instance-specific scripts.
 - Any password, token, or API-key value (even masked) from ops `.env` files.
-- The phrase "trinity-ops" itself, or any path that reveals the private repo's structure.
+- Any private repo name or internal path that reveals the ops repo's structure.
 - Multi-instance management workflows (`source .env && ./scripts/run.sh ...`) — that's an operator-fleet pattern, not a single-instance user pattern.
 
 When in doubt, rewrite the *idea* in localhost form. A production-ops `sshpass -p $PW ssh user@host "sudo docker logs trinity-backend"` becomes the public `docker logs trinity-backend`. The rule survives; the access pattern stays private.
@@ -486,7 +486,7 @@ find docs/user-docs -name "*.md" -type f | wc -l
 
 ```bash
 # Tokens that indicate private-repo or operator-fleet patterns
-grep -rE 'sshpass|trinity-ops|tailnet|ts\.net|ssh -i [^ ]+ [^ ]+@' docs/user-docs/guides/deploying/
+grep -rE 'sshpass|tailnet|ts\.net|ssh -i [^ ]+ [^ ]+@' docs/user-docs/guides/deploying/
 
 # Real IPs (allow only loopback and the documented agent subnet 172.28.0.0/16)
 grep -rE '\b(10|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]+\.[0-9]+' docs/user-docs/guides/deploying/ \
