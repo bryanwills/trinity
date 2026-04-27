@@ -62,6 +62,42 @@ These tutorial-style guides walk users through end-to-end tasks. Keep them in sy
 
 **Ops-runbook rule**: Pages under `guides/deploying/` (especially `upgrading.md`, `backup-and-restore.md`, `monitoring.md`) draw their *patterns* from the private ops runbook at `../trinity-ops/`. Treat that as a pattern library, not a paste source. See Step 2h for what's safe to import vs. what must stay private.
 
+### Deployment config reading rules
+
+When reading scripts and compose files to produce deployment docs:
+
+1. Read `scripts/deploy/start.sh` literally — document what it **actually does**, not what comments say it does
+2. Check `docker-compose.yml` environment blocks for which vars are **actually forwarded** to each service
+3. For vars in `.env.example` marked `[PROD]` or `[OVERLAY]`, note their scope clearly — do not present them as universally available in dev compose
+4. Never describe a feature as "auto" unless the script code proves it is
+5. `verify-platform.sh` is the canonical six-probe checklist — reference it by name, don't duplicate it inline
+
+### Operational guide template
+
+Pages under `guides/deploying/` that cover operations (upgrade, backup, monitoring) follow this structure:
+
+```markdown
+## [Operation Name]
+
+[One sentence: what this operation does and when to run it]
+
+### Pre-flight
+
+[What to check before starting. Backup steps. Smoke tests.]
+
+### Steps
+
+[Numbered, concrete commands. No vague instructions.]
+
+### Verify
+
+[How to confirm success. Commands to run. What to look for.]
+
+### Rollback
+
+[How to undo if something went wrong. Commands to restore prior state.]
+```
+
 ## Target Structure
 
 ```
