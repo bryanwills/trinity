@@ -186,9 +186,11 @@ The test suite covers:
 - **Watchdog Unit Tests** (test_watchdog_unit.py) - Reconciliation logic, orphan recovery, auto-terminate, per-agent TTL (#129, #226) [UNIT]
 - **Context Used Formula** (unit/test_context_used_formula.py) - Verify context_used = input_tokens only, not input+output (#56) [UNIT]
 - **OTel Trace Logging** (unit/test_otel_trace_logging.py) - Trace ID injection in logs, span context correlation (#305, RELIABILITY-002) [UNIT]
-- **File Upload** (unit/test_file_upload.py) - Telegram file extraction, download, message router validation, parse_message with files (#354) [UNIT]
+- **File Upload** (unit/test_file_upload.py) - Telegram file extraction, download, message router validation, parse_message with files (#354 Phase 1); workspace delivery — filename sanitization (NFKC, traversal, length, collision dedup), chat injection format `[File uploaded by {uploader}]`, all-writes-failed signaling, partial failure handling (#487 Phase 2) [UNIT]
 - **Telegram Voice** (unit/test_telegram_voice.py) - Voice transcription validation (duration/size limits), formatting, placeholder constants (#318) [UNIT]
 - **Inter-Agent Timeout** (test_inter_agent_timeout_unit.py) - FanOutRequest Optional timeout, per-subtask None dispatch, conditional asyncio.timeout wrap (#418) [UNIT]
+- **Subprocess PGroup** (unit/test_subprocess_pgroup.py) - Process-group lifecycle: terminate, drain_reader_threads (natural-drain ordering #531, buffered-data preservation), safe_close_pipes, signal_process_tree (#407, #531) [UNIT]
+- **Empty Result Classification** (unit/test_empty_result_classification.py) - Clean exit with lost result line → 502, two-field null check, raw_messages num_turns fallback, populated-metadata pass-through (#520, #521, #531) [UNIT]
 
 ### Avatars & Image Generation
 - **Avatars** (test_avatars.py) - Avatar serving, generation, regeneration, deletion, emotions, identity prompts, default generation (AVATAR-001/002/003) [SMOKE + Agent]
@@ -231,9 +233,9 @@ The test suite covers:
 
 ## Test Suite Statistics
 
-**Total Tests**: ~2,257 tests across 124 test files
+**Total Tests**: ~2,262 tests across 124 test files
 **Smoke Tests**: ~578 tests (fast, no agent creation)
-**Unit Tests**: ~165 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop, team-share gate, WhatsApp adapter (67))
+**Unit Tests**: ~170 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop, team-share gate, WhatsApp adapter (67), subprocess pgroup (11), empty result classification (13))
 **Core Tests (not slow)**: ~2,112 tests
 **Slow Tests**: ~99 tests (chat execution, fleet ops, system agent ops, execution termination, WhatsApp live-backend integration)
 **WebSocket Tests**: ~10 tests (web terminal, execution streaming)
@@ -262,6 +264,40 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 - **Healthy**: >90% pass rate, 0 critical failures
 - **Warning**: 75-90% pass rate, <5 failures
 - **Critical**: <75% pass rate or >5 failures
+
+## Recent Test Additions (2026-04-27)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_subprocess_pgroup.py` | Regression test for #531 — `test_buffered_data_preserved_after_grandchild_kill` verifies that data written to stdout before a grandchild is killed (including the final result JSON line) is not dropped when `drain_reader_threads` is called | +1 test (file total 11) |
+| `unit/test_empty_result_classification.py` | Four new tests for `_classify_empty_result` raw_messages fallback (#531): `test_raw_messages_fallback_derives_num_turns`, `test_raw_messages_fallback_not_used_when_num_turns_present`, `test_raw_messages_empty_falls_back_to_zero`, `test_raw_messages_none_falls_back_to_zero` | +4 tests (file total 13) |
+
+**Pipe drain ordering fix (#531)** — `drain_reader_threads` in `subprocess_pgroup.py`:
+
+Root cause of the "Execution completed without a result message" HTTP 502 on long agentic tasks. The old code called `safe_close_pipes()` immediately after `terminate_process_group()`, discarding the kernel pipe buffer (including the `{"type":"result"}` final JSON line) before the reader thread could drain it. Fixed: kill grandchildren first, then wait up to `post_kill_grace=30s` for natural drain; force-close only as a last resort for genuine wedges.
+
+The new `test_buffered_data_preserved_after_grandchild_kill` test spawns a subprocess that writes a sentinel `RESULT_LINE` then forks a grandchild that holds stdout open; verifies the sentinel survives the grandchild kill. The `_classify_empty_result` tests verify that `num_turns` is derived from `raw_messages` when the result line was lost (since `metadata.num_turns` is only populated by that line), while `tool_count` continues to come from metadata (accumulated per-message during parsing, so accurate even without the result line).
+
+---
+
+## Recent Test Additions (2026-04-25)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_github_init_gitignore.py` | Gitignore widen + migrate-on-push (#462) — full exclusion list coverage, idempotency, doc/constant sync, `git rm --cached` for newly-ignored files | 4 new tests (file total 6) |
+
+**Gitignore Widen + Migrate (#462)** (`unit/test_github_init_gitignore.py`):
+
+- `test_preserves_preexisting_gitignore` — existing `.gitignore` content is retained after init (pre-existing test)
+- `test_fresh_agent_ignores_env_and_mcp_json` — fresh agent gets `.env` and `.mcp.json` exclusions (pre-existing test)
+- `test_full_documented_exclusion_list_present` — all patterns in `_GITIGNORE_PATTERNS` constant are written to `.gitignore` (new)
+- `test_idempotent_double_run` — running `initialize_git_in_container` twice does not duplicate patterns (new)
+- `test_doc_and_constant_in_sync` — `_GITIGNORE_PATTERNS` constant matches the exclusion block in `TRINITY_COMPATIBLE_AGENT_GUIDE.md` (new)
+- `test_rm_cached_for_newly_ignored_files` — `sync_to_github` calls `git rm --cached` for files that are tracked but now match a `.gitignore` pattern (new)
+
+Pure unit tests over `git_service.py` stubs; no backend container required. Run via `pytest tests/unit/test_github_init_gitignore.py`.
+
+---
 
 ## Recent Test Additions (2026-04-23)
 
@@ -360,7 +396,7 @@ Pure unit tests — mock `TaskExecutionService` and stub `database`/`models` mod
 | Test File | Description | Tests Added |
 |-----------|-------------|-------------|
 | `test_github_pat.py` | Per-agent GitHub PAT: GET/PUT/DELETE endpoints, encryption roundtrip (#347) | 9 tests |
-| `unit/test_file_upload.py` | Telegram file upload support: file extraction, download, MIME validation, parse_message (#354) | 11 tests |
+| `unit/test_file_upload.py` | Telegram file upload + workspace delivery: extraction, download, MIME validation, parse_message (#354 Phase 1); filename sanitization, collision dedup, injection format, write-failure handling (#487 Phase 2) | 27 tests |
 
 **GitHub PAT (#347)** (`test_github_pat.py`):
 
@@ -401,6 +437,30 @@ Pure unit tests — mock `TaskExecutionService` and stub `database`/`models` mod
 - **TestParseMessageWithFiles** (2 tests):
   - `test_parse_message_with_photo` — parse_message populates files for photos
   - `test_parse_message_file_only_no_text` — File-only messages work without caption
+
+**Phase 2 — Workspace Delivery (#487)** (same file):
+
+- **TestFilenameSanitization** (11 tests):
+  - `test_strips_path_traversal_unix` — `../../etc/passwd` → `passwd`
+  - `test_strips_absolute_path` — `/etc/passwd` → `passwd`
+  - `test_unicode_normalize_fullwidth` — fullwidth `．．／etc／passwd` cannot survive NFKC + basename
+  - `test_unicode_normalize_preserves_content` — `café.txt` keeps `.txt` extension
+  - `test_truncates_long_filename_preserving_extension` — 300-char name truncated to ≤200, `.txt` preserved
+  - `test_truncates_long_no_extension` — extensionless 300-char name truncated to ≤200
+  - `test_collision_dedup` — repeated `data.csv` → `data.csv`, `data-1.csv`, `data-2.csv`
+  - `test_collision_dedup_no_extension` — repeated `README` → `README`, `README-1`
+  - `test_empty_name_fallback` — empty string → `file_{file_id}`
+  - `test_dot_only_fallback` — `...` → `file_{file_id}`
+  - `test_strips_unsafe_chars` — angle brackets, `?` → `_`
+
+- **TestFileDeliveryFormat** (2 tests):
+  - `test_injection_includes_verified_email` — descriptions contain `[File uploaded by alice@example.com]: …`
+  - `test_injection_falls_back_to_source_id_without_email` — descriptions contain `[File uploaded by telegram:bot42:user99]`
+
+- **TestFileDeliveryFailures** (3 tests):
+  - `test_all_writes_fail_signals_abort` — every write fails → `all_writes_failed=True`, `[File upload failed]` markers present
+  - `test_partial_failure_keeps_descriptions_and_proceeds` — one ok, one fail → both descriptions, no abort
+  - `test_validation_only_failures_do_not_signal_abort` — download None (pre-write rejection) does not flip `all_writes_failed`
 
 ---
 
