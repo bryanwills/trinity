@@ -2,14 +2,13 @@
 Public download endpoint for outbound agent file sharing (FILES-001 Step 4).
 
 Resolves the token-scoped URLs minted by POST /api/internal/agent-files/share.
-Unauthenticated — the download token IS the auth credential. Agent-level
-`require_email` policy additionally requires a valid session_token.
+Unauthenticated — the 192-bit `sig` token IS the auth credential, minted at
+share time and known only to the recipient.
 
 Error matrix:
 - 404 — file_id does not exist
 - 401 — download_token missing or wrong (constant-time compare)
 - 410 — revoked or expired
-- 401 — agent requires email + session_token missing/invalid
 - 429 — IP rate limit
 - 500 — storage file missing on disk
 """
@@ -30,10 +29,7 @@ from database import db
 from services.agent_shared_files_service import STORAGE_ROOT
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from routers.auth import get_redis_client
-from routers.public import (
-    _get_client_ip,
-    _agent_requires_email,
-)
+from routers.public import _get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -110,13 +106,12 @@ async def _validate_download_request(
     request: Request,
     sig: Optional[str],
     download_token_alias: Optional[str],
-    session_token: Optional[str],
 ) -> tuple:
     """
     Shared validation for GET and HEAD requests.
 
     Returns ``(row, storage_path, headers, mime_type, client_ip)`` on success.
-    Raises HTTPException on any failure (401 / 404 / 410 / 500 / 429 / 403).
+    Raises HTTPException on any failure (401 / 404 / 410 / 500 / 429).
     """
     client_ip = _get_client_ip(request)
     _check_file_download_rate_limit(client_ip)  # 429 on limit (C5 — dedicated bucket)
@@ -145,15 +140,6 @@ async def _validate_download_request(
     if datetime.now(timezone.utc) > expires:
         raise HTTPException(status_code=410, detail="expired")
 
-    # Per-agent channel-access policy gate — same as public chat
-    agent_name = row["agent_name"]
-    if _agent_requires_email(agent_name):
-        if not session_token:
-            raise HTTPException(status_code=401, detail="session_token required")
-        valid, _email = db.validate_agent_session(agent_name, session_token)
-        if not valid:
-            raise HTTPException(status_code=401, detail="invalid or expired session_token")
-
     storage_path = os.path.join(STORAGE_ROOT, row["stored_filename"])
     if not os.path.exists(storage_path):
         logger.error(
@@ -178,14 +164,12 @@ async def download_shared_file(
     request: Request,
     sig: Optional[str] = None,
     download_token: Optional[str] = None,
-    session_token: Optional[str] = None,
 ):
     """
     Serve a file previously registered via POST /api/internal/agent-files/share.
 
     Query parameters:
-    - sig (required): minted at share time (192-bit entropy)
-    - session_token (required iff the agent has require_email=true)
+    - sig (required): 192-bit token minted at share time, sole auth credential.
 
     `download_token` is accepted as a legacy alias but deprecated —
     Trinity's credential sanitizer redacts `...TOKEN...=value` query
@@ -193,7 +177,7 @@ async def download_shared_file(
     URLs emit `?sig=...`.
     """
     row, storage_path, headers, mime_type, client_ip = await _validate_download_request(
-        file_id, request, sig, download_token, session_token,
+        file_id, request, sig, download_token,
     )
     agent_name = row["agent_name"]
 
@@ -237,18 +221,17 @@ async def head_shared_file(
     request: Request,
     sig: Optional[str] = None,
     download_token: Optional[str] = None,
-    session_token: Optional[str] = None,
 ):
     """
     HEAD handler for link previewers / CDNs that probe before GET.
 
     Runs the same validation as GET (rate limit, token, expiry, revoke,
-    policy gate, storage presence) and returns the same headers —
-    but no body, no download counter bump, no audit row. Follows RFC 7231
-    §4.3.2: HEAD is identical to GET except the server MUST NOT return
-    a message-body.
+    storage presence) and returns the same headers — but no body, no
+    download counter bump, no audit row. Follows RFC 7231 §4.3.2:
+    HEAD is identical to GET except the server MUST NOT return a
+    message-body.
     """
     _row, _storage_path, headers, mime_type, _client_ip = await _validate_download_request(
-        file_id, request, sig, download_token, session_token,
+        file_id, request, sig, download_token,
     )
     return Response(status_code=200, headers=headers, media_type=mime_type)
