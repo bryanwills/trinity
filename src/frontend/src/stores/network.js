@@ -535,7 +535,7 @@ export const useNetworkStore = defineStore('network', () => {
     nodes.value = result
   }
 
-  function connectWebSocket() {
+  async function connectWebSocket() {
     // Reset intentional disconnect flag when intentionally connecting
     intentionalDisconnect.value = false
 
@@ -545,15 +545,25 @@ export const useNetworkStore = defineStore('network', () => {
       return
     }
 
-    let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
-    if (lastEventId.value) {
-      wsUrl += `&last-event-id=${encodeURIComponent(lastEventId.value)}`
-    }
-
     // Prevent duplicate connections
     if (websocket.value?.readyState === WebSocket.OPEN) {
       console.log('[Collaboration] WebSocket already connected')
       return
+    }
+
+    // #550: mint single-use ticket; JWT never enters the WebSocket URL.
+    let ticket
+    try {
+      const { data } = await axios.post('/api/ws/ticket')
+      ticket = data.ticket
+    } catch (err) {
+      console.error('[Collaboration] failed to mint WS ticket', err)
+      return
+    }
+
+    let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`
+    if (lastEventId.value) {
+      wsUrl += `&last-event-id=${encodeURIComponent(lastEventId.value)}`
     }
 
     try {
