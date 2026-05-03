@@ -1446,6 +1446,9 @@ class DatabaseManager:
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24):
         return self._schedule_ops.get_agent_execution_stats(agent_name, hours)
 
+    def get_agent_token_stats(self, agent_name: str):
+        return self._schedule_ops.get_agent_token_stats(agent_name)
+
     # =========================================================================
     # Slack Integration (delegated to db/slack.py) - SLACK-001
     # =========================================================================

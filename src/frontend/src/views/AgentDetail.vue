@@ -47,6 +47,7 @@
             :git-behind="gitBehind"
             :tags="agentTags"
             :all-tags="allTags"
+            :token-stats="tokenStats"
             @toggle="toggleRunning"
             @delete="deleteAgent"
             @toggle-autonomy="toggleAutonomy"
@@ -309,6 +310,9 @@ const allTags = ref([])
 const authStatus = ref(null)
 const availableSubscriptions = ref(null)
 const subscriptionChanging = ref(false)
+
+// Token usage stats (issue #250) — DB-sourced, persists across restarts
+const tokenStats = ref(null)
 
 // Resume mode state (EXEC-023)
 const resumeSessionId = computed(() => route.query.resumeSessionId || null)
@@ -822,6 +826,16 @@ async function loadAvailableSubscriptions() {
   }
 }
 
+async function loadTokenStats() {
+  if (!agent.value?.name) return
+  try {
+    tokenStats.value = await agentsStore.getAgentTokenStats(agent.value.name)
+  } catch (err) {
+    // Non-critical — don't block render
+    tokenStats.value = null
+  }
+}
+
 async function changeSubscription(subscriptionName) {
   if (!agent.value?.name) return
   subscriptionChanging.value = true
@@ -856,6 +870,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     agentTags.value = []
     // Reset auth status for new agent
     authStatus.value = null
+    tokenStats.value = null
     // DEPRECATED: Terminal tab hidden (candidate for removal)
     // if (terminalRef.value?.disconnect) {
     //   terminalRef.value.disconnect()
@@ -867,6 +882,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     await loadResourceLimits()
     await loadTags()
     await loadAuthStatus()
+    await loadTokenStats()
     // Load avatar identity for new agent (AVATAR-001)
     await loadAvatarIdentity()
     // Check if new agent has dashboard (only when running)
@@ -954,6 +970,7 @@ onMounted(async () => {
     loadAvailableEmotions(),
     loadAuthStatus(),
     loadAvailableSubscriptions(),
+    loadTokenStats(),
     ...(agent.value?.status === 'running' ? [checkDashboardExists()] : [])
   ])
   startEmotionCycling()

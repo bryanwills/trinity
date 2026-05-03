@@ -275,6 +275,56 @@
       </div>
     </div>
 
+    <!-- TOKEN USAGE ROW: 7-day sparkline + today vs average trend -->
+    <div
+      v-if="tokenStats && (tokenStats.lifetime_executions > 0)"
+      class="px-4 py-2 border-t border-gray-100 dark:border-gray-700 flex items-center space-x-4 text-xs"
+    >
+      <!-- 7-day cost sparkline -->
+      <div class="flex items-center space-x-1.5">
+        <span class="text-gray-400 dark:text-gray-500">7d</span>
+        <SparklineChart
+          :data="tokenCostSparkline"
+          color="#f59e0b"
+          :y-max="tokenCostSparklineMax"
+          :width="56"
+          :height="16"
+        />
+      </div>
+      <!-- Today's cost -->
+      <div class="flex items-center space-x-1">
+        <span class="text-gray-400 dark:text-gray-500">Today</span>
+        <span class="font-mono text-gray-700 dark:text-gray-300">${{ formatCost(tokenStats.cost_24h) }}</span>
+      </div>
+      <!-- Trend vs 7d average -->
+      <div v-if="tokenStats.avg_daily_cost > 0" class="flex items-center space-x-1">
+        <span
+          :class="trendClass"
+          class="flex items-center space-x-0.5 font-mono"
+          :title="`7d avg: $${formatCost(tokenStats.avg_daily_cost)}/day`"
+        >
+          <!-- Arrow icon -->
+          <svg v-if="tokenStats.trend_cost_pct > 5" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7" />
+          </svg>
+          <svg v-else-if="tokenStats.trend_cost_pct < -5" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+          </svg>
+          <svg v-else class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14" />
+          </svg>
+          <span>{{ formatTrendPct(tokenStats.trend_cost_pct) }} vs avg</span>
+        </span>
+      </div>
+      <!-- Lifetime cost -->
+      <div class="ml-auto flex items-center space-x-1 text-gray-400 dark:text-gray-500">
+        <span>Lifetime</span>
+        <span class="font-mono text-gray-600 dark:text-gray-400">${{ formatCost(tokenStats.lifetime_cost) }}</span>
+        <span class="text-gray-300 dark:text-gray-600">·</span>
+        <span class="font-mono">{{ tokenStats.lifetime_executions }} runs</span>
+      </div>
+    </div>
+
     <!-- ROW 3: Git Controls (only when hasGitSync) -->
     <div v-if="hasGitSync" class="px-4 py-2.5 border-t border-gray-100 dark:border-gray-700 flex items-center flex-nowrap min-w-0">
       <!-- When running: Full git controls -->
@@ -365,7 +415,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
 import SparklineChart from './SparklineChart.vue'
@@ -481,6 +531,11 @@ const props = defineProps({
   emotionAvatarUrl: {
     type: String,
     default: null
+  },
+  // Token usage stats (issue #250) — DB-sourced, persists across restarts
+  tokenStats: {
+    type: Object,
+    default: null
   }
 })
 
@@ -540,6 +595,37 @@ function saveName() {
 }
 
 const { formatBytes, formatUptime, formatRelativeTime } = useFormatters()
+
+// Token stats helpers (issue #250)
+const tokenCostSparkline = computed(() => {
+  if (!props.tokenStats?.daily_breakdown) return []
+  return props.tokenStats.daily_breakdown.map(d => d.cost)
+})
+
+const tokenCostSparklineMax = computed(() => {
+  const vals = tokenCostSparkline.value
+  if (!vals.length) return 1
+  return Math.max(...vals, 0.0001)
+})
+
+function formatCost(val) {
+  if (!val || val === 0) return '0.00'
+  if (val < 0.01) return val.toFixed(4)
+  return val.toFixed(2)
+}
+
+function formatTrendPct(pct) {
+  if (!pct) return '—'
+  const abs = Math.abs(pct)
+  return `${abs >= 1 ? Math.round(abs) : abs.toFixed(1)}%`
+}
+
+const trendClass = computed(() => {
+  const pct = props.tokenStats?.trend_cost_pct ?? 0
+  if (pct > 5) return 'text-status-warning-600 dark:text-status-warning-400'
+  if (pct < -5) return 'text-status-success-600 dark:text-status-success-400'
+  return 'text-gray-400 dark:text-gray-500'
+})
 </script>
 
 <style scoped>
