@@ -190,6 +190,27 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Spec**: `docs/requirements/DYNAMIC_THINKING_STATUS.md`
 - **Flow**: `docs/memory/feature-flows/authenticated-chat-tab.md`
 
+### 5.8 Session Tab — `--resume`-default Chat Surface (SESSION_TAB_2026-04)
+- **Status**: ✅ Implemented (2026-05-01), GA (2026-05-04)
+- **Requirement ID**: SESSION_TAB_2026-04
+- **GitHub Issue**: #651
+- **Description**: New Agent Detail tab that lives alongside the existing Chat tab. Each turn reattaches to the same Claude Code session via `claude --print --resume <uuid>`, preserving tool-result memory, mid-skill state, and reasoning state across messages — strictly more capable than Chat's stateless text-replay model.
+- **Key Features**:
+  - New `agent_sessions` and `agent_session_messages` tables, strictly parallel to `chat_sessions`/`chat_messages` (no shared state, no FK between them)
+  - Six endpoints under `/api/agents/{name}/sessions*` (create, list, get, message, reset, delete)
+  - `SessionPanel.vue` + `stores/sessions.js` reuse Chat sub-components for visual parity
+  - Stream-json parser fix recognises `{"type":"system","subtype":"init"}` (Phase 1.3)
+  - `persist_session` flag plumbed through `ParallelTaskRequest → AgentRuntime → ClaudeCodeRuntime`
+  - Resume-failure fallback: clears cache, retries cold once on missing JSONL (Anthropic upstream #39667 / #53417)
+  - Per-`(agent, claude_uuid)` Redis lock (`SET NX EX 300s`, 30s wait ceiling) prevents JSONL corruption (Anthropic #20992)
+  - Per-user ownership returns 404 on mismatch (does not leak session-id existence — E6)
+  - JSONL cleanup service: synchronous best-effort reap on reset/delete + 6h periodic sweep with 1h race guard
+  - JSONL-side fallback recovery for stdout pipe race + JSONL-side compact event capture
+  - Cross-session contamination empirical gate (`test_session_cross_contamination.py`, Anthropic #26964)
+- **Default**: ON (`session_tab_enabled` flag flipped to True for GA on 2026-05-04, PR #652)
+- **Spec**: `docs/planning/SESSION_TAB_2026-04.md`
+- **Flow**: `docs/memory/feature-flows/session-tab.md`
+
 ---
 
 ## 6. Activity Monitoring
@@ -745,6 +766,25 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Description**: Email-verified public chat sessions maintain persistent per-user memory (text blob) scoped to `(agent_name, user_email)`, injected into every agent call and updated via background summarization every 5 messages.
 - **Database Tables**: `public_user_memory`
 - **Flow**: `docs/memory/feature-flows/public-agent-links.md#per-user-persistent-memory-mem-001`
+
+### 15.1a-3 Agent Website Proxy (SITE-001)
+- **Status**: ✅ Implemented (2026-05-03)
+- **Requirement ID**: SITE-001
+- **GitHub Issue**: #633
+- **Priority**: P2
+- **Description**: Expose an agent's internal web server (e.g., a Next.js or React app running on port 3000) publicly via a `site`-type public link at `/site/{token}/{path}`. All HTTP methods, query strings, and bodies are reverse-proxied; responses are streamed.
+- **Key Features**:
+  - `site`-type public link token validated by the existing `agent_public_links` table
+  - Dual-bucket rate limiting (120 req/min per IP, 300 req/min per token)
+  - SSRF defense: agent name validated; upstream always resolves to `http://agent-{name}:3000`
+  - Sensitive request headers stripped (`authorization`, `cookie`, `x-internal-secret`)
+  - Hop-by-hop and server-banner response headers stripped
+  - Audit event `SITE_ACCESS / site_link_visit` on every proxied request (fire-and-forget)
+  - 401 invalid token, 410 expired, 429 rate limit, 502 agent unreachable
+- **API Endpoints**:
+  - `GET /site/{token}` — redirect to `/site/{token}/`
+  - `GET/POST/… /site/{token}/{path}` — proxy to agent port 3000
+- **Flow**: `docs/memory/feature-flows/public-agent-links.md`
 
 ### 15.1b Slack Integration for Public Links (SLACK-001)
 - **Status**: ✅ Implemented (2026-02-25)

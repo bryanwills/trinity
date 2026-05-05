@@ -139,6 +139,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 *Public Access & Monetization:*
 - `public_links.py` - Public agent link management
 - `public.py` - Public chat endpoints
+- `site.py` - Agent website proxy — reverse-proxies `/site/{token}/{path}` to agent port 3000 (SITE-001)
 - `paid.py` - x402 payment-gated chat (NVM-001)
 - `nevermined.py` - Nevermined payment config management
 - `slack.py` - Slack integration (OAuth, events, multi-agent channel routing, per-agent channel binding) (SLACK-001/002)
@@ -403,6 +404,7 @@ Services that run continuously in the backend process:
 | **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. On each cron-triggered fire, optionally invokes the agent's executable `~/.trinity/pre-check` (interpreter chosen by shebang) via the backend's `POST /api/internal/agents/{name}/pre-check` (which `docker exec`s into the agent container). Empty stdout + exit 0 records a skipped execution and does not invoke Claude (SCHED-COND-001, #454). |
 | **Capacity Maintenance** | `capacity_manager.py` | Calls `CapacityManager.run_maintenance()` every 60s — expires stale queued tasks (>24h) and drains orphans after restart. (BACKLOG-001 / CAPACITY-CONSOLIDATE #428) |
 | **Audit Retention** | `audit_retention_service.py` | Daily APScheduler job at 04:15 UTC that DELETEs `audit_log` rows past the retention window. Configured via `AUDIT_LOG_RETENTION_DAYS` (default 365, floored at 365 — the `audit_log_no_delete` trigger refuses younger rows). Pruning ages out hash-chain history past the cutoff by design. (#552) |
+| **Session Cleanup** | `session_cleanup_service.py` | Periodic JSONL reaper for the Session tab. Default 6h cycle (`poll_interval_seconds`); each cycle diffs every running agent's `~/.claude/projects/-home-developer/<uuid>.jsonl` set against `agent_sessions.cached_claude_session_id` and deletes JSONLs not in the keep set whose mtime is older than `min_age_seconds` (default 1h race guard). Synchronous best-effort `reap_jsonl()` is also called by the session router on user-initiated reset/delete so the disk reclaim is immediate. Uses `execute_command_in_container` (no agent-server endpoint required). (SESSION_TAB Phase 4.2) |
 
 The **agent server** also runs a 15-min `auto_sync` heartbeat loop (gated
 by `GIT_SYNC_AUTO` env var; default-on for non-source-mode GitHub-template
@@ -696,6 +698,15 @@ export, enable/disable toggle. Issue #20 can be closed.
 
 Storage: `/data/agent-files/{file_id}` under the existing `trinity-data` volume (no compose changes). Agent writes to `/home/developer/public/` (Docker volume `agent-{name}-public`); backend uses Docker SDK `get_archive` to extract the named file on demand — never mounts the agent workspace.
 
+### Agent Website Proxy (SITE-001, NEW: 2026-05-03)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/site/{token}` | Token (URL) | Redirect to `/site/{token}/` (301) |
+| GET/POST/… | `/site/{token}/{path}` | Token (URL) | Reverse-proxy to agent's web server at port 3000. 401 on invalid/disabled token, 410 on expired, 429 on rate limit, 502 on unreachable agent. Audit event `site_link_visit`. |
+
+Rate limiting: dual-bucket (120 req/min per IP + 300 req/min per token). Request headers `authorization`, `cookie`, `x-internal-secret` stripped before forwarding. Hop-by-hop and server-banner response headers stripped. SSRF guard: agent name validated against `^[a-z0-9][a-z0-9\-]*$`. WebSocket upgrades not supported. Token is a `site`-type `agent_public_links` row.
+
 ### Platform Settings (5 endpoints)
 
 | Method | Path | Description |
@@ -703,8 +714,24 @@ Storage: `/data/agent-files/{file_id}` under the existing `trinity-data` volume 
 | GET | `/api/settings/mcp-url` | Get configured MCP server URL (any auth user) |
 | PUT | `/api/settings/mcp-url` | Set MCP server URL (admin-only) |
 | DELETE | `/api/settings/mcp-url` | Reset to auto-detect (admin-only) |
+| GET | `/api/settings/feature-flags` | Public-safe feature flags for UI gating (any auth user). Currently exposes `session_tab_enabled` (SESSION_TAB Phase 3). |
 | GET | `/api/settings/agent-defaults/resources` | Get fleet-wide default CPU/memory for new containers (admin-only, RES-001) |
 | PUT | `/api/settings/agent-defaults/resources` | Set fleet-wide default CPU/memory; valid CPU: 1/2/4/8/16; valid memory: 1g–32g (admin-only, RES-001) |
+
+### Session Tab (SESSION_TAB_2026-04, NEW: 2026-05-01)
+
+`--resume`-default chat surface that lives alongside the existing Chat tab. Each turn reattaches to the same Claude Code session via `claude --print --resume <uuid>`, preserving tool-result memory, mid-skill state, and reasoning state across turns.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/agents/{name}/session` | JWT | Create a new session row for the current user. First turn against it is a cold turn (no cached UUID) but writes a JSONL so turn 2 can resume. |
+| GET | `/api/agents/{name}/sessions` | JWT | List the caller's sessions on this agent (per-user scoped — owners cannot see other users' sessions, E6). Optional `?status=active`. |
+| GET | `/api/agents/{name}/sessions/{id}` | JWT | Session row + most-recent `?limit=N` (default 100, max 500) messages. |
+| POST | `/api/agents/{name}/sessions/{id}/message` | JWT | The turn endpoint. Body: `{message, model?, timeout_seconds?}`. Synchronous — returns the assistant message + refreshed session row. Always passes `persist_session=True` to the agent. Resume-failure fallback: if a cached UUID's JSONL is missing, clear the cache, mark the failure, retry once cold. Per-(agent, claude_uuid) Redis lock (5-min TTL, async wait-and-retry, 30s ceiling) serialises concurrent resume turns to prevent JSONL corruption (Anthropic #20992). |
+| POST | `/api/agents/{name}/sessions/{id}/reset` | JWT | Clear `cached_claude_session_id` (next turn cold). Best-effort synchronous JSONL reap. |
+| DELETE | `/api/agents/{name}/sessions/{id}` | JWT | Delete the session row + `agent_session_messages`. Best-effort synchronous JSONL reap. |
+
+All endpoints return 404 when `is_session_tab_enabled()` is false. The flag at `system_settings.session_tab_enabled` (or `SESSION_TAB_ENABLED` env) is **default ON since GA 2026-05-04**; settable to false to disable platform-wide. All endpoints enforce per-user ownership and return 404 (not 403) on mismatch to avoid leaking session-id existence.
 
 ---
 
@@ -980,6 +1007,61 @@ CREATE INDEX idx_chat_messages_timestamp ON chat_messages(timestamp);
 - Tracks cumulative costs and context usage
 - Full observability metadata stored per message
 - Access control: users see only their own messages (admins see all)
+
+**agent_sessions / agent_session_messages:** (SESSION_TAB_2026-04 — `--resume`-default Session tab, NEW: 2026-05-01)
+```sql
+CREATE TABLE agent_sessions (
+    id TEXT PRIMARY KEY,                           -- urlsafe token
+    agent_name TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    user_email TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    last_message_at TEXT NOT NULL,
+    message_count INTEGER DEFAULT 0,
+    total_cost REAL DEFAULT 0.0,
+    total_context_used INTEGER DEFAULT 0,
+    total_context_max INTEGER DEFAULT 200000,
+    status TEXT DEFAULT 'active',                  -- active | archived | reset
+    subscription_id TEXT,
+    cached_claude_session_id TEXT,                 -- THE primitive — Claude Code UUID for --resume
+    last_resume_at TEXT,
+    consecutive_resume_failures INTEGER DEFAULT 0, -- drives the resume-fallback path
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX idx_agent_sessions_agent_user ON agent_sessions(agent_name, user_id);
+CREATE INDEX idx_agent_sessions_status ON agent_sessions(status);
+
+CREATE TABLE agent_session_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    user_email TEXT NOT NULL,
+    role TEXT NOT NULL,                            -- user | assistant
+    content TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    cost REAL,
+    context_used INTEGER,
+    context_max INTEGER,
+    cache_read_tokens INTEGER,                     -- prompt-cache hit observability
+    tool_calls TEXT,                               -- JSON
+    execution_time_ms INTEGER,
+    claude_session_id TEXT,                        -- per-message UUID Claude actually ran under (audit)
+    FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX idx_agent_session_messages_session ON agent_session_messages(session_id);
+CREATE INDEX idx_agent_session_messages_user ON agent_session_messages(user_id);
+```
+
+**Session Tab Features:**
+- Strictly parallel to `chat_sessions` / `chat_messages` — no FK between them, no shared state, separate router (`routers/sessions.py`), separate Pinia store (`stores/sessions.js`), separate Vue component (`SessionPanel.vue`).
+- `cached_claude_session_id` is the load-bearing field: each turn calls `claude --print --resume <uuid>` so working memory persists.
+- `consecutive_resume_failures` drives the fallback path — when a cached UUID's JSONL is missing (Anthropic #39667 / #53417), the router clears the cache, increments the counter, and retries cold once. Reset on the next successful turn.
+- `cache_read_tokens` per message: observability for whether Anthropic's prompt cache is engaging across resume turns.
+- `claude_session_id` per message: audit history of which Claude UUID each turn ran under (changes on fallback or reset).
+- ON DELETE CASCADE on `agent_session_messages` is aspirational (PRAGMA foreign_keys is off platform-wide); `delete_session()` deletes child rows explicitly.
+- JSONL files in agent containers (`~/.claude/projects/-home-developer/<uuid>.jsonl`) are reaped by `session_cleanup_service.py` — synchronous best-effort on user-initiated reset/delete, plus a 6h periodic sweep with a 1h race guard.
 
 **agent_permissions:** (Phase 9.10 - Agent Permissions)
 ```sql
@@ -1494,13 +1576,55 @@ Agent starts → If .credentials.enc exists → Decrypt → Write files
 
 ---
 
+## Network Topology (Issue #589)
+
+Two Docker bridge networks, by design — agents physically cannot route to Redis.
+
+| Network | Subnet | Members |
+|---------|--------|---------|
+| `trinity-platform-network` | 172.29.0.0/16 | redis, scheduler, vector |
+| `trinity-agent-network` | 172.28.0.0/16 | agents, frontend |
+
+Bridges (members of **both** networks):
+
+- `backend` — primary HTTP API; talks to Redis on platform side, to agents on agent side
+- `mcp-server` — agents call `http://mcp-server:8080/mcp` via Docker DNS on the agent network; backend reaches it on platform network
+- `otel-collector` — agents push metrics to it
+- `cloudflared` (prod only) — proxies to backend (platform) and public agents (agent)
+
+**Rule:** agents are *never* on `trinity-platform-network`. Adding any new
+service that mounts the agent network must NOT connect to Redis — full stop.
+
+The agent-creation sites in `services/agent_service/crud.py:583`,
+`services/agent_service/lifecycle.py:495`, and
+`services/system_agent_service.py:238` hard-code the network name
+`trinity-agent-network` — that name is preserved across the split, so no
+code changes are required.
+
+**Redis ACL users:**
+
+| User | Auth | Purpose |
+|------|------|---------|
+| `default` | `REDIS_PASSWORD` | Admin / recovery / ad-hoc ops; `+@all` |
+| `backend` | `REDIS_BACKEND_PASSWORD` | Backend container runtime; data ops only, `-@dangerous` |
+| `scheduler` | `REDIS_BACKEND_PASSWORD` | Scheduler container runtime; same access pattern as `backend` |
+
+`backend` and `scheduler` cannot run `FLUSHALL`, `CONFIG`, `SHUTDOWN`,
+`DEBUG`, `MIGRATE`, `REPLICAOF`, `MONITOR`, or other categories under
+`@dangerous`. Both passwords are mandatory in `.env`; `docker compose`
+refuses to render without them, and `src/backend/config.py` /
+`src/scheduler/config.py` raise on import if `REDIS_URL` lacks
+credentials. See `docs/migrations/REDIS_AUTH.md` for the upgrade path.
+
+---
+
 ## Container Security
 
 - Non-root execution (`developer:1000`)
 - `CAP_DROP: ALL` + `CAP_ADD: NET_BIND_SERVICE`
 - `security_opt: no-new-privileges:true`
 - tmpfs `/tmp` with `noexec,nosuid`
-- Isolated network (`172.28.0.0/16`)
+- Isolated network (`172.28.0.0/16` — agents only; Redis lives on the platform network, see "Network Topology" above)
 - No external UI port exposure
 
 ### Internal API Security (C-003)

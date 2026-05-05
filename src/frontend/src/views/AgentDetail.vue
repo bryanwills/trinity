@@ -1,9 +1,9 @@
 <template>
-  <div :class="activeTab === 'chat' ? 'h-screen overflow-hidden flex flex-col bg-gray-100 dark:bg-gray-900' : 'min-h-screen bg-gray-100 dark:bg-gray-900'">
+  <div :class="isFullscreenTab ? 'h-screen overflow-hidden flex flex-col bg-gray-100 dark:bg-gray-900' : 'min-h-screen bg-gray-100 dark:bg-gray-900'">
     <NavBar />
 
-    <main :class="['max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', activeTab === 'chat' ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
-      <div :class="['px-4 sm:px-0 py-2', activeTab === 'chat' ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
+    <main :class="['max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
+      <div :class="['px-4 sm:px-0 py-2', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
         <div v-if="loading" class="text-center py-8">
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500 mx-auto"></div>
         </div>
@@ -12,17 +12,17 @@
         <div v-if="notification"
           :class="[
             'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
-            notification.type === 'success' ? 'bg-green-100 dark:bg-green-900/50 border border-green-400 dark:border-green-700 text-green-700 dark:text-green-300' : 'bg-red-100 dark:bg-red-900/50 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300'
+            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
           {{ notification.message }}
         </div>
 
-        <div v-if="error && !agent" class="bg-red-100 dark:bg-red-900/50 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300 px-4 py-3 rounded mb-4">
+        <div v-if="error && !agent" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4">
           {{ error }}
         </div>
 
-        <div v-if="agent" :class="['ml-16', activeTab === 'chat' ? 'flex-1 flex flex-col min-h-0' : '']">
+        <div v-if="agent" :class="['ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : '']">
           <!-- Agent Header Component -->
           <AgentHeader
             :agent="agent"
@@ -47,6 +47,7 @@
             :git-behind="gitBehind"
             :tags="agentTags"
             :all-tags="allTags"
+            :token-stats="tokenStats"
             @toggle="toggleRunning"
             @delete="deleteAgent"
             @toggle-autonomy="toggleAutonomy"
@@ -67,7 +68,7 @@
           />
 
           <!-- Tabs -->
-          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', activeTab === 'chat' ? 'flex-1 flex flex-col overflow-hidden' : '']">
+          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']">
             <div class="border-b border-gray-200 dark:border-gray-700 overflow-x-auto overflow-y-hidden">
               <nav class="-mb-px flex whitespace-nowrap">
                 <button
@@ -82,7 +83,7 @@
                   ]"
                 >
                   {{ tab.label }}
-                  <span v-if="tab.badge" class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 rounded-full leading-none">
+                  <span v-if="tab.badge" class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none">
                     {{ tab.badge }}
                   </span>
                 </button>
@@ -106,6 +107,14 @@
                 :agent-status="agent.status"
                 :resume-session-id="resumeSessionId"
                 :resume-execution-id="resumeExecutionId"
+              />
+            </div>
+
+            <!-- Session Tab Content (SESSION_TAB_2026-04 Phase 3) -->
+            <div v-show="activeTab === 'session'" v-if="sessionsStore.sessionTabEnabled" class="flex-1 overflow-hidden">
+              <SessionPanel
+                :agent-name="agent.name"
+                :agent-status="agent.status"
               />
             </div>
 
@@ -234,6 +243,7 @@ import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
+import { useSessionsStore } from '../stores/sessions'  // SESSION_TAB_2026-04 Phase 3
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -266,6 +276,7 @@ import TerminalPanelContent from '../components/TerminalPanelContent.vue'
 import SkillsPanel from '../components/SkillsPanel.vue'
 import PlaybooksPanel from '../components/PlaybooksPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
+import SessionPanel from '../components/SessionPanel.vue'  // SESSION_TAB_2026-04 Phase 3
 import NeverminedPanel from '../components/NeverminedPanel.vue'
 
 // Import composables
@@ -282,12 +293,16 @@ const route = useRoute()
 const router = useRouter()
 const agentsStore = useAgentsStore()
 const authStore = useAuthStore()
+const sessionsStore = useSessionsStore()  // SESSION_TAB_2026-04 Phase 3
 
 // Minimal local state
 const agent = ref(null)
 const loading = ref(true)
 const error = ref('')
 const activeTab = ref('tasks')
+// Tabs that need a full-viewport flex layout (input pinned to bottom).
+// Chat + Session both render ChatMessages which depends on flex-1 grow.
+const isFullscreenTab = computed(() => activeTab.value === 'chat' || activeTab.value === 'session')
 const showResourceModal = ref(false)
 const showAvatarModal = ref(false)
 const avatarIdentityPrompt = ref('')
@@ -309,6 +324,9 @@ const allTags = ref([])
 const authStatus = ref(null)
 const availableSubscriptions = ref(null)
 const subscriptionChanging = ref(false)
+
+// Token usage stats (issue #250) — DB-sourced, persists across restarts
+const tokenStats = ref(null)
 
 // Resume mode state (EXEC-023)
 const resumeSessionId = computed(() => route.query.resumeSessionId || null)
@@ -571,6 +589,12 @@ const visibleTabs = computed(() => {
     { id: 'chat', label: 'Chat' }
   ]
 
+  // Session tab — SESSION_TAB_2026-04. Sits between Chat and the rest;
+  // gated on the platform feature flag so it's invisible until enabled.
+  if (sessionsStore.sessionTabEnabled) {
+    tabs.push({ id: 'session', label: 'Session' })
+  }
+
   // Dashboard tab - only show if agent has a dashboard.yaml file (insert after Tasks)
   if (hasDashboard.value) {
     tabs.push({ id: 'dashboard', label: 'Dashboard' })
@@ -822,6 +846,16 @@ async function loadAvailableSubscriptions() {
   }
 }
 
+async function loadTokenStats() {
+  if (!agent.value?.name) return
+  try {
+    tokenStats.value = await agentsStore.getAgentTokenStats(agent.value.name)
+  } catch (err) {
+    // Non-critical — don't block render
+    tokenStats.value = null
+  }
+}
+
 async function changeSubscription(subscriptionName) {
   if (!agent.value?.name) return
   subscriptionChanging.value = true
@@ -856,6 +890,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     agentTags.value = []
     // Reset auth status for new agent
     authStatus.value = null
+    tokenStats.value = null
     // DEPRECATED: Terminal tab hidden (candidate for removal)
     // if (terminalRef.value?.disconnect) {
     //   terminalRef.value.disconnect()
@@ -867,6 +902,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     await loadResourceLimits()
     await loadTags()
     await loadAuthStatus()
+    await loadTokenStats()
     // Load avatar identity for new agent (AVATAR-001)
     await loadAvatarIdentity()
     // Check if new agent has dashboard (only when running)
@@ -954,6 +990,8 @@ onMounted(async () => {
     loadAvailableEmotions(),
     loadAuthStatus(),
     loadAvailableSubscriptions(),
+    sessionsStore.loadFeatureFlags(),  // SESSION_TAB_2026-04 Phase 3
+    loadTokenStats(),
     ...(agent.value?.status === 'running' ? [checkDashboardExists()] : [])
   ])
   startEmotionCycling()
@@ -962,7 +1000,7 @@ onMounted(async () => {
   // Handle tab query param (from Timeline click navigation)
   if (route.query.tab) {
     const requestedTab = route.query.tab
-    const validTabs = ['tasks', 'chat', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
+    const validTabs = ['tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
     if (validTabs.includes(requestedTab)) {
       activeTab.value = requestedTab
     }
@@ -987,7 +1025,7 @@ onActivated(async () => {
   // Must also check here since onMounted doesn't fire for cached components
   if (route.query.tab) {
     const requestedTab = route.query.tab
-    const validTabs = ['tasks', 'chat', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
+    const validTabs = ['tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
     if (validTabs.includes(requestedTab)) {
       activeTab.value = requestedTab
     }
