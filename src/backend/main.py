@@ -52,6 +52,7 @@ from routers.templates import router as templates_router
 from routers.sharing import router as sharing_router, set_websocket_manager as set_sharing_ws_manager
 from routers.mcp_keys import router as mcp_keys_router
 from routers.chat import router as chat_router, set_websocket_manager as set_chat_ws_manager
+from routers.sessions import router as sessions_router  # SESSION_TAB_2026-04 Phase 2
 from routers.fan_out import router as fan_out_router
 from routers.schedules import router as schedules_router
 from routers.git import router as git_router
@@ -64,6 +65,8 @@ from routers.system_agent import router as system_agent_router
 from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
 from routers.public import router as public_router
+from routers.files import router as files_router  # FILES-001 — outbound file downloads
+from routers.site import router as site_router  # SITE-001 — agent website proxy
 from routers.setup import router as setup_router, get_setup_token as get_setup_setup_token
 from routers.telemetry import router as telemetry_router
 from routers.logs import router as logs_router
@@ -90,6 +93,7 @@ from routers.users import router as users_router
 from routers.debug import router as debug_router  # #306 soak instrumentation
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
+from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
 
 # Import activity service
 from services.activity_service import activity_service
@@ -99,6 +103,9 @@ from services.system_agent_service import system_agent_service
 
 # Import log archive service
 from services.log_archive_service import log_archive_service
+
+# Import audit retention service (#552)
+from services.audit_retention_service import audit_retention_service
 
 # Import operator queue sync service
 from services.operator_queue_service import operator_queue_service, set_websocket_manager as set_opqueue_sync_ws_manager
@@ -365,6 +372,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error starting log archive service: {e}")
 
+    # Initialize audit retention service (#552)
+    try:
+        audit_retention_service.start()
+        print("Audit retention service started")
+    except Exception as e:
+        print(f"Error starting audit retention service: {e}")
+
     # PERF-269: Stagger background services to reduce SQLite write contention
     # Start operator queue sync service (OPS-001) — polls every 5s
     try:
@@ -383,6 +397,19 @@ async def lifespan(app: FastAPI):
             print(f"Error starting cleanup service: {e}")
     asyncio.create_task(_start_cleanup_delayed())
 
+    # SESSION_TAB_2026-04 Phase 4.2: periodic JSONL reaper for the Session
+    # tab. Stagger +7.5s to offset from cleanup_service so they don't both
+    # hit Docker at the same instant. Default poll = 6h, race-guard = 1h.
+    async def _start_session_cleanup_delayed():
+        await asyncio.sleep(7.5)
+        try:
+            from services.session_cleanup_service import get_session_cleanup_service
+            get_session_cleanup_service().start()
+            print("Session cleanup service started (staggered +7.5s)")
+        except Exception as e:
+            print(f"Error starting session cleanup service: {e}")
+    asyncio.create_task(_start_session_cleanup_delayed())
+
     # Issue #389: Sync health service — 60s poll cadence, staggered +5s.
     async def _start_sync_health_delayed():
         await asyncio.sleep(5)
@@ -393,32 +420,31 @@ async def lifespan(app: FastAPI):
             print(f"Error starting sync health service: {e}")
     asyncio.create_task(_start_sync_health_delayed())
 
-    # BACKLOG-001: Register backlog drain as a slot-release callback and spawn
-    # a 60s maintenance task. The maintenance loop handles two things:
+    # BACKLOG-001 / CAPACITY-CONSOLIDATE (#428): instantiate the unified
+    # CapacityManager (this also wires the slot-release → backlog-drain
+    # callback internally) and spawn the 60s maintenance loop. The
+    # maintenance loop handles two things:
     #   1. Expire queued rows older than 24h (-> FAILED)
     #   2. Drain orphans — queued work that missed its release callback
     #      (e.g. backend restarted between enqueue and drain).
     try:
-        from services.slot_service import get_slot_service
-        from services.backlog_service import get_backlog_service
-        _backlog = get_backlog_service()
-        get_slot_service().register_on_release(_backlog.on_slot_released)
+        from services.capacity_manager import get_capacity_manager
+        capacity = get_capacity_manager()
 
-        async def _backlog_maintenance_loop():
+        async def _capacity_maintenance_loop():
             # First tick after a short delay so startup stays snappy.
             await asyncio.sleep(15)
             while True:
                 try:
-                    await _backlog.expire_stale(max_age_hours=24)
-                    await _backlog.drain_orphans_all()
+                    await capacity.run_maintenance(max_age_hours=24)
                 except Exception as exc:
-                    logger.warning(f"[Backlog] maintenance tick failed: {exc}")
+                    logger.warning(f"[Capacity] maintenance tick failed: {exc}")
                 await asyncio.sleep(60)
 
-        asyncio.create_task(_backlog_maintenance_loop())
-        print("Backlog service wired (callback + 60s maintenance)")
+        asyncio.create_task(_capacity_maintenance_loop())
+        print("CapacityManager initialised; maintenance loop running (60s)")
     except Exception as e:
-        print(f"Error wiring backlog service: {e}")
+        print(f"Error wiring CapacityManager: {e}")
 
     # Recover orphaned regular task executions (Issue #128)
     try:
@@ -550,12 +576,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error stopping log archive service: {e}")
 
+    # Shutdown audit retention service (#552)
+    try:
+        audit_retention_service.stop()
+        print("Audit retention service stopped")
+    except Exception as e:
+        print(f"Error stopping audit retention service: {e}")
+
     # Shutdown cleanup service
     try:
         cleanup_service.stop()
         print("Cleanup service stopped")
     except Exception as e:
         print(f"Error stopping cleanup service: {e}")
+
+    # Shutdown session cleanup service (Phase 4.2)
+    try:
+        from services.session_cleanup_service import get_session_cleanup_service
+        get_session_cleanup_service().stop()
+        print("Session cleanup service stopped")
+    except Exception as e:
+        print(f"Error stopping session cleanup service: {e}")
 
     # Shutdown Slack transport
     try:
@@ -663,15 +704,43 @@ async def add_request_id(request: Request, call_next):
 
 
 # Security headers middleware — covers API responses when accessed directly (dev mode)
-# or through nginx proxy. X-Frame-Options is omitted here to avoid conflicting with
-# nginx's SAMEORIGIN value on proxied responses.
+# or through nginx proxy.
+#
+# Issue #549 (UnderDefense pentest 3.4.2): FastAPI responses lacked
+# X-Frame-Options, Cross-Origin-Opener-Policy, and HSTS. The frontend
+# proxy adds those for HTML/asset responses, but API responses shown to
+# tools like Swagger UI / direct curl were unprotected. Add them here so
+# API responses match the frontend baseline. CSP is intentionally NOT
+# set on API responses — they're JSON, not rendered, and a strict CSP
+# can spuriously block legitimate Swagger / docs interactions.
+#
+# HSTS is gated on the connection actually being HTTPS (request scheme
+# or X-Forwarded-Proto from a trusted reverse proxy) so local HTTP dev
+# still works without forcing browsers to upgrade and pin a stale
+# header.
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+
+    # HSTS only when we know the wire is HTTPS — checking both the
+    # direct scheme and the X-Forwarded-Proto header set by upstream
+    # reverse proxies (uvicorn launched with --proxy-headers honours it).
+    is_https = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    )
+    if is_https:
+        # 1 year, includeSubDomains. preload intentionally omitted —
+        # opting in is a one-way commitment that ops should make
+        # explicitly via the load balancer rather than at the app.
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
     return response
 
 
@@ -688,6 +757,7 @@ app.include_router(templates_router)
 app.include_router(sharing_router)
 app.include_router(mcp_keys_router)
 app.include_router(chat_router)
+app.include_router(sessions_router)  # SESSION_TAB_2026-04 Phase 2 — gated on is_session_tab_enabled()
 app.include_router(fan_out_router)
 app.include_router(schedules_router)
 app.include_router(git_router)
@@ -699,6 +769,8 @@ app.include_router(system_agent_router)
 app.include_router(ops_router)
 app.include_router(public_links_router)
 app.include_router(public_router)
+app.include_router(files_router)  # FILES-001: /api/files/{id} — token-gated downloads
+app.include_router(site_router)   # SITE-001: /site/{token}/{path} — agent website proxy
 app.include_router(setup_router)
 app.include_router(telemetry_router)
 app.include_router(logs_router)
@@ -728,51 +800,50 @@ app.include_router(event_subscriptions_router)  # Agent Event Subscriptions (EVT
 app.include_router(users_router)  # User Management (ROLE-001)
 app.include_router(debug_router)  # #306 soak dashboard
 app.include_router(webhooks_router)  # Webhook Triggers (WEBHOOK-001, #291)
+app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
 
 
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    token: str = Query(default=None),
+    ticket: str = Query(default=None),
     last_event_id: Optional[str] = Query(default=None, alias="last-event-id"),
 ):
     """
     WebSocket endpoint for real-time updates.
 
-    Security (#178, C-002): Authentication is REQUIRED before accepting the
-    connection. The JWT token MUST be provided via query parameter:
-      /ws?token=<jwt_token>
+    Security (#178/C-002 + #550): authentication is REQUIRED before
+    ``websocket.accept()``. Clients first call ``POST /api/ws/ticket``
+    to mint a single-use 30-second opaque ticket, then connect to:
 
-    Connections without a valid token are rejected before websocket.accept()
-    to prevent any unauthenticated data leakage.
+        /ws?ticket=<opaque_ticket>
+
+    Switching from a long-lived JWT in the URL to an opaque single-use
+    ticket closes the JWT-leak surface (nginx logs, browser history,
+    upstream proxies) flagged by the April 2026 remediation pentest
+    (finding 3.2.1) and mitigates CSWSH — a malicious page can't mint
+    a ticket on the victim's behalf because the ticket endpoint requires
+    the JWT in an ``Authorization`` header.
 
     Reconnect replay (#306): clients may pass ``last-event-id=<stream_id>``
     to receive events missed during a disconnect. Malformed or too-old ids
-    produce a ``{"type": "resync_required"}`` message — the client must then
-    fetch current state via REST.
+    produce a ``{"type": "resync_required"}`` message — the client must
+    then fetch current state via REST.
     """
-    from jose import JWTError, jwt as jose_jwt
-    from config import SECRET_KEY, ALGORITHM
     from services.event_bus import validate_last_event_id
+    from services.ws_ticket_service import consume_ticket
 
-    # Reject immediately if no token provided — before accept()
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required: provide ?token=<jwt>")
+    if not ticket:
+        await websocket.close(code=4001, reason="Authentication required: provide ?ticket=<opaque>")
         return
 
-    # Validate token before accepting the connection
-    try:
-        payload = jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if not username:
-            await websocket.close(code=4001, reason="Invalid token: missing subject")
-            return
-    except JWTError:
-        await websocket.close(code=4001, reason="Invalid authentication token")
+    payload = consume_ticket(ticket)
+    if not payload or not payload.get("sub"):
+        await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
         return
 
-    # Token validated — now accept the connection
+    # Ticket validated — now accept the connection
     await manager.connect(websocket, last_event_id=validate_last_event_id(last_event_id))
 
     try:

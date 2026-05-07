@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 # when Phase 3 fails an execution. Used to scope the residual-race WARNING log
 # below so it doesn't misfire on other legitimate FAILED→SUCCESS transitions
 # (e.g. Phase 0 auto-terminate, Phase 1 stale cleanup, startup recovery).
-_STALE_SLOT_ERROR_PATTERN = "Stale execution — slot TTL expired"
 
 
 class ScheduleOperations:
@@ -102,7 +101,10 @@ class ScheduleOperations:
             # Validation configuration (VALIDATE-001)
             validation_enabled=bool(row["validation_enabled"]) if "validation_enabled" in row_keys and row["validation_enabled"] is not None else False,
             validation_prompt=row["validation_prompt"] if "validation_prompt" in row_keys else None,
-            validation_timeout_seconds=row["validation_timeout_seconds"] if "validation_timeout_seconds" in row_keys and row["validation_timeout_seconds"] is not None else 120
+            validation_timeout_seconds=row["validation_timeout_seconds"] if "validation_timeout_seconds" in row_keys and row["validation_timeout_seconds"] is not None else 120,
+            # Webhook trigger (WEBHOOK-001 / #647 follow-up)
+            webhook_enabled=bool(row["webhook_enabled"]) if "webhook_enabled" in row_keys and row["webhook_enabled"] is not None else False,
+            webhook_token=row["webhook_token"] if "webhook_token" in row_keys else None,
         )
 
     @staticmethod
@@ -156,6 +158,8 @@ class ScheduleOperations:
                 if "validated_at" in row_keys and row["validated_at"] else None,
             validation_execution_id=row["validation_execution_id"] if "validation_execution_id" in row_keys else None,
             validates_execution_id=row["validates_execution_id"] if "validates_execution_id" in row_keys else None,
+            # Auto-compact observability (Bundle B)
+            compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
         )
 
     @staticmethod
@@ -1000,70 +1004,80 @@ class ScheduleOperations:
         cost: float = None,
         tool_calls: str = None,
         execution_log: str = None,
-        claude_session_id: str = None
+        claude_session_id: str = None,
+        compact_metadata: str = None,
     ) -> bool:
         """Update execution status when completed.
+
+        CAS contract:
+        - SUCCESS writes win over RUNNING / QUEUED / PENDING_RETRY / SKIPPED and
+          over a phantom-stale FAILED (so a real completion lands even if a
+          cleanup path misfired first — see #378). SUCCESS is **blocked** when
+          the row is already CANCELLED: a user cancel is authoritative and the
+          late-arriving agent reply must not be reported as a deliverable (#671).
+        - Non-success terminal writes (FAILED, CANCELLED) are guarded against
+          overwriting any already-terminal status (RELIABILITY-005), preventing
+          cleanup paths from silently clobbering a real completion.
 
         Args:
             claude_session_id: Claude Code session ID for --resume support (EXEC-023)
         """
+        # Terminal states that a non-success write must not overwrite.
+        _TERMINAL = (
+            TaskExecutionStatus.SUCCESS,
+            TaskExecutionStatus.FAILED,
+            TaskExecutionStatus.CANCELLED,
+            TaskExecutionStatus.SKIPPED,
+        )
+
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            # Get started_at for duration calculation and current status/error
-            # for #378 residual-race observability (see log below).
             cursor.execute(
-                "SELECT started_at, status, error FROM schedule_executions WHERE id = ?",
+                "SELECT started_at FROM schedule_executions WHERE id = ?",
                 (execution_id,),
             )
             row = cursor.fetchone()
             if not row:
                 return False
 
-            # #378: warn when SUCCESS overwrites a Phase-3 phantom-stale FAILED.
-            # This lets us observe residual races in production without
-            # changing update semantics (agent's response still wins). Scoped
-            # to the stale-slot error pattern so other legitimate FAILED→SUCCESS
-            # transitions (Phase 0/1 recovery, startup recovery) don't misfire.
-            current_status = row["status"] if "status" in row.keys() else None
-            current_error = row["error"] if "error" in row.keys() else None
-            if (
-                status == TaskExecutionStatus.SUCCESS
-                and current_status == TaskExecutionStatus.FAILED
-                and current_error
-                and _STALE_SLOT_ERROR_PATTERN in current_error
-            ):
-                logger.warning(
-                    f"[DB] SUCCESS overwrote Phase-3 stale-slot FAILED for execution "
-                    f"{execution_id} — residual race condition (#378). Prior error: "
-                    f"{current_error[:200]}"
-                )
-
-            # Use parse_iso_timestamp to handle both 'Z' and non-'Z' timestamps
             started_at = parse_iso_timestamp(row["started_at"])
             completed_at = parse_iso_timestamp(utc_now_iso())
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
-            cursor.execute("""
-                UPDATE schedule_executions
-                SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
-                    context_used = ?, context_max = ?, cost = ?, tool_calls = ?, execution_log = ?,
-                    claude_session_id = ?
-                WHERE id = ?
-            """, (
-                status,
-                to_utc_iso(completed_at),  # Use UTC with 'Z' suffix
-                duration_ms,
-                response,
-                error,
-                context_used,
-                context_max,
-                cost,
-                tool_calls,
-                execution_log,
-                claude_session_id,
-                execution_id
-            ))
+            if status == TaskExecutionStatus.SUCCESS:
+                # Agent's own completion result wins over everything except a
+                # user-issued cancel (#671). A late "I'm done!" from Claude Code
+                # after the operator pulled the plug must not flip the row to
+                # success — that hides incomplete deliverables and silently
+                # advances the schedule's next_run_at.
+                cursor.execute("""
+                    UPDATE schedule_executions
+                    SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
+                        context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
+                        execution_log = ?, claude_session_id = ?, compact_metadata = ?
+                    WHERE id = ? AND status != ?
+                """, (
+                    status, to_utc_iso(completed_at), duration_ms, response, error,
+                    context_used, context_max, cost, tool_calls, execution_log,
+                    claude_session_id, compact_metadata, execution_id,
+                    TaskExecutionStatus.CANCELLED,
+                ))
+            else:
+                # Non-success terminal write: block if already terminal so cleanup
+                # paths cannot overwrite a real completion (RELIABILITY-005).
+                cursor.execute("""
+                    UPDATE schedule_executions
+                    SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
+                        context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
+                        execution_log = ?, claude_session_id = ?, compact_metadata = ?
+                    WHERE id = ? AND status NOT IN (?, ?, ?, ?)
+                """, (
+                    status, to_utc_iso(completed_at), duration_ms, response, error,
+                    context_used, context_max, cost, tool_calls, execution_log,
+                    claude_session_id, compact_metadata, execution_id, *_TERMINAL,
+                ))
+
             conn.commit()
             return cursor.rowcount > 0
 
@@ -1532,14 +1546,17 @@ class ScheduleOperations:
                 started_at = parse_iso_timestamp(row["started_at"])
                 duration_ms = int((completed_at - started_at).total_seconds() * 1000)
                 # SQL literal matches TaskExecutionStatus.FAILED
+                # RELIABILITY-005: guard the UPDATE so a SUCCESS that arrived
+                # between the SELECT and this UPDATE is never overwritten.
                 cursor.execute("""
                     UPDATE schedule_executions
                     SET status = ?,
                         completed_at = ?,
                         duration_ms = ?,
                         error = 'Marked as failed by cleanup: exceeded ' || ? || '-minute timeout'
-                    WHERE id = ?
-                """, (TaskExecutionStatus.FAILED, now, duration_ms, str(timeout_minutes), row["id"]))
+                    WHERE id = ? AND status = ?
+                """, (TaskExecutionStatus.FAILED, now, duration_ms, str(timeout_minutes),
+                      row["id"], TaskExecutionStatus.RUNNING))
 
             conn.commit()
             return len(stale_rows)
@@ -1580,14 +1597,17 @@ class ScheduleOperations:
             for row in no_session_rows:
                 started_at = parse_iso_timestamp(row["started_at"])
                 duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+                # RELIABILITY-005: guard the UPDATE so a SUCCESS that arrived
+                # between the SELECT and this UPDATE is never overwritten.
                 cursor.execute("""
                     UPDATE schedule_executions
                     SET status = ?,
                         completed_at = ?,
                         duration_ms = ?,
                         error = 'Silent launch failure: no Claude session created within ' || ? || ' seconds'
-                    WHERE id = ?
-                """, (TaskExecutionStatus.FAILED, now, duration_ms, str(timeout_seconds), row["id"]))
+                    WHERE id = ? AND status = ?
+                """, (TaskExecutionStatus.FAILED, now, duration_ms, str(timeout_seconds),
+                      row["id"], TaskExecutionStatus.RUNNING))
 
             conn.commit()
             return len(no_session_rows)
@@ -1890,3 +1910,100 @@ class ScheduleOperations:
             """, (validates_execution_id,))
             row = cursor.fetchone()
             return self._row_to_schedule_execution(row) if row else None
+
+    def get_agent_token_stats(self, agent_name: str) -> Dict:
+        """Get token usage statistics for an agent: lifetime, 24h, 7d, and 7-day daily breakdown.
+
+        Used for the agent detail token usage display (issue #250).
+        """
+        from datetime import datetime, timezone, timedelta
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cutoff_24h = iso_cutoff(24)
+            cutoff_7d = iso_cutoff(168)
+
+            # Lifetime + 24h + 7d in one pass
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as lifetime_executions,
+                    SUM(COALESCE(cost, 0)) as lifetime_cost,
+                    SUM(COALESCE(context_used, 0)) as lifetime_context_tokens,
+                    SUM(CASE WHEN started_at > ? THEN COALESCE(cost, 0) ELSE 0 END) as cost_24h,
+                    SUM(CASE WHEN started_at > ? THEN COALESCE(context_used, 0) ELSE 0 END) as context_tokens_24h,
+                    SUM(CASE WHEN started_at > ? THEN 1 ELSE 0 END) as executions_24h,
+                    SUM(CASE WHEN started_at > ? THEN COALESCE(cost, 0) ELSE 0 END) as cost_7d,
+                    SUM(CASE WHEN started_at > ? THEN COALESCE(context_used, 0) ELSE 0 END) as context_tokens_7d,
+                    SUM(CASE WHEN started_at > ? THEN 1 ELSE 0 END) as executions_7d
+                FROM schedule_executions
+                WHERE agent_name = ?
+                  AND status IN ('success', 'failed')
+            """, (cutoff_24h, cutoff_24h, cutoff_24h, cutoff_7d, cutoff_7d, cutoff_7d, agent_name))
+
+            row = cursor.fetchone()
+
+            lifetime_cost = round(row["lifetime_cost"] or 0, 6)
+            lifetime_context_tokens = row["lifetime_context_tokens"] or 0
+            lifetime_executions = row["lifetime_executions"] or 0
+            cost_24h = round(row["cost_24h"] or 0, 6)
+            context_tokens_24h = row["context_tokens_24h"] or 0
+            executions_24h = row["executions_24h"] or 0
+            cost_7d = round(row["cost_7d"] or 0, 6)
+            context_tokens_7d = row["context_tokens_7d"] or 0
+            executions_7d = row["executions_7d"] or 0
+
+            # Per-day breakdown for last 7 days
+            cursor.execute("""
+                SELECT
+                    DATE(started_at) as day,
+                    SUM(COALESCE(cost, 0)) as day_cost,
+                    SUM(COALESCE(context_used, 0)) as day_context_tokens,
+                    COUNT(*) as day_executions
+                FROM schedule_executions
+                WHERE agent_name = ?
+                  AND started_at > ?
+                  AND status IN ('success', 'failed')
+                GROUP BY DATE(started_at)
+                ORDER BY day ASC
+            """, (agent_name, cutoff_7d))
+
+            raw_days = {row["day"]: row for row in cursor.fetchall()}
+
+            # Build complete 7-day series (fill gaps with zero)
+            now_utc = datetime.now(timezone.utc)
+            daily_breakdown = []
+            for i in range(6, -1, -1):
+                d = (now_utc - timedelta(days=i)).strftime("%Y-%m-%d")
+                if d in raw_days:
+                    r = raw_days[d]
+                    daily_breakdown.append({
+                        "date": d,
+                        "cost": round(r["day_cost"] or 0, 6),
+                        "context_tokens": r["day_context_tokens"] or 0,
+                        "executions": r["day_executions"] or 0,
+                    })
+                else:
+                    daily_breakdown.append({"date": d, "cost": 0.0, "context_tokens": 0, "executions": 0})
+
+            # Trend: today vs 7d daily average (excluding today to avoid comparison bias)
+            avg_daily_cost = cost_7d / 7.0 if cost_7d > 0 else 0.0
+            if avg_daily_cost > 0:
+                trend_pct = round(((cost_24h - avg_daily_cost) / avg_daily_cost) * 100, 1)
+            else:
+                trend_pct = 0.0
+
+            return {
+                "lifetime_cost": lifetime_cost,
+                "lifetime_context_tokens": lifetime_context_tokens,
+                "lifetime_executions": lifetime_executions,
+                "cost_24h": cost_24h,
+                "context_tokens_24h": context_tokens_24h,
+                "executions_24h": executions_24h,
+                "cost_7d": cost_7d,
+                "context_tokens_7d": context_tokens_7d,
+                "executions_7d": executions_7d,
+                "avg_daily_cost": round(avg_daily_cost, 6),
+                "trend_cost_pct": trend_pct,
+                "daily_breakdown": daily_breakdown,
+            }

@@ -12,6 +12,7 @@ Tables are organized by feature area:
 - Activities: agent_activities
 - Permissions: agent_permissions
 - Shared Folders: agent_shared_folder_config
+- Shared Files (outbound): agent_shared_files
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
 - Public Chat: public_chat_sessions, public_chat_messages, public_user_memory
@@ -70,6 +71,7 @@ TABLES = {
             open_access INTEGER DEFAULT 0,
             group_auth_mode TEXT DEFAULT 'none',
             guardrails_config TEXT,
+            file_sharing_enabled INTEGER DEFAULT 0,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
         )
@@ -190,6 +192,7 @@ TABLES = {
             validated_at TEXT,
             validation_execution_id TEXT,
             validates_execution_id TEXT,
+            compact_metadata TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -234,6 +237,59 @@ TABLES = {
             subscription_id TEXT,
             output_tokens INTEGER,
             FOREIGN KEY (session_id) REFERENCES chat_sessions(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Session Tables (Session tab — --resume-default chat surface)
+    #
+    # Parallel to chat_sessions / chat_messages but with cached_claude_session_id
+    # to drive per-session ``claude --resume`` and per-message tracking of
+    # cache_read_tokens + the actual Claude UUID a turn ran under. See
+    # docs/planning/SESSION_TAB_2026-04.md.
+    # -------------------------------------------------------------------------
+    "agent_sessions": """
+        CREATE TABLE IF NOT EXISTS agent_sessions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_email TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            last_message_at TEXT NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            total_cost REAL DEFAULT 0.0,
+            total_context_used INTEGER DEFAULT 0,
+            total_context_max INTEGER DEFAULT 200000,
+            status TEXT DEFAULT 'active',
+            subscription_id TEXT,
+            cached_claude_session_id TEXT,
+            last_resume_at TEXT,
+            consecutive_resume_failures INTEGER DEFAULT 0,
+            compact_count INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """,
+
+    "agent_session_messages": """
+        CREATE TABLE IF NOT EXISTS agent_session_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_email TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            cost REAL,
+            context_used INTEGER,
+            context_max INTEGER,
+            cache_read_tokens INTEGER,
+            tool_calls TEXT,
+            execution_time_ms INTEGER,
+            claude_session_id TEXT,
+            compact_metadata TEXT,
+            FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """,
@@ -293,6 +349,31 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Shared Files (outbound agent-to-user file sharing via public URL)
+    # -------------------------------------------------------------------------
+    "agent_shared_files": """
+        CREATE TABLE IF NOT EXISTS agent_shared_files (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            mime_type TEXT,
+            download_token TEXT UNIQUE NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            one_time INTEGER DEFAULT 0,
+            consumed_at TEXT,
+            download_count INTEGER DEFAULT 0,
+            last_downloaded_at TEXT,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+                ON DELETE CASCADE ON UPDATE CASCADE
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Settings Tables
     # -------------------------------------------------------------------------
     "system_settings": """
@@ -317,6 +398,7 @@ TABLES = {
             enabled INTEGER DEFAULT 1,
             name TEXT,
             require_email INTEGER DEFAULT 0,
+            type TEXT NOT NULL DEFAULT 'chat',
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name) ON DELETE CASCADE,
             FOREIGN KEY (created_by) REFERENCES users(id)
         )
@@ -797,6 +879,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_chat_messages_subscription ON chat_messages(subscription_id, timestamp)",
 
+    # Agent session indexes (Session tab)
+    "CREATE INDEX IF NOT EXISTS idx_agent_sessions_agent_user ON agent_sessions(agent_name, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_sessions_status ON agent_sessions(status)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_session_messages_session ON agent_session_messages(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_session_messages_user ON agent_session_messages(user_id)",
+
     # Execution subscription index (SUB-004)
     "CREATE INDEX IF NOT EXISTS idx_executions_subscription ON schedule_executions(subscription_id, started_at)",
 
@@ -816,6 +904,11 @@ INDEXES = [
     # Shared folder indexes
     "CREATE INDEX IF NOT EXISTS idx_shared_folders_expose ON agent_shared_folder_config(expose_enabled)",
     "CREATE INDEX IF NOT EXISTS idx_shared_folders_consume ON agent_shared_folder_config(consume_enabled)",
+
+    # Shared files (outbound) indexes
+    "CREATE INDEX IF NOT EXISTS idx_agent_files_agent ON agent_shared_files(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_files_token ON agent_shared_files(download_token)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_files_expires ON agent_shared_files(expires_at) WHERE revoked_at IS NULL",
 
     # Public links indexes
     "CREATE INDEX IF NOT EXISTS idx_public_links_token ON agent_public_links(token)",

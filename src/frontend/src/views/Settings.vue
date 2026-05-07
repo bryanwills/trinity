@@ -11,6 +11,26 @@
           </p>
         </div>
 
+        <!-- Tab strip (#302) -->
+        <div class="mb-6 border-b border-gray-200 dark:border-gray-700" role="tablist" aria-label="Settings sections">
+          <nav class="-mb-px flex space-x-6" aria-label="Tabs">
+            <button
+              v-for="tab in visibleTabs"
+              :key="tab.id"
+              role="tab"
+              :aria-selected="activeTab === tab.id"
+              :class="[
+                'whitespace-nowrap py-2 px-1 border-b-2 text-sm font-medium',
+                activeTab === tab.id
+                  ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-200'
+              ]"
+              type="button"
+              @click="selectTab(tab.id)"
+            >{{ tab.label }}</button>
+          </nav>
+        </div>
+
         <!-- Loading State -->
         <div v-if="loading" class="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900 p-8 text-center">
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
@@ -19,8 +39,11 @@
 
         <!-- Settings Content -->
         <div v-else class="space-y-6">
+          <!-- MCP Keys Tab Content (extracted to component, #302) -->
+          <McpKeysTab v-if="activeTab === 'mcp-keys'" />
+
           <!-- Platform Section -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Platform</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -91,7 +114,7 @@
           </div>
 
           <!-- API Keys Section -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'integrations'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">API Keys</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -151,6 +174,18 @@
                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
                       Save
+                    </button>
+                    <button
+                      v-if="anthropicKeyStatus.configured && anthropicKeyStatus.source === 'settings'"
+                      @click="removeAnthropicKey"
+                      :disabled="removingApiKey"
+                      class="inline-flex items-center px-4 py-2 border border-red-300 dark:border-red-700 rounded-md shadow-sm text-sm font-medium text-red-700 dark:text-red-300 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <svg v-if="removingApiKey" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Remove
                     </button>
                   </div>
                   <!-- Status/Result -->
@@ -245,6 +280,18 @@
                       </svg>
                       Save
                     </button>
+                    <button
+                      v-if="githubPatStatus.configured && githubPatStatus.source === 'settings'"
+                      @click="removeGithubPat"
+                      :disabled="removingGithubPat"
+                      class="inline-flex items-center px-4 py-2 border border-red-300 dark:border-red-700 rounded-md shadow-sm text-sm font-medium text-red-700 dark:text-red-300 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <svg v-if="removingGithubPat" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Remove
+                    </button>
                   </div>
                   <!-- Status/Result -->
                   <div class="mt-2 flex items-center text-sm">
@@ -316,7 +363,7 @@
           </div>
 
           <!-- Slack Integration Section (SLACK-001/002) -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'integrations'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <div class="flex items-center justify-between">
                 <div>
@@ -440,6 +487,18 @@
                       <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
                     Save Credentials
+                  </button>
+                  <button
+                    v-if="slackHasStoredCredentials"
+                    @click="removeSlackSettings"
+                    :disabled="removingSlackSettings"
+                    class="inline-flex items-center px-4 py-2 border border-red-300 dark:border-red-700 rounded-md shadow-sm text-sm font-medium text-red-700 dark:text-red-300 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <svg v-if="removingSlackSettings" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Remove Credentials
                   </button>
                   <span v-if="slackSaveSuccess" class="text-sm text-green-600 dark:text-green-400">
                     ✓ Saved
@@ -576,7 +635,7 @@
           </div>
 
           <!-- Claude Subscriptions Section (SUB-001) -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'integrations'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Claude Subscriptions</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -870,7 +929,7 @@
           </div>
 
           <!-- Trinity Prompt Section -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Trinity Prompt</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -938,7 +997,7 @@ Example:
           </div>
 
           <!-- Email Whitelist Section (Phase 12.4) -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Email Whitelist</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1039,7 +1098,7 @@ Example:
           </div>
 
           <!-- User Management Section (ROLE-001) -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">User Management</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1111,7 +1170,7 @@ Example:
           </div>
 
           <!-- MCP Server URL Section (#76) -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'mcp-keys' && isAdmin" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">MCP Server URL</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1172,7 +1231,7 @@ Example:
           </div>
 
           <!-- GitHub Templates Section (TMPL-001) -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'agents'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">GitHub Templates</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1293,7 +1352,7 @@ Example:
           </div>
 
           <!-- SSH Access Section -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">SSH Access</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1333,7 +1392,7 @@ Example:
           </div>
 
           <!-- Agent Quotas Section (QUOTA-001) -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'agents'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Agent Quotas</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1422,7 +1481,7 @@ Example:
           </div>
 
           <!-- Skills Library Section -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'agents'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Skills Library</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1519,7 +1578,7 @@ Example:
           </div>
 
           <!-- Default Avatars (AVATAR-003) -->
-          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Default Avatars</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1611,16 +1670,28 @@ Example:
         </div>
       </div>
     </main>
+
+    <ConfirmDialog
+      v-model:visible="confirmDialog.visible"
+      :title="confirmDialog.title"
+      :message="confirmDialog.message"
+      :confirm-text="confirmDialog.confirmText"
+      :variant="confirmDialog.variant"
+      @confirm="confirmDialog.onConfirm"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useRole } from '../composables/useRole'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSettingsStore } from '../stores/settings'
 import NavBar from '../components/NavBar.vue'
+import McpKeysTab from '../components/settings/McpKeysTab.vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -1631,6 +1702,47 @@ const loading = ref(true)
 const saving = ref(false)
 const error = ref(null)
 const showSuccess = ref(false)
+
+// Tab state (#302). Tabs are role-gated:
+//   MCP Keys      — visible to any authenticated user (matches today's /api-keys page).
+//   General/Access/Integrations/Agents — admin only.
+// Backend require_admin on each endpoint stays as the actual security boundary;
+// hiding tabs is convenience.
+// activeTab syncs with the ?tab= URL query param so deep links work.
+const ALL_TABS = [
+  { id: 'general',      label: 'General',      adminOnly: true  },
+  { id: 'access',       label: 'Access',       adminOnly: true  },
+  { id: 'integrations', label: 'Integrations', adminOnly: true  },
+  { id: 'mcp-keys',     label: 'MCP Keys',     adminOnly: false },
+  { id: 'agents',       label: 'Agents',       adminOnly: true  },
+]
+const { isAdmin } = useRole()
+const visibleTabs = computed(() =>
+  ALL_TABS.filter(t => isAdmin.value || !t.adminOnly)
+)
+const validTabIds = computed(() => visibleTabs.value.map(t => t.id))
+const DEFAULT_TAB = computed(() =>
+  isAdmin.value ? 'general' : 'mcp-keys'
+)
+function resolveTabFromQuery(q) {
+  return validTabIds.value.includes(q) ? q : DEFAULT_TAB.value
+}
+const activeTab = ref(resolveTabFromQuery(route.query.tab))
+
+// Click handler — push a new history entry so browser back/forward
+// navigates between tabs. Pushes only when the tab actually changes,
+// to avoid duplicate entries on re-clicks.
+function selectTab(id) {
+  if (!validTabIds.value.includes(id)) return
+  if (id === activeTab.value) return
+  activeTab.value = id
+  router.push({ query: { ...route.query, tab: id } })
+}
+
+// Sync activeTab when the URL changes externally (back/forward, deep link).
+watch(() => route.query.tab, (newTab) => {
+  activeTab.value = resolveTabFromQuery(newTab)
+})
 
 // Email whitelist state (Phase 12.4)
 const emailWhitelist = ref([])
@@ -1705,6 +1817,27 @@ const githubPatStatus = ref({
   source: null
 })
 const githubPatPropagation = ref(null)
+const removingApiKey = ref(false)
+const removingGithubPat = ref(false)
+const removingSlackSettings = ref(false)
+
+const slackHasStoredCredentials = computed(() => {
+  const s = slackSettings.value
+  return Boolean(
+    (s?.client_id?.configured && s.client_id.source === 'settings') ||
+    (s?.client_secret?.configured && s.client_secret.source === 'settings') ||
+    (s?.signing_secret?.configured && s.signing_secret.source === 'settings')
+  )
+})
+
+const confirmDialog = reactive({
+  visible: false,
+  title: '',
+  message: '',
+  confirmText: 'Confirm',
+  variant: 'danger',
+  onConfirm: () => {}
+})
 
 // Slack Integration state (SLACK-001)
 const slackClientId = ref('')
@@ -1972,6 +2105,51 @@ async function saveGithubPat() {
   }
 }
 
+function removeAnthropicKey() {
+  confirmDialog.title = 'Remove Anthropic API Key'
+  confirmDialog.message = 'Remove the stored Anthropic API key? Agents will fall back to the ANTHROPIC_API_KEY environment variable if set, otherwise they will stop working until a key is re-added.'
+  confirmDialog.confirmText = 'Remove'
+  confirmDialog.variant = 'danger'
+  confirmDialog.onConfirm = async () => {
+    removingApiKey.value = true
+    error.value = null
+    try {
+      await axios.delete('/api/settings/api-keys/anthropic')
+      await loadApiKeyStatus()
+      anthropicKey.value = ''
+      apiKeyTestResult.value = null
+    } catch (e) {
+      error.value = e.response?.data?.detail || 'Failed to remove API key'
+    } finally {
+      removingApiKey.value = false
+    }
+  }
+  confirmDialog.visible = true
+}
+
+function removeGithubPat() {
+  confirmDialog.title = 'Remove GitHub PAT'
+  confirmDialog.message = 'Remove the stored GitHub Personal Access Token? Agents will fall back to the GITHUB_PAT environment variable if set. Repository creation and push will fail until a PAT is re-added.'
+  confirmDialog.confirmText = 'Remove'
+  confirmDialog.variant = 'danger'
+  confirmDialog.onConfirm = async () => {
+    removingGithubPat.value = true
+    error.value = null
+    try {
+      await axios.delete('/api/settings/api-keys/github')
+      await loadApiKeyStatus()
+      githubPat.value = ''
+      githubPatTestResult.value = null
+      githubPatPropagation.value = null
+    } catch (e) {
+      error.value = e.response?.data?.detail || 'Failed to remove GitHub PAT'
+    } finally {
+      removingGithubPat.value = false
+    }
+  }
+  confirmDialog.visible = true
+}
+
 // Public URL methods
 async function loadPublicUrl() {
   try {
@@ -2047,6 +2225,29 @@ async function saveSlackSettings() {
   } finally {
     savingSlackSettings.value = false
   }
+}
+
+function removeSlackSettings() {
+  confirmDialog.title = 'Remove Slack Credentials'
+  confirmDialog.message = 'Remove the stored Slack OAuth credentials (client ID, client secret, signing secret)? Slack integration will fall back to environment variables if configured; otherwise Slack channels will stop working until credentials are re-added.'
+  confirmDialog.confirmText = 'Remove'
+  confirmDialog.variant = 'danger'
+  confirmDialog.onConfirm = async () => {
+    removingSlackSettings.value = true
+    error.value = null
+    try {
+      await axios.delete('/api/settings/slack')
+      await loadSlackSettings()
+      slackClientId.value = ''
+      slackClientSecret.value = ''
+      slackSigningSecret.value = ''
+    } catch (e) {
+      error.value = e.response?.data?.detail || 'Failed to remove Slack credentials'
+    } finally {
+      removingSlackSettings.value = false
+    }
+  }
+  confirmDialog.visible = true
 }
 
 async function loadSlackTransportStatus() {
@@ -2747,10 +2948,15 @@ async function unassignAgentFromSubscription(agentName) {
   }
 }
 
-onMounted(() => {
-  // Check if user is admin
-  const userData = authStore.user
-  // For now, allow access - backend will reject if not admin
+// (#302) Settings is now visible to non-admin users for the MCP Keys tab.
+// Admin-only data fetches MUST be skipped when the user is not admin —
+// otherwise the 403 from /api/settings/api-keys etc. would trigger
+// `router.push('/')` in loadSettings() and bounce the user before they
+// reach MCP Keys. McpKeysTab fetches its own (non-admin) data internally.
+const adminDataLoaded = ref(false)
+function loadAdminOnlySettings() {
+  if (adminDataLoaded.value) return
+  adminDataLoaded.value = true
   loadSettings()
   loadEmailWhitelist()
   loadUsers()
@@ -2760,6 +2966,19 @@ onMounted(() => {
   loadSkillsLibrarySettings()
   loadSubscriptions()
   loadAutoSwitchSetting()
+}
+
+// Watch isAdmin with `immediate: true` so the loaders fire as soon as the
+// store reports admin — covering both:
+//   (a) typical case: role already in localStorage at mount time
+//   (b) refresh-after-upgrade case: fetchUserProfile lands later than mount
+watch(isAdmin, (admin) => {
+  if (admin) loadAdminOnlySettings()
+}, { immediate: true })
+
+onMounted(() => {
+  // The non-admin-safe init runs unconditionally.
+  loading.value = false  // McpKeysTab handles its own loading state
 
   // Handle Slack OAuth callback
   if (route.query.slack === 'installed') {

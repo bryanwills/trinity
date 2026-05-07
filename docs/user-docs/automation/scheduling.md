@@ -12,6 +12,8 @@ Cron-based automation for agents using APScheduler. Schedule recurring tasks wit
 
 ## How It Works
 
+![Agent Schedules tab showing three active weekly schedules with cron expressions and execution history](../images/agent-schedules-tab.png)
+
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
 3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description.
@@ -95,12 +97,52 @@ The execution list groups retries under their parent execution for clarity.
 | `running` | Retry in progress |
 | `success` / `failed` | Final outcome |
 
+## Pre-Check Hook
+
+An optional executable shipped by an agent template that gates each cron tick before Claude is invoked. When present, it lets the agent decide at runtime whether the scheduled work is actually needed — so empty polls (no new PRs, no new emails, no alerts) consume zero tokens.
+
+### How It Works
+
+1. The template ships `~/.trinity/pre-check` as an executable file with a shebang (`#!/usr/bin/env python3`, `#!/bin/bash`, etc.).
+2. Before each scheduled cron tick, Trinity runs the file inside the agent container.
+3. The scheduler acts on the output:
+
+| Pre-check result | Scheduler action |
+|---|---|
+| No `~/.trinity/pre-check` file | Fire as usual (backward-compatible) |
+| Exit 0, non-empty stdout | Fire — stdout becomes the chat message (overrides the schedule's configured message) |
+| Exit 0, empty stdout | Skip — record a `skipped` execution row, no Claude invocation, zero cost |
+| Exit non-zero | Fail-open — log the error and fire with the original message |
+| Timeout (>60s) or error | Fail-open — fire with the original message |
+
+### Key Behaviors
+
+- **Language-agnostic** — the hook is exec'd directly by Trinity; the interpreter is chosen by the file's shebang. Any language that produces a binary or has a system interpreter works.
+- **Manual triggers bypass the hook entirely** — clicking "Run Now" always fires, regardless of what the hook would return.
+- **Skipped executions appear in the execution list** with status `skipped`, zero cost, and a reason string. They do not count against retry limits.
+- **Fail-open** — a broken or slow hook never suppresses a scheduled invocation. The schedule fires as usual and the error is logged.
+
+### For Template Authors
+
+Place the hook at `~/.trinity/pre-check` (no extension), make it executable (`chmod +x`), and include a shebang. The hook receives no arguments. It should print the work description to stdout if there is work, or print nothing (empty stdout) if there is nothing to do.
+
+Example (Python):
+```python
+#!/usr/bin/env python3
+import sys
+# ... check for new items ...
+if new_items:
+    print(f"Review {len(new_items)} new PRs: {', '.join(new_items)}")
+# else: exit 0 with empty stdout → Trinity records a skip
+```
+
 ## Limitations
 
 - Execution timeout is per-agent configurable (default 15 minutes, max 2 hours).
 - Parallel execution is controlled by per-agent capacity slots (default 3).
 - Missed jobs are only caught up within the 1-hour grace window.
 - Retries count against the agent's parallel capacity slots.
+- Pre-check hooks run with the same permissions as the agent's normal tool calls (`developer` user inside the container).
 
 ## See Also
 

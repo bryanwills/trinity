@@ -44,13 +44,16 @@ class PublicLinkOperations:
         agent_name: str,
         created_by: str,
         name: Optional[str] = None,
-        expires_at: Optional[str] = None
+        expires_at: Optional[str] = None,
+        link_type: str = "chat",
     ) -> dict:
         """Create a new public link for an agent.
 
         Email verification is agent-level (agent_ownership.require_email).
         The legacy `require_email` column on agent_public_links is left at
         its DEFAULT (0) and read by the Slack legacy connection join only.
+
+        link_type: 'chat' (default) or 'site' (live web-server proxy, SITE-001)
         """
         link_id = secrets.token_urlsafe(16)
         token = secrets.token_urlsafe(24)
@@ -60,9 +63,9 @@ class PublicLinkOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO agent_public_links
-                (id, agent_name, token, created_by, created_at, expires_at, enabled, name)
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-            """, (link_id, agent_name, token, created_by, now, expires_at, name))
+                (id, agent_name, token, created_by, created_at, expires_at, enabled, name, type)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """, (link_id, agent_name, token, created_by, now, expires_at, name, link_type))
             conn.commit()
 
         return self.get_public_link(link_id)
@@ -73,7 +76,7 @@ class PublicLinkOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, agent_name, token, created_by, created_at, expires_at,
-                       enabled, name
+                       enabled, name, type
                 FROM agent_public_links
                 WHERE id = ?
             """, (link_id,))
@@ -90,7 +93,7 @@ class PublicLinkOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, agent_name, token, created_by, created_at, expires_at,
-                       enabled, name
+                       enabled, name, type
                 FROM agent_public_links
                 WHERE token = ?
             """, (token,))
@@ -107,7 +110,7 @@ class PublicLinkOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, agent_name, token, created_by, created_at, expires_at,
-                       enabled, name
+                       enabled, name, type
                 FROM agent_public_links
                 WHERE agent_name = ?
                 ORDER BY created_at DESC
@@ -317,6 +320,42 @@ class PublicLinkOperations:
         if _utcnow() > _parse_aware(session_expires):
             return False, None
 
+        return True, email
+
+    def validate_agent_session(
+        self, agent_name: str, session_token: str
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Validate a session token against ANY public link for the agent.
+
+        A session verified on any of an agent's public links counts as
+        valid for cross-resource access — specifically, FILES-001
+        downloads (/api/files/{id}) reuse this instead of minting a
+        separate verification flow.
+
+        Returns: (is_valid, email_if_valid)
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT v.email, v.session_expires_at
+                  FROM public_link_verifications v
+                  JOIN agent_public_links l ON v.link_id = l.id
+                 WHERE l.agent_name = ?
+                   AND v.session_token = ?
+                   AND v.verified = 1
+                """,
+                (agent_name, session_token),
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return False, None
+
+        email, session_expires = row
+        if _utcnow() > _parse_aware(session_expires):
+            return False, None
         return True, email
 
     def count_recent_verification_requests(self, email: str, minutes: int = 10) -> int:
@@ -558,4 +597,5 @@ class PublicLinkOperations:
             "expires_at": row[5],
             "enabled": bool(row[6]),
             "name": row[7],
+            "type": row[8] if len(row) > 8 else "chat",
         }

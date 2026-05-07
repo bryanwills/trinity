@@ -190,6 +190,27 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Spec**: `docs/requirements/DYNAMIC_THINKING_STATUS.md`
 - **Flow**: `docs/memory/feature-flows/authenticated-chat-tab.md`
 
+### 5.8 Session Tab — `--resume`-default Chat Surface (SESSION_TAB_2026-04)
+- **Status**: ✅ Implemented (2026-05-01), GA (2026-05-04)
+- **Requirement ID**: SESSION_TAB_2026-04
+- **GitHub Issue**: #651
+- **Description**: New Agent Detail tab that lives alongside the existing Chat tab. Each turn reattaches to the same Claude Code session via `claude --print --resume <uuid>`, preserving tool-result memory, mid-skill state, and reasoning state across messages — strictly more capable than Chat's stateless text-replay model.
+- **Key Features**:
+  - New `agent_sessions` and `agent_session_messages` tables, strictly parallel to `chat_sessions`/`chat_messages` (no shared state, no FK between them)
+  - Six endpoints under `/api/agents/{name}/sessions*` (create, list, get, message, reset, delete)
+  - `SessionPanel.vue` + `stores/sessions.js` reuse Chat sub-components for visual parity
+  - Stream-json parser fix recognises `{"type":"system","subtype":"init"}` (Phase 1.3)
+  - `persist_session` flag plumbed through `ParallelTaskRequest → AgentRuntime → ClaudeCodeRuntime`
+  - Resume-failure fallback: clears cache, retries cold once on missing JSONL (Anthropic upstream #39667 / #53417)
+  - Per-`(agent, claude_uuid)` Redis lock (`SET NX EX 300s`, 30s wait ceiling) prevents JSONL corruption (Anthropic #20992)
+  - Per-user ownership returns 404 on mismatch (does not leak session-id existence — E6)
+  - JSONL cleanup service: synchronous best-effort reap on reset/delete + 6h periodic sweep with 1h race guard
+  - JSONL-side fallback recovery for stdout pipe race + JSONL-side compact event capture
+  - Cross-session contamination empirical gate (`test_session_cross_contamination.py`, Anthropic #26964)
+- **Default**: ON (`session_tab_enabled` flag flipped to True for GA on 2026-05-04, PR #652)
+- **Spec**: `docs/planning/SESSION_TAB_2026-04.md`
+- **Flow**: `docs/memory/feature-flows/session-tab.md`
+
 ---
 
 ## 6. Activity Monitoring
@@ -284,6 +305,11 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Key Features**: Docker socket capture, VRL transforms, platform.json/agents.json output
 - **Flow**: `docs/memory/feature-flows/vector-logging.md`
 
+### 8.8 Frontend E2E Test Infrastructure
+- **Status**: ✅ Implemented (2026-04-29)
+- **Description**: Playwright-based smoke test harness for the Trinity frontend, gated on the `ui` PR label in CI (#556)
+- **Key Features**: Chromium-only smoke suite (dashboard, agents, operating room, templates), storage-state auth pattern (login once, reuse session), label-gated CI workflow (~5 min, opt-in), on-failure artifact upload (screenshots, videos, Trinity logs)
+
 ---
 
 ## 9. Agent Collaboration
@@ -373,6 +399,23 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Configurable `POLL_INTERVAL` env var (default 10s)
 - **Root Cause**: TCP connection drops after 15-30 min on long-running scheduled tasks, causing false `failed` status even though agent work completed successfully
 
+### 10.6.1 Conditional Schedule Pre-Check (SCHED-COND-001)
+- **Status**: ✅ Implemented (2026-04-22)
+- **Requirement ID**: SCHED-COND-001
+- **GitHub Issue**: #454
+- **Description**: Optional template-supplied hook that lets a scheduled cron tick be skipped deterministically — the scheduler calls a new internal backend endpoint which `docker exec`s the executable `~/.trinity/pre-check` file inside the target agent container; non-empty stdout becomes the chat prompt, empty stdout + exit 0 records a skipped execution. The hook is language-agnostic (interpreter chosen by shebang). Eliminates Claude token cost on empty polls for poll-driven agents (PR reviewers, inbox monitors, alert routers, RSS watchers).
+- **Key Features**:
+  - Contract: agent templates drop an executable `~/.trinity/pre-check` file with a shebang (`#!/usr/bin/env python3`, `#!/bin/bash`, …). Trinity execs it directly — no `python3` prefix, no language assumption. Stdout is the chat prompt; empty stdout + exit 0 = skip; non-zero exit = fail-open.
+  - Backend endpoint: `POST /api/internal/agents/{name}/pre-check` (X-Internal-Secret gated) runs the script via `execute_command_in_container` — the same primitive used by `git_service.py` (persistent-state allowlist, #384 S3), `ssh_service.py`, `agent_service/terminal.py`, `adapters/message_router.py`, `routers/system_agent.py`, `routers/voice.py`.
+  - Fail-open: script absent, non-zero exit, timeout, backend 5xx / malformed response → scheduler fires as usual. A broken pre-check never silently suppresses scheduled work.
+  - Message override: non-empty stdout replaces `schedule.message` for that one invocation — lets the agent inject real work items (e.g. the PR list) into the chat prompt.
+  - Skip record: empty stdout writes a row to `schedule_executions` with `status='skipped'`, reason, and zero cost — visible in the Trinity UI alongside successful runs.
+  - Manual triggers bypass pre-check entirely (explicit operator intent always fires).
+  - Zero DB schema change (reuses existing `ExecutionStatus.SKIPPED` + `create_skipped_execution`).
+  - **No new HTTP edge**: scheduler calls backend, backend `docker exec`s into agent. Topology stays "scheduler → backend → agent" (Invariant #11).
+- **Test plan**: 13 unit tests covering backend-response translation (hook absent / non-zero exit / empty stdout / fire-with-message / 404 / 5xx / connection error / malformed JSON) + scheduler branch behaviors (skip, override, fail-open, manual-bypass). Full 162-test scheduler suite passes.
+- **Root Cause**: No platform primitive for "deterministic gate before LLM invocation." Previously required per-template daemons backgrounded inside agent containers — invisible to Trinity UI, reimplemented per template, no skip metrics.
+
 ### 10.7 Per-Agent Execution Timeout (TIMEOUT-001)
 - **Status**: ✅ Implemented (2026-03-12)
 - **Requirement ID**: TIMEOUT-001
@@ -388,10 +431,10 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Flow**: `docs/memory/feature-flows/parallel-capacity.md` (updated), `docs/memory/feature-flows/task-execution-service.md` (updated)
 
 ### 10.8 Persistent Task Backlog (BACKLOG-001)
-- **Status**: ✅ Implemented (2026-04-13)
+- **Status**: ✅ Implemented (2026-04-13); internalized behind `CapacityManager` (#428, 2026-04-26)
 - **Requirement ID**: BACKLOG-001
-- **GitHub Issue**: #260
-- **Description**: Async `/task` requests that arrive at full parallel capacity now spill into a durable SQLite-backed FIFO backlog instead of returning HTTP 429. Queued items drain automatically when slots free via a `SlotService` release callback; 60s maintenance task expires stale rows and drains orphans after restart.
+- **GitHub Issue**: #260, internalized by #428
+- **Description**: Async `/task` requests that arrive at full parallel capacity spill into a durable SQLite-backed FIFO backlog instead of returning HTTP 429. Reached via the unified `CapacityManager.acquire(..., overflow_policy="queue_persistent", overflow_payload=...)` facade; queued items drain automatically when slots free via the manager's release-callback wiring; 60s `CapacityManager.run_maintenance()` tick expires stale rows and drains orphans after restart.
 - **Key Features**:
   - New `QUEUED` value on `TaskExecutionStatus`; reuses `schedule_executions` with `queued_at` + `backlog_metadata` columns
   - Partial index `idx_executions_queued` for cheap O(log n) FIFO claim via atomic `UPDATE ... RETURNING`
@@ -658,6 +701,29 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Resume banner in Chat tab showing execution context
 - **Spec**: `docs/requirements/CONTINUE_EXECUTION_AS_CHAT.md`
 
+### 13.10 Outbound File Sharing (FILES-001)
+- **Status**: ✅ Implemented (2026-04-24)
+- **Requirement ID**: FILES-001
+- **GitHub Issue**: #295
+- **Priority**: P1
+- **Description**: Agents publish files to a public download URL with token-based auth, 7-day default expiration, and inheritance of the agent's channel-access policy. The URL is a universal delivery mechanism that works across web, Slack, Telegram, WhatsApp, and email — replacing fragile per-channel workarounds.
+- **Key Features**:
+  - Per-agent opt-in toggle + Docker volume `agent-{name}-public` mounted at `/home/developer/public/`
+  - `share_file` MCP tool (agent-scoped) — publishes a file and returns a download URL
+  - Internal endpoint `POST /api/internal/agent-files/share` (agent-server path, `X-Internal-Secret` auth)
+  - MCP-path endpoint `POST /api/agents/{name}/shared-files` (owner/admin or agent-scoped key)
+  - Public download endpoint `GET /api/files/{file_id}?sig={token}` — 192-bit signed token, constant-time compare, streaming, `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, audit logged as `file_share_download`
+  - List / revoke endpoints for the owner (`GET` / `DELETE /api/agents/{name}/shared-files[/{id}]`)
+  - UI panel in Agent Detail → Sharing tab (toggle, quota, table, copy URL, revoke)
+  - File validation: relative path only, no `..` escapes, 50 MB per file, 500 MB per-agent quota, magic-byte MIME detection with executable blocklist (PE/ELF/Mach-O/shebang)
+  - Agent delete cascades: DB rows + on-disk files + Docker volume all removed
+  - Agent rename cascades: `rename_agent()` in `db/agent_settings/metadata.py` updates our table
+- **Database**: `agent_shared_files` table + `agent_ownership.file_sharing_enabled` column (FK `ON DELETE CASCADE ON UPDATE CASCADE`, though enforcement is via the manual-cascade pattern used platform-wide)
+- **Security (audited)**: path traversal rejection, filesystem isolation (backend never mounts agent workspace; `docker get_archive` only pulls the agent-named file), agent-scope defense (agent-scoped MCP keys can't share files for a different agent), no `download_token` param name (renamed to `sig` to avoid credential-sanitizer redaction)
+- **Deferred (tracked for future)**: one-time download links (schema columns retained), platform-wide storage cap, streaming tar extraction, UUID-prefix directory sharding, dedicated rate-limit bucket
+- **Design doc**: `docs/drafts/amazing-file-outbound.md`
+- **Flow**: `docs/memory/feature-flows/file-sharing-outbound.md`
+
 ---
 
 ## 14. Multi-Runtime Support
@@ -701,6 +767,25 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Database Tables**: `public_user_memory`
 - **Flow**: `docs/memory/feature-flows/public-agent-links.md#per-user-persistent-memory-mem-001`
 
+### 15.1a-3 Agent Website Proxy (SITE-001)
+- **Status**: ✅ Implemented (2026-05-03)
+- **Requirement ID**: SITE-001
+- **GitHub Issue**: #633
+- **Priority**: P2
+- **Description**: Expose an agent's internal web server (e.g., a Next.js or React app running on port 3000) publicly via a `site`-type public link at `/site/{token}/{path}`. All HTTP methods, query strings, and bodies are reverse-proxied; responses are streamed.
+- **Key Features**:
+  - `site`-type public link token validated by the existing `agent_public_links` table
+  - Dual-bucket rate limiting (120 req/min per IP, 300 req/min per token)
+  - SSRF defense: agent name validated; upstream always resolves to `http://agent-{name}:3000`
+  - Sensitive request headers stripped (`authorization`, `cookie`, `x-internal-secret`)
+  - Hop-by-hop and server-banner response headers stripped
+  - Audit event `SITE_ACCESS / site_link_visit` on every proxied request (fire-and-forget)
+  - 401 invalid token, 410 expired, 429 rate limit, 502 agent unreachable
+- **API Endpoints**:
+  - `GET /site/{token}` — redirect to `/site/{token}/`
+  - `GET/POST/… /site/{token}/{path}` — proxy to agent port 3000
+- **Flow**: `docs/memory/feature-flows/public-agent-links.md`
+
 ### 15.1b Slack Integration for Public Links (SLACK-001)
 - **Status**: ✅ Implemented (2026-02-25)
 - **Requirement ID**: SLACK-001
@@ -714,7 +799,7 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - OAuth flow for workspace connection
   - Signature verification for Slack events
 - **Database Tables**:
-  - `slack_link_connections` - Connects workspace to public link
+  - `slack_link_connections` - Connects workspace to public link (bot_token AES-256-GCM encrypted, #453)
   - `slack_user_verifications` - Tracks verified Slack users
   - `slack_pending_verifications` - In-progress email verifications
 - **API Endpoints**:
@@ -1003,8 +1088,9 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 ## 16. Advanced Features
 
 ### 16.1 Agent Resource Allocation
-- **Status**: ✅ Implemented (2026-01-02)
-- **Description**: Per-agent memory and CPU configuration
+- **Status**: ✅ Implemented (2026-01-02; RES-001 system defaults 2026-04-30)
+- **Description**: Per-agent memory and CPU configuration; system-wide admin defaults as fleet-level ceiling
+- **Key Features**: 3-tier fallback (per-agent DB override → system default → hardcoded safe value); admin `GET/PUT /api/settings/agent-defaults/resources`; CPU as whole processors (1/2/4/8/16); memory as Docker-native strings (1g–32g)
 - **Flow**: `docs/memory/feature-flows/agent-resource-allocation.md`
 
 ### 16.1a Read-Only Mode
@@ -1820,40 +1906,52 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 ## 29. Voice Chat (VOICE-001)
 
 ### 29.1 Voice Session Initialization (VOICE-001)
-- **Status**: 🚧 In Progress (Phase 1 MVP)
+- **Status**: ✅ Implemented
 - **Description**: Real-time voice conversations with agents via Gemini 2.5 Flash Native Audio
 - **Key Features**: `POST /api/agents/{name}/voice/start` loads voice prompt + summarizes prior chat, opens Gemini Live API WebSocket connection
 - **Architecture**: Browser (mic) → WebSocket → Backend (proxy) → Gemini Live API → Backend → WebSocket → Browser (speaker)
 
 ### 29.2 Audio Streaming Bridge (VOICE-002)
-- **Status**: 🚧 In Progress
+- **Status**: ✅ Implemented
 - **Description**: WebSocket proxy: browser ↔ backend ↔ Gemini, <100ms added latency
 - **Key Features**: PCM 16kHz mono input, 24kHz mono output, base64 frame encoding
 
 ### 29.3 Transcript Persistence (VOICE-003)
-- **Status**: 🚧 In Progress
+- **Status**: ✅ Implemented
 - **Description**: Voice transcripts saved as ChatMessage rows with `source="voice"`, inline in existing chat sessions
 - **Key Features**: Automatic transcript extraction from Gemini, `source` column on chat_messages table
 
 ### 29.4 Frontend Voice UI (VOICE-004)
-- **Status**: 🚧 In Progress
+- **Status**: ✅ Implemented
 - **Description**: Mic button next to chat input, voice overlay with status/mute/end controls
 - **Key Features**: VoiceOverlay component, pulsing status indicators, live transcript display, mute toggle
 
 ### 29.5 Voice System Prompt (VOICE-005)
-- **Status**: 🚧 In Progress
+- **Status**: ✅ Implemented
 - **Description**: Per-agent `voice_system_prompt` field for voice personality
 - **Key Features**: Stored on agent_ownership table, fallback to auto-generated prompt from agent name
 
 ### 29.6 Context Summary (VOICE-006)
-- **Status**: 🚧 In Progress
+- **Status**: ✅ Implemented
 - **Description**: On voice start, summarize prior messages and inject into Gemini system prompt
 - **Key Features**: Last 20 messages truncated to ~750 tokens, injected as conversation context
 
+### 29.7 Tool Calls + Canvas Orb (VOICE-007)
+- **Status**: ✅ Implemented (#581)
+- **Description**: Gemini voice sessions can invoke Trinity's `run_task` tool to dispatch agent tasks mid-conversation; frontend canvas orb replaces the static overlay
+- **Key Features**: Single `run_task` tool declaration sent to Gemini Live API; non-blocking `asyncio.create_task` dispatch with 30s timeout; prompt injection mitigation (`_TOOL_PROMPT_MAX = 2000` chars); `_pending_tool_tasks` dict with cancellation on session end; canvas orb in `VoiceOverlay.vue` with `isToolCalling` state (no CDN dependencies); platform audit log on every tool call
+- **Architecture**: Gemini → `tool_call` WS message → `_execute_and_respond()` → `POST /api/agents/{name}/chat` → Gemini `tool_response`
+
+### 29.8 Voice Workspace (VOICE-008)
+- **Status**: ✅ Implemented (#699)
+- **Description**: Full-page workspace at `/agents/:name/workspace` with split layout — orb + controls left, agent-controlled canvas panel right; gated behind `voice_available` feature flag
+- **Key Features**: 4 in-process panel tools (`show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`); 300ms poll via `GET /voice/{session_id}/panel`; DOMPurify sanitization; 512 KB content cap; `workspace_mode` param on `voice/start`; BETA-badged button in AgentHeader
+
 ### Phase Roadmap
-1. **Phase 1 (MVP)**: Authenticated chat only, basic overlay, transcript on session end, manual voice prompt
-2. **Phase 2 (Polish)**: Real-time waveform, incremental transcript, auto-generate voice prompt from CLAUDE.md
-3. **Phase 3 (Advanced)**: Function calling, multi-language auto-detection, custom voice per agent
+1. **Phase 1 (MVP)**: Authenticated chat only, basic overlay, transcript on session end, manual voice prompt ✅
+2. **Phase 2 (Polish)**: Real-time waveform, incremental transcript, auto-generate voice prompt from CLAUDE.md ✅
+3. **Phase 3 (Advanced)**: Tool calling (run_task), canvas orb ✅ — multi-language auto-detection, custom voice per agent (deferred)
+4. **Phase 4 (Workspace)**: Full-page workspace with canvas panel tools, feature-flag gated (BETA) ✅
 
 ---
 

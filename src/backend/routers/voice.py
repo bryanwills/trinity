@@ -5,15 +5,17 @@ Provides real-time voice conversations with agents via Gemini Live API.
 Endpoints:
   POST /api/agents/{name}/voice/start - Initialize voice session
   POST /api/agents/{name}/voice/stop  - End voice session and save transcript
-  WS   /ws/voice/{voice_session_id}   - Audio streaming bridge
+  WS   /ws/voice/{voice_session_id}   - Audio streaming bridge (audio + tool_call + tool_result)
 """
 
 import asyncio
 import base64
 import json
 import logging
+import types
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 
@@ -21,8 +23,9 @@ from models import User
 from dependencies import get_current_user, get_authorized_agent
 from database import db
 from config import GEMINI_API_KEY, VOICE_ENABLED
-from services.gemini_voice import voice_service
+from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
 from services.docker_service import get_agent_container
+from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,8 @@ router = APIRouter(tags=["voice"])
 
 class VoiceStartRequest(BaseModel):
     session_id: Optional[str] = None  # Existing chat session to continue
+    voice_name: Optional[str] = None  # Gemini voice name (e.g. "Kore", "Puck")
+    workspace_mode: bool = False       # Enable canvas panel tools
 
 
 class VoiceStartResponse(BaseModel):
@@ -91,18 +96,19 @@ async def voice_start(
     combined_prompt = voice_prompt
     if context_summary:
         combined_prompt += f"\n\n## Conversation so far:\n{context_summary}"
+    if request.workspace_mode:
+        combined_prompt += WORKSPACE_PANEL_INSTRUCTIONS
 
-    # Get voice name preference
-    voice_name = _get_voice_name(name)
+    voice_name = request.voice_name or _get_voice_name(name)
 
-    # Create the voice session
-    session = voice_service.create_session(
+    session = await voice_service.create_session(
         agent_name=name,
         chat_session_id=chat_session_id,
         user_id=current_user.id,
         user_email=current_user.email or current_user.username,
         system_prompt=combined_prompt,
         voice_name=voice_name,
+        workspace_mode=request.workspace_mode,
     )
 
     return VoiceStartResponse(
@@ -119,6 +125,18 @@ async def voice_stop(
     current_user: User = Depends(get_current_user),
 ):
     """End a voice session and save the transcript to chat messages."""
+    # Ownership gate (#600): the path agent and the JWT user must both match
+    # the session before any mutation happens — otherwise any authenticated
+    # user with access to ANY agent could end and persist a transcript onto
+    # someone else's session by passing its 128-bit id in the body.
+    preview = await voice_service.get_session(request.voice_session_id)
+    if not preview:
+        raise HTTPException(status_code=404, detail="Voice session not found")
+    if preview.agent_name != name:
+        raise HTTPException(status_code=403, detail="Voice session does not belong to this agent")
+    if preview.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized for this voice session")
+
     session = await voice_service.end_session(request.voice_session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Voice session not found")
@@ -127,7 +145,7 @@ async def voice_stop(
     messages_saved = _save_transcript(session)
 
     # Clean up
-    voice_service.remove_session(request.voice_session_id)
+    await voice_service.remove_session(request.voice_session_id)
 
     return VoiceStopResponse(
         transcript=[
@@ -150,6 +168,27 @@ async def voice_status(
         "available": voice_service.is_available(),
         "voice_prompt_set": bool(db.get_voice_system_prompt(name)),
     }
+
+
+@router.get("/api/agents/{name}/voice/{session_id}/panel")
+async def get_voice_panel(
+    session_id: str,
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the current canvas panel state for a workspace voice session.
+
+    Returns empty state (not 404) when session has ended so the frontend
+    poll loop doesn't raise errors during the teardown window.
+    """
+    session = await voice_service.get_session(session_id)
+    if not session:
+        return {"type": "empty", "content": "", "title": None, "updated_at": None}
+    if session.agent_name != name:
+        raise HTTPException(status_code=403, detail="Session does not belong to this agent")
+    if session.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized for this voice session")
+    return session.panel_state
 
 
 @router.get("/api/agents/{name}/voice/prompt")
@@ -190,22 +229,44 @@ async def voice_websocket(
                   {"type": "transcript", "role": "user|assistant", "text": "..."}
                   {"type": "status", "state": "connecting|listening|speaking|ended"}
     """
-    session = voice_service.get_session(voice_session_id)
+    # Authenticate via query param token (WebSocket can't use Authorization header)
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    session = await voice_service.get_session(voice_session_id)
     if not session:
         await websocket.close(code=4004, reason="Voice session not found")
         return
 
-    # Authenticate via query param token (WebSocket can't use Authorization header)
-    if token:
-        from jose import jwt, JWTError
-        from config import SECRET_KEY, ALGORITHM
-        try:
-            jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        except JWTError:
-            await websocket.close(code=4001, reason="Invalid token")
-            return
-    else:
-        await websocket.close(code=4001, reason="Authentication required")
+    from jose import jwt, JWTError
+    from config import SECRET_KEY, ALGORITHM
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
+    username = payload.get("sub")
+    if not username:
+        await websocket.close(code=4001, reason="Invalid token claims")
+        return
+
+    user = db.get_user_by_username(username)
+    if not user:
+        await websocket.close(code=4001, reason="Unknown user")
+        return
+
+    # Ownership gate (#600): JWT user must own the voice session, or be admin.
+    # Without this check, anyone holding a valid JWT who learns the 128-bit
+    # session id (logs, browser inspection, XSS) can hijack the audio stream
+    # and write tool calls under the victim's identity.
+    if user["id"] != session.user_id and user.get("role") != "admin":
+        logger.warning(
+            "voice_ws ownership rejected: user_id=%s tried to attach to session owned by user_id=%s",
+            user["id"], session.user_id,
+        )
+        await websocket.close(code=4003, reason="Not authorized for this voice session")
         return
 
     await websocket.accept()
@@ -239,6 +300,35 @@ async def voice_websocket(
         except Exception:
             pass
 
+    async def on_tool_call(tool_name: str, args: dict):
+        try:
+            await websocket.send_json({
+                "type": "tool_call",
+                "tool": tool_name,
+                "args": args,
+            })
+        except Exception:
+            pass
+        asyncio.create_task(platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="voice_tool_call",
+            source="api",
+            actor_user=types.SimpleNamespace(id=user["id"], email=user.get("email")),
+            target_type="agent",
+            target_id=session.agent_name,
+            details={"tool": tool_name, "prompt_preview": str(args.get("prompt", ""))[:100]},
+        ))
+
+    async def on_tool_result(tool_name: str, result: str):
+        try:
+            await websocket.send_json({
+                "type": "tool_result",
+                "tool": tool_name,
+                "result_preview": result[:200],
+            })
+        except Exception:
+            pass
+
     # Start the Gemini connection in a background task
     gemini_task = asyncio.create_task(
         voice_service.connect_and_stream(
@@ -246,6 +336,8 @@ async def voice_websocket(
             on_audio_out=on_audio_out,
             on_transcript=on_transcript,
             on_status=on_status,
+            on_tool_call=on_tool_call,
+            on_tool_result=on_tool_result,
         )
     )
 
@@ -270,7 +362,7 @@ async def voice_websocket(
         session = await voice_service.end_session(voice_session_id)
         if session:
             _save_transcript(session)
-            voice_service.remove_session(voice_session_id)
+            await voice_service.remove_session(voice_session_id)
 
         # Cancel Gemini task
         if not gemini_task.done():
@@ -294,7 +386,7 @@ async def _get_voice_system_prompt(agent_name: str) -> str:
     Priority:
     1. Per-agent voice_system_prompt from DB (set via API)
     2. voice-agent-system-prompt.md from agent container's working directory
-    3. Error if neither exists
+    3. Auto-generated from agent template info (description + voice behaviour hints)
     """
     # 1. Check DB override
     prompt = db.get_voice_system_prompt(agent_name)
@@ -312,18 +404,34 @@ async def _get_voice_system_prompt(agent_name: str) -> str:
                 user="developer",
             )
             output = result.output.decode("utf-8").strip() if hasattr(result, 'output') else str(result).strip()
-            if output and "No such file" not in output:
+            if output and "No such file" not in output and len(output) > 10:
                 return output
         except Exception as e:
             logger.debug(f"Could not read voice-agent-system-prompt.md from {agent_name}: {e}")
 
-    # 3. No prompt found — error
-    raise HTTPException(
-        status_code=400,
-        detail=f"No voice system prompt configured for agent '{agent_name}'. "
-               f"Create a 'voice-agent-system-prompt.md' file in the agent's working directory "
-               f"(/home/developer/voice-agent-system-prompt.md) or set one via the API."
+    # 3. Auto-generate from template info
+    description = None
+    if container:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"http://agent-{agent_name}:8000/api/template/info")
+                if resp.status_code == 200:
+                    info = resp.json()
+                    description = info.get("description") or info.get("summary")
+        except Exception:
+            pass
+
+    display_name = agent_name.replace("-", " ").title()
+    lines = [f"You are {display_name}, an AI agent."]
+    if description:
+        lines.append(f"\n{description}")
+    lines.append(
+        "\n## Voice Behaviour\n"
+        "You are in a voice conversation. Keep responses concise and natural for speech. "
+        "No bullet points, markdown formatting, or code blocks — speak as you would in conversation. "
+        "One idea at a time. Use the run_task tool when you need to look something up or take an action."
     )
+    return "\n".join(lines)
 
 
 def _get_voice_name(agent_name: str) -> str:

@@ -39,7 +39,8 @@ Automate the complete Trinity development workflow:
 | GitHub Project Board | `abilityai project #6` | ✅ | ✅ | Ranked issue pipeline |
 | GitHub Issues | `abilityai/trinity` | ✅ | ✅ | Issue details, labels |
 | Requirements | `docs/memory/requirements.md` | ✅ | ✅ | Feature requirements |
-| Architecture | `docs/memory/architecture.md` | ✅ | ✅ | System design |
+| Architecture | `docs/memory/architecture.md` | ✅ | ✅ | Current system design |
+| Target Architecture | `docs/planning/TARGET_ARCHITECTURE.md` | ✅ | ✗ | Destination design — check alignment when selecting issue |
 | Feature Flows | `docs/memory/feature-flows/` | ✅ | ✅ | Feature documentation |
 | Source Code | `src/`, `docker/base-image/` | ✅ | ✅ | Implementation |
 | Tests | `tests/` | ✅ | ✅ | Test files |
@@ -114,6 +115,19 @@ Which issue should I work on? (number or #issue)
 ```
 
 **Important**: Always sort by `rank` field, not by tier or issue number. The rank reflects the actual board priority order set by the user. Tier (P1a/P1b/P1c) comes from the project field, NOT from issue labels.
+
+**Target architecture alignment**: when presenting the backlog or confirming an issue selection, check `docs/planning/TARGET_ARCHITECTURE.md` and note if the chosen issue advances a target architecture component (Data Layer, Coordination Model, Observability, Security, Infrastructure). Surface this as a one-line note:
+
+```
+ℹ️  #NNN advances the Coordination Model component of the target architecture (actor model / async-first communication).
+```
+
+or if not aligned:
+```
+ℹ️  #NNN does not directly advance the target architecture — it is a standalone feature/fix.
+```
+
+This is informational only — it does not block issue selection. The rank on the board is authoritative.
 
 **If `$ARGUMENTS` is "recent" — show recently created open issues:**
 
@@ -216,9 +230,10 @@ If missing critical detail:
 ### Step 3: Claim Issue & Create Branch
 
 ```bash
-# Assign yourself and update labels
-gh issue edit [NUMBER] --repo abilityai/trinity \
-  --add-label "status-in-progress"
+# Claim via the GitHub Action (auto-assigns you AND adds status-in-progress
+# via .github/workflows/claim.yml — single source of truth per
+# DEVELOPMENT_WORKFLOW.md §2). Do not edit labels directly.
+gh issue comment [NUMBER] --repo abilityai/trinity --body "/claim"
 
 # Create feature branch from dev
 git checkout dev
@@ -302,15 +317,17 @@ git diff --name-only | grep -E "^tests/"
 1. Identify what should be tested (new endpoints, services, edge cases)
 2. Create test file: `tests/test_[feature].py`
 3. Write tests following existing patterns (see `tests/` for examples)
-4. Run the tests:
-```bash
-cd tests && source .venv/bin/activate && python -m pytest tests/test_[feature].py -v --tb=short 2>&1 | tail -30
-```
+4. Run via the project test runner (per DEVELOPMENT_WORKFLOW.md §2):
+   ```
+   /test-runner [feature]
+   ```
 
 **If tests exist, run them to verify they pass:**
-```bash
-cd tests && source .venv/bin/activate && python -m pytest tests/test_[feature].py -v --tb=short 2>&1 | tail -30
 ```
+/test-runner [feature]
+```
+
+Fall back to direct `pytest tests/test_[feature].py -v --tb=short` only when targeting a brand-new file the runner's catalog doesn't yet know about.
 
 Fix any failures before proceeding.
 
@@ -358,7 +375,7 @@ Proceed?
 Then commit and create PR:
 
 ```
-/commit closes #[NUMBER]
+/commit fixes #[NUMBER]
 ```
 
 After commit succeeds, push and create PR:
@@ -382,7 +399,7 @@ gh pr create --repo abilityai/trinity \
 - [ ] Existing tests unaffected
 - [ ] Manual verification: [key steps]
 
-Closes #[NUMBER]
+Fixes #[NUMBER]
 
 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
@@ -411,6 +428,11 @@ Docs updated: [list]
 Next steps:
 - Review PR at [URL]
 - Run /validate-pr [PR number] for merge readiness check
+
+After squash-merge to dev: .github/workflows/issue-status-on-merge.yml
+auto-swaps `status-in-progress` → `status-in-dev` and the issue stays
+open until the next release cut (dev → main). Do NOT manually edit
+status labels post-merge — let the automation own that transition.
 ```
 
 ## Completion Checklist

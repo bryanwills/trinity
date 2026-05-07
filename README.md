@@ -1,5 +1,8 @@
 <div align="center">
-  <img src="docs/assets/trinity-logo.svg" alt="Trinity" width="120"/>
+  <a href="https://www.ability.ai/workshopsgt"><strong>🛠️ Free Weekly Workshops — Learn to build AI agents on Trinity →</strong></a>
+  <br/><br/>
+  <img src="docs/assets/trinity-logo-white.svg#gh-dark-mode-only" alt="Trinity" width="120"/>
+  <img src="docs/assets/trinity-logo.svg#gh-light-mode-only" alt="Trinity" width="120"/>
   <h1>Trinity</h1>
   <p><strong>Autonomous agent orchestration and infrastructure</strong></p>
   <p>Deploy, orchestrate, and govern fleets of autonomous AI agents — with real-time observability, fleet-wide scheduling, agent-to-agent delegation, and complete audit trails. On your own infrastructure.</p>
@@ -19,12 +22,17 @@
     <a href="#features">Features</a> &bull;
     <a href="https://youtu.be/SWpNphnuPpQ">Demo Video</a> &bull;
     <a href="#documentation">Docs</a> &bull;
-    <a href="#community--support">Community</a>
+    <a href="#community--support">Community</a> &bull;
+    <a href="https://github.com/abilityai/trinity-ops-public">Ops Agent</a>
   </p>
 
   <br/>
   <a href="https://youtu.be/SWpNphnuPpQ">
     <img src="https://img.shields.io/badge/▶_Watch_Demo-YouTube-red?style=for-the-badge&logo=youtube" alt="Watch the Demo">
+  </a>
+  &nbsp;
+  <a href="https://github.com/abilityai/trinity-ops-public">
+    <img src="https://img.shields.io/badge/🤖_Ops_Agent-GitHub-black?style=for-the-badge&logo=github" alt="Trinity Ops Agent">
   </a>
   <br/><br/>
   <img src="docs/assets/screenshots/graph-view-fleet.png" alt="Trinity Agent Fleet — Graph View" width="800"/>
@@ -43,6 +51,8 @@
 | **SaaS Platforms** | Data leaves your perimeter, vendor lock-in | Your infrastructure, data never leaves |
 | **Build Custom** | 6-12 months, $500K+ engineering | Deploy in minutes |
 | **Frameworks** | No observability, no fleet management | Real-time monitoring, scheduling, audit trails |
+
+> **Security**: Trinity received a **Grade A (Excellent)** in an independent web application penetration test by [UnderDefense](https://underdefense.com) (April 2026). All critical and high findings from the initial assessment were fully remediated. See the [attestation letter](docs/security/UnderDefense-Web-Pentest-Attestation-Apr-2026.pdf).
 
 ---
 
@@ -613,6 +623,7 @@ EMAIL_PROVIDER=console  # Use 'resend' or 'smtp' for production
 - [Testing Guide](docs/TESTING_GUIDE.md) — Testing approach and standards
 - [Contributing Guide](CONTRIBUTING.md) — How to contribute (PRs, code standards)
 - [Known Issues](docs/KNOWN_ISSUES.md) — Current limitations and workarounds
+- [Security Attestation](docs/security/UnderDefense-Web-Pentest-Attestation-Apr-2026.pdf) — Web pentest by UnderDefense (Apr 2026, Grade A — Excellent)
 
 ## Development
 

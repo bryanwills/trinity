@@ -25,7 +25,7 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 - **API**: `POST /api/settings/slack/connect` — start Socket Mode transport
 - **API**: `POST /api/settings/slack/install` — platform-level OAuth (workspace install)
 - **API**: `POST /api/agents/{name}/slack/channel` — create channel + bind agent
-- **Transport**: `src/backend/adapters/transports/slack_socket.py` — Socket Mode receives events
+- **Transport**: `src/backend/adapters/transports/slack_socket.py` — Socket Mode receives events. Runs **N concurrent WebSocket connections** (default 2, configurable via `SLACK_SOCKET_CONNECTION_COUNT` env var, clamped 1–10) per Slack's documented multi-connection guidance; one connection half-closing is absorbed by the others. Each client has an independent watchdog. An envelope-ID dedup ring (cap 1024, FIFO) protects against possible cross-connection duplicate delivery (#244)
 
 ## Frontend Layer
 
@@ -38,7 +38,7 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 
 ### Agent Detail — Sharing Tab (Per-Agent)
 - `SlackChannelPanel.vue` — Three states:
-  - **Bound**: Shows `#channel-name`, workspace name, DM default badge, "Unbind" button
+  - **Bound**: Shows `#channel-name`, workspace name, DM-default badge **or** "Make default" button (with hover tooltip explaining DM routing), and "Unbind" button. The Unbind button is **disabled** when this agent is the DM default *and* the workspace has other bound agents — promoting another agent first via the "Make default" button on its panel is required (#584).
   - **Unbound**: "Create Slack Channel" button → creates channel in Slack + binds to agent
   - **Access denied**: Informational message for non-owner shared users
 - `SharingPanel.vue` — Renders `SlackChannelPanel` between Team Sharing and Public Links sections
@@ -55,9 +55,10 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 - `POST /api/settings/slack/install` → `{oauth_url}` (browser redirect)
 
 ### API Calls (Per-Agent Channel)
-- `GET /api/agents/{name}/slack/channel` → `{bound, channel_name, channel_id, workspace_name}`
+- `GET /api/agents/{name}/slack/channel` → `{bound, channel_name, channel_id, workspace_name, is_dm_default, workspace_agent_count}`
 - `POST /api/agents/{name}/slack/channel` → `{status, channel_name, channel_id, workspace_name}`
-- `DELETE /api/agents/{name}/slack/channel` → `{unbound, workspace_name}`
+- `DELETE /api/agents/{name}/slack/channel` → `{unbound, workspace_name}` — **409** if the agent is the workspace's DM default and other agents are still bound (#584)
+- `PUT /api/agents/{name}/slack/channel/dm-default` → `{status, team_id, workspace_name, previous, new_default}` — owner-only; single-tx clear-then-set on `is_dm_default`; audit-logged via `AGENT_LIFECYCLE/slack_dm_default_changed` (#584)
 
 ## Backend Layer
 
@@ -110,12 +111,14 @@ Priority in `SlackAdapter.get_agent_name()`:
 | GET | `/api/agents/{name}/public-links/{id}/slack` | `routers/slack.py` | Connection status |
 | DELETE | `/api/agents/{name}/public-links/{id}/slack` | `routers/slack.py` | Disconnect |
 | PUT | `/api/agents/{name}/public-links/{id}/slack` | `routers/slack.py` | Update settings (enable/disable) |
+| PUT | `/api/agents/{name}/slack/channel/dm-default` | `routers/slack.py` | Make this agent the DM-default for its workspace (#584) |
+| DELETE | `/api/agents/{name}/slack/channel` | `routers/slack.py` | Unbind — refuses with 409 if agent is the DM default and others are bound (#584) |
 
 ### Business Logic
 
 1. **"Connect Slack" flow**: If workspace not connected → OAuth. If connected → `conversations.create` creates `#agent-name` channel → bind in `slack_channel_agents`
 2. **Message routing**: Socket Mode/webhook delivers event → adapter parses → router dispatches to agent via `TaskExecutionService` → adapter formats response via `format_response()` (markdown → Slack mrkdwn) → sends with `chat:write.customize` (agent name/avatar)
-3. **Response formatting**: `SlackAdapter.format_response()` converts standard markdown to Slack mrkdwn via `slackify-markdown` library (`**bold**` → `*bold*`, `[link](url)` → `<url|link>`, headers, lists). Graceful fallback to plain text on failure.
+3. **Response formatting** (#293, refreshed 2026-05-01): `SlackAdapter.format_response()` converts standard markdown to Slack mrkdwn via `services.slack_mrkdwn.to_slack_mrkdwn` — a stateful `markdown-it-py` AST walker that replaces the third-party `slackify-markdown==0.2.2` library. The library shipped with five compounding bugs that produced "ugly" output: nested lists were flattened, headings were crammed against preceding content (no blank line before), blockquotes only got the `>` prefix on the first line, Markdown tables were passed through verbatim (raw pipes in Slack), and horizontal rules were dropped silently. The renderer fixes all five, plus retains correct inline conversion (`**bold**` → `*bold*`, `*italic*` → `_italic_`, `~~strike~~` → `~strike~`, `[label](url)` → `<url|label>`, code blocks with language fence stripped per Slack mrkdwn spec, images → `<url|alt>` link). Graceful fallback to plain text on conversion failure.
 4. **Thread continuity**: First @mention → bot responds in thread → registers in `slack_active_threads` → subsequent replies in that thread don't need @mention
 
 ### Database Operations

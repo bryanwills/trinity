@@ -23,9 +23,10 @@ from services.docker_utils import (
     volume_get, volume_create, containers_run
 )
 from services.agent_service.helpers import validate_base_image
-from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities
+from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches
+from .file_sharing import check_public_folder_mount_matches
 from .read_only import inject_read_only_hooks
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,30 @@ async def inject_assigned_credentials(agent_name: str, max_retries: int = 3, ret
         dict with injection status
     """
     import asyncio
-    from services.credential_encryption import get_credential_encryption_service
+    from database import db
+    from services.credential_encryption import (
+        CredentialsFileNotFoundError,
+        get_credential_encryption_service,
+    )
+
+    # #612: subscription-mode agents authenticate via CLAUDE_CODE_OAUTH_TOKEN
+    # env var set at container creation (SUB-002). They do not need (and
+    # typically do not have) a .credentials.enc file. Attempting the import
+    # would either silently succeed-noop or surface a misleading "failed"
+    # status that prompts operators to take corrective action (re-assigning
+    # the subscription, recreating the container) — when nothing is wrong.
+    # Short-circuit to a clear skipped status before the import path runs.
+    if db.get_agent_subscription_id(agent_name):
+        logger.debug(
+            f"Skipping .credentials.enc import for {agent_name}: "
+            f"subscription mode (auth via CLAUDE_CODE_OAUTH_TOKEN env var)"
+        )
+        return {
+            "status": "skipped",
+            "reason": "subscription_mode",
+            "detail": "agent authenticates via CLAUDE_CODE_OAUTH_TOKEN; "
+                      "file-based credential injection is not used",
+        }
 
     try:
         encryption_service = get_credential_encryption_service()
@@ -162,11 +186,20 @@ async def inject_assigned_credentials(agent_name: str, max_retries: int = 3, ret
             else:
                 return {"status": "skipped", "reason": "no_credentials_enc_file"}
 
+        except CredentialsFileNotFoundError:
+            # #612: ``.credentials.enc`` is absent. Common case for fresh
+            # agents that haven't been through an export cycle yet — a clean
+            # skip, not a failure. (Was previously caught by a fragile
+            # substring match against the error message; the explicit
+            # subclass makes the intent unambiguous.)
+            logger.debug(f"No .credentials.enc found for agent {agent_name}")
+            return {"status": "skipped", "reason": "no_credentials_enc_file"}
+
         except ValueError as e:
-            # .credentials.enc doesn't exist - this is normal for new agents
-            if "not found" in str(e).lower():
-                logger.debug(f"No .credentials.enc found for agent {agent_name}")
-                return {"status": "skipped", "reason": "no_credentials_enc_file"}
+            # Other ValueError shapes (encrypted blob malformed, decrypt
+            # failure, …) — keep retrying because some of them are
+            # transient (e.g. agent HTTP not yet ready under multi-agent
+            # cold start, #406).
             last_error = str(e)
 
         except Exception as e:
@@ -247,6 +280,7 @@ async def start_agent_internal(agent_name: str) -> dict:
     shared_folder_match = await check_shared_folder_mounts_match(container, agent_name)
     needs_recreation = (
         not shared_folder_match or
+        not check_public_folder_mount_matches(container, agent_name) or
         not check_api_key_env_matches(container, agent_name) or
         not check_github_pat_env_matches(container, agent_name) or
         not check_resource_limits_match(container, agent_name) or
@@ -381,14 +415,15 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     # Get port from labels
     ssh_port = int(labels.get("trinity.ssh-port", 2222))
 
-    # Get resource limits - check DB for overrides, fallback to labels/defaults
+    # Get resource limits: per-agent DB override → container labels → system defaults → hardcoded
     db_limits = db.get_resource_limits(agent_name)
+    system_defaults = get_agent_default_resources()
     if db_limits:
-        cpu = db_limits.get("cpu") or labels.get("trinity.cpu", "2")
-        memory = db_limits.get("memory") or labels.get("trinity.memory", "4g")
+        cpu = db_limits.get("cpu") or labels.get("trinity.cpu") or system_defaults["cpu"]
+        memory = db_limits.get("memory") or labels.get("trinity.memory") or system_defaults["memory"]
     else:
-        cpu = labels.get("trinity.cpu", "2")
-        memory = labels.get("trinity.memory", "4g")
+        cpu = labels.get("trinity.cpu") or system_defaults["cpu"]
+        memory = labels.get("trinity.memory") or system_defaults["memory"]
 
     # Update labels with new resource limits for future reference
     labels["trinity.cpu"] = cpu
@@ -418,6 +453,9 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
         dest = m.get("Destination", "")
         # Skip shared folder mounts - we'll add the correct ones
         if dest == "/home/developer/shared-out" or dest.startswith("/home/developer/shared-in/"):
+            continue
+        # Skip public mount — re-added below based on current file_sharing_enabled flag.
+        if dest == db.get_public_mount_path():
             continue
         # Keep other mounts
         if m.get("Type") == "bind":
@@ -469,6 +507,36 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
                     volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
                 except docker.errors.NotFound:
                     pass
+
+    # Add public folder mount based on current file_sharing_enabled flag
+    # (FILES-001 Step 2). Mirrors the shared-folders expose pattern.
+    if db.get_file_sharing_enabled(agent_name):
+        public_volume_name = db.get_public_volume_name(agent_name)
+        public_volume_created = False
+        try:
+            await volume_get(public_volume_name)
+        except docker.errors.NotFound:
+            await volume_create(
+                name=public_volume_name,
+                labels={
+                    'trinity.platform': 'agent-public',
+                    'trinity.agent-name': agent_name,
+                },
+            )
+            public_volume_created = True
+
+        if public_volume_created:
+            try:
+                await containers_run(
+                    'alpine',
+                    command='chown 1000:1000 /public',
+                    volumes={public_volume_name: {'bind': '/public', 'mode': 'rw'}},
+                    remove=True,
+                )
+            except Exception as e:
+                logger.warning(f"Could not fix public volume ownership: {e}")
+
+        volumes[public_volume_name] = {'bind': db.get_public_mount_path(), 'mode': 'rw'}
 
     # Create new container with security settings
     # Security principle: ALWAYS apply baseline security, even in full_capabilities mode

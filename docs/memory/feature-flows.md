@@ -11,10 +11,27 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
+| 2026-05-06 | #244 | fix(slack): multi-connection Socket Mode — N concurrent WebSockets (default 2, env `SLACK_SOCKET_CONNECTION_COUNT` clamped 1–10) per Slack's documented multi-connection guidance, eliminating the brief reconnect gap when one client half-closes. Each client gets an independent watchdog with its own backoff counter; envelope-ID dedup ring (OrderedDict cap 1024 + `asyncio.Lock`) defends against possible cross-connection duplicate delivery and emits a measurable `dedup_hits` counter. `is_connected` returns "any client healthy" and a new `connected_count` exposes degraded mode. 56 unit tests pass. Reconnect-call timeout deferred to #683. | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
+| 2026-05-05 | #453 | sec: Encrypt SLACK-001 bot tokens at rest — `db/slack.py` adopts the AES-256-GCM JSON-envelope pattern from `slack_channels.py`/`telegram_channels.py`/`whatsapp_channels.py`. New `_migrate_slack_bot_token_encryption` walks BOTH `slack_link_connections` and `slack_workspaces` and re-encrypts any plaintext `xoxb-*` rows. Read-path plaintext fallback keeps runtime working pre-migration. Architecture Invariant #12 reworded to acknowledge the documented exception (channel/subscription tokens persisted but mandatorily encrypted). 14 unit tests. Test backfill for slack_channels.py + TG + WA tracked in #664. | [slack-integration.md](feature-flows/slack-integration.md) |
+| 2026-05-03 | SITE-001 (#633) | Agent website proxy — `type='site'` public links reverse-proxy to agent port 3000 via `routers/site.py`; nginx `/site/` block; per-IP + per-token rate limit; SSRF guard; header stripping; `site_access` audit event | [public-agent-links.md](feature-flows/public-agent-links.md) |
+| 2026-05-03 | #250 | Token usage display — per-agent cost/token stats (24h, 7d, lifetime) from `schedule_executions` DB, shown in AgentHeader as amber sparkline + today's cost + trend vs 7-day average | [token-usage-display.md](feature-flows/token-usage-display.md) |
+| 2026-05-01 | SESSION_TAB_2026-04 | Session tab — `--resume`-default chat surface. New `agent_sessions`/`agent_session_messages` tables, six `/api/agents/{name}/sessions*` endpoints, `SessionPanel.vue` + `stores/sessions.js`, parser fix + `persist_session` plumbed through agent stack, resume-failure fallback, Redis lock per `(agent, claude_uuid)`, JSONL cleanup service, JSONL fallback recovery for stdout pipe race, JSONL-side compact event capture, validator canonical-trinity allowance. Default ON since GA 2026-05-04 (`session_tab_enabled` flag, settable to false to disable). | [session-tab.md](feature-flows/session-tab.md) |
+| 2026-05-01 | #293 | fix(slack): replace `slackify-markdown 0.2.2` with own `services.slack_mrkdwn` renderer — fixes 5 layout bugs that produced "ugly" output: nested-list flattening, headings crammed against preceding content, blockquote `>` only on first line, raw-pipe table passthrough, dropped `---` rules. 35 unit tests + 13 ported. | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
+| 2026-04-29 | #584 | feat(slack): UI + API to change Slack DM-default agent — `set_slack_dm_default()` DB method (single-tx clear-then-set), `PUT /api/agents/{name}/slack/channel/dm-default` (owner-only, audit-logged), "Make default" button + tooltip in `SlackChannelPanel.vue`, unbind refuses 409 when target is DM default with siblings remaining | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
+| 2026-04-30 | #598 | sec: AISEC-C2 Layer 2 — restored `.mcp.json` post-deploy editing via structure validation (`services.mcp_validator`). Closed schema, command/transport allowlists, SSRF guard for http/sse, reserved env-ref blocklist, literal-secret detection. 88 unit tests + 22 integration tests. UI placeholder updated; `trinity` server name reserved. | [credential-injection.md](feature-flows/credential-injection.md) |
+| 2026-04-30 | #590 | sec: AISEC-C2 Layer 1 — backend `ALLOWED_CREDENTIAL_PATHS` tightened; backend `update_agent_file_logic` adds defense-in-depth deny check before proxy; agent-server `EDIT_PROTECTED_PATHS` adds `.mcp.json` and `.credentials.enc`. | [credential-injection.md](feature-flows/credential-injection.md), [file-browser.md](feature-flows/file-browser.md) |
+| 2026-04-30 | #364 | Web chat file upload — drag-drop/picker in ChatPanel and PublicChat; base64 JSON encoding; shared upload_service; images via vision blocks, non-images via Docker put_archive | [web-chat-file-upload.md](feature-flows/web-chat-file-upload.md) |
+| 2026-04-27 | #539 | fix: public chat context duplication — `build_public_chat_context()` now called before `add_public_chat_message(role="user")`, preventing current message appearing twice in every agent prompt | [public-agent-links.md](feature-flows/public-agent-links.md) |
+| 2026-04-26 | #428 | CapacityManager facade — single public surface for capacity (admit / release / overflow policy / status / reclaim) replacing ExecutionQueue + SlotService + BacklogService trio | [capacity-management.md](feature-flows/capacity-management.md) |
+| 2026-04-26 | #516, #520 | Agent error classification — `_classify_signal_exit()` (504 for SIGINT/SIGKILL/SIGTERM, was misread as 503 auth) and `_classify_empty_result()` (502 when clean exit drops the final result message, was silent 200 + watchdog reap) | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md), [task-execution-service.md](feature-flows/task-execution-service.md) |
+| 2026-04-26 | #498 | Sync `/task` long-poll on backlog — sync parallel calls at capacity now spill to BACKLOG-001 (same backlog as async) and long-poll the open HTTP connection until terminal status (cap `2 × effective_timeout`); new `services/sync_waiter.py` owns the in-process registry + event/poll-fallback wait helper | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md), [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) |
+| 2026-04-24 | FILES-001 (#295) | Outbound file sharing — per-agent opt-in publish volume, `share_file` MCP tool, public download URL (`?sig=` token), UI panel with toggle/list/revoke. Agents publish files to `/home/developer/public/`; backend extracts via Docker SDK `get_archive` on demand; URL format `/api/files/{id}?sig={token}` | [file-sharing-outbound.md](feature-flows/file-sharing-outbound.md) |
 | 2026-04-24 | WEBHOOK-001 (#291) | Webhook triggers — token-authenticated public URL fires schedule executions | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
+| 2026-04-25 | #496 | Backlog drain spawn fix — repair `_spawn_drain` lazy import after #95 renamed `_execute_task_background` → `_run_async_task_with_persistence`; AST-based regression tests pin the contract | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md) |
 | 2026-04-25 | #487 | Telegram file upload Phase 2 — workspace delivery hardening: NFKC sanitizer with collision dedup, spec injection format `[File uploaded by {uploader}]: {name} ({size}) saved to {path}`, all-writes-failed channel error + abort. Same code path benefits Slack inbound. | [telegram-integration.md](feature-flows/telegram-integration.md), [slack-file-sharing.md](feature-flows/slack-file-sharing.md) |
 | 2026-04-23 | #476 | SQLite lexicographic cutoff bug fix — new `iso_cutoff(hours)` helper replaces `datetime('now', ...)` in 15 sites across rate-limit / dashboard / schedules; `max_retries` default flipped `1 → 0`; `cleanup_old_rate_limit_events` wired into `CleanupService` (phase 6, hourly) | [subscription-auto-switch.md](feature-flows/subscription-auto-switch.md), [cleanup-service.md](feature-flows/cleanup-service.md), [scheduler-service.md](feature-flows/scheduler-service.md) |
 | 2026-04-22 | #458 | `.gitignore` init fix — `initialize_git_in_container` now appends missing patterns instead of truncate-and-write; adds `.env`, `.env.*`, `.mcp.json` to the default list and runs for both `/home/developer` and legacy `/home/developer/workspace` (stops credential leak on first GitHub sync) | [github-repo-initialization.md](feature-flows/github-repo-initialization.md) |
+| 2026-04-22 | SCHED-COND-001 (#454) | Conditional schedule pre-check — backend `docker exec`s the template's executable `~/.trinity/pre-check` (language-agnostic, interpreter from shebang) before scheduler fires a cron chat; empty stdout + exit 0 records a skipped execution; fail-open; reuses `ExecutionStatus.SKIPPED` (no schema change, no HTTP edge from scheduler to agent) | [scheduler-pre-check.md](feature-flows/scheduler-pre-check.md) |
 | 2026-04-21 | RELIABILITY-003 (#306) | WebSocket event bus on Redis Streams — replaces in-process broadcast with XADD/XREAD, adds reconnect replay via `?last-event-id=`, 3-failure eviction, MAXLEN trim (tunable) | [websocket-event-bus.md](feature-flows/websocket-event-bus.md) |
 | 2026-04-20 | #420 | Scheduler sync loop fix — `update_schedule_run_times` no longer bumps `updated_at`, stopping the self-triggering re-register of every schedule per tick | [scheduler-service.md](feature-flows/scheduler-service.md) |
 | 2026-04-20 | #418 | Inter-agent timeout honors per-agent `execution_timeout_seconds` — removed 600s hardcoded defaults in MCP `chat_with_agent`/`fan_out` tools and fan-out service; HTTP client ceiling bumped to platform max (7200s) | [fan-out.md](feature-flows/fan-out.md), [mcp-orchestration.md](feature-flows/mcp-orchestration.md), [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) |
@@ -58,6 +75,7 @@
 | 2026-03-25 | #148 | Fix silent subscription registration failure — encryption key auto-generation, status endpoint, frontend warning | [subscription-management.md](feature-flows/subscription-management.md) |
 | 2026-03-25 | #76 | Configurable MCP Server URL in Admin Settings | [platform-settings.md](feature-flows/platform-settings.md), [api-keys-page.md](feature-flows/api-keys-page.md) |
 | 2026-03-25 | #74 | Auto-assign subscription to new agents (round-robin, rate-limit aware) | [subscription-management.md](feature-flows/subscription-management.md) |
+| 2026-05-07 | #699 | Voice Workspace (BETA) — full-page workspace with orb + canvas panel; panel tools (show_markdown/update_panel/append_to_panel/clear_panel); `voice_available` feature flag | [voice-chat.md](feature-flows/voice-chat.md) |
 | 2026-03-23 | VOICE-001 | Voice Chat — real-time voice conversations with agents via Gemini Live API | [voice-chat.md](feature-flows/voice-chat.md) |
 | 2026-03-23 | SLACK-002 | Channel adapter abstraction + multi-agent Slack routing | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
 | 2026-03-21 | SUB-003 | Auto-switch subscriptions on repeated rate-limit errors — setting, tracking, orchestration | [subscription-auto-switch.md](feature-flows/subscription-auto-switch.md) |
@@ -143,6 +161,7 @@
 | Parallel Headless Execution | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) | Stateless parallel task execution via POST /task |
 | Parallel Capacity | [parallel-capacity.md](feature-flows/parallel-capacity.md) | Per-agent parallel execution slot tracking |
 | Persistent Task Backlog | [persistent-task-backlog.md](feature-flows/persistent-task-backlog.md) | SQLite-backed FIFO backlog for async tasks at capacity (BACKLOG-001) |
+| Capacity Management | [capacity-management.md](feature-flows/capacity-management.md) | Unified facade for per-agent execution capacity (#428) |
 | Task Execution Service | [task-execution-service.md](feature-flows/task-execution-service.md) | Unified execution lifecycle for all task callers (EXEC-024) |
 | Business Validation | [business-validation.md](feature-flows/business-validation.md) | Post-execution auditor verifies task completion (VALIDATE-001) |
 | Fan-Out | [fan-out.md](feature-flows/fan-out.md) | Parallel task dispatch and result collection via semaphore (FANOUT-001) |
@@ -162,6 +181,7 @@
 | Agent Logs & Telemetry | [agent-logs-telemetry.md](feature-flows/agent-logs-telemetry.md) | Live metrics in AgentHeader |
 | Agent Dashboard | [agent-dashboard.md](feature-flows/agent-dashboard.md) | Agent-defined dashboard via dashboard.yaml |
 | Dynamic Dashboards | [dynamic-dashboards.md](feature-flows/dynamic-dashboards.md) | Historical widget values with sparklines (DASH-001) |
+| Token Usage Display | [token-usage-display.md](feature-flows/token-usage-display.md) | Per-agent cost/token stats from DB in AgentHeader: sparkline, today vs 7-day avg trend (#250) |
 
 ### Agent Detail UI
 
@@ -171,7 +191,7 @@
 | Playbooks Tab | [playbooks-tab.md](feature-flows/playbooks-tab.md) | Invoke agent skills from UI (PLAYBOOK-001) |
 | Authenticated Chat Tab | [authenticated-chat-tab.md](feature-flows/authenticated-chat-tab.md) | Simple chat UI with dynamic status labels (CHAT-001, THINK-001) |
 | Playbook Autocomplete | [playbook-autocomplete.md](feature-flows/playbook-autocomplete.md) | Slash-command autocomplete for playbooks in chat input |
-| Voice Chat | [voice-chat.md](feature-flows/voice-chat.md) | Real-time voice conversations via Gemini Live API (VOICE-001) |
+| Voice Chat + Workspace | [voice-chat.md](feature-flows/voice-chat.md) | Voice conversations via Gemini Live API; Workspace mode with canvas panel tools (BETA) |
 | Execution Log Viewer | [execution-log-viewer.md](feature-flows/execution-log-viewer.md) | Modal for viewing execution transcripts |
 | Execution Detail Page | [execution-detail-page.md](feature-flows/execution-detail-page.md) | Dedicated page for execution details |
 | Continue Execution as Chat | [continue-execution-as-chat.md](feature-flows/continue-execution-as-chat.md) | Resume executions as interactive chat (EXEC-023) |
@@ -189,6 +209,7 @@
 | Agent Permissions | [agent-permissions.md](feature-flows/agent-permissions.md) | Agent communication permissions |
 | Agent Sharing | [agent-sharing.md](feature-flows/agent-sharing.md) | Cross-channel email allow-list (web/Slack/Telegram) with access policy and pending requests |
 | Agent Shared Folders | [agent-shared-folders.md](feature-flows/agent-shared-folders.md) | File collaboration via shared volumes |
+| Outbound File Sharing | [file-sharing-outbound.md](feature-flows/file-sharing-outbound.md) | Agents publish files to public download URLs (FILES-001) |
 | Agent Tags & System Views | [agent-tags.md](feature-flows/agent-tags.md) | Tagging and saved filters (ORG-001) |
 | Tag Clouds | [tag-clouds.md](feature-flows/tag-clouds.md) | Visual grouping on Dashboard |
 
@@ -206,7 +227,7 @@
 
 | Flow | Document | Description |
 |------|----------|-------------|
-| Public Agent Links | [public-agent-links.md](feature-flows/public-agent-links.md) | Shareable public links with optional email verification |
+| Public Agent Links | [public-agent-links.md](feature-flows/public-agent-links.md) | Shareable public links: chat (type='chat') and website proxy (type='site', SITE-001) |
 | Slack Integration | [slack-integration.md](feature-flows/slack-integration.md) | Slack as delivery channel for public links (SLACK-001) |
 | Slack Channel Routing | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) | Channel adapter abstraction + multi-agent Slack routing (SLACK-002) |
 | Slack File Sharing | [slack-file-sharing.md](feature-flows/slack-file-sharing.md) | Inbound file uploads: images via vision, text via container (SLACK-FILES) |
@@ -270,7 +291,7 @@
 | Autonomy Mode | [autonomy-mode.md](feature-flows/autonomy-mode.md) | Agent autonomous operation toggle |
 | AutonomyToggle Component | [autonomy-toggle-component.md](feature-flows/autonomy-toggle-component.md) | Reusable Vue toggle component |
 | Read-Only Mode | [read-only-mode.md](feature-flows/read-only-mode.md) | Code protection via hooks (CFG-007) |
-| Agent Resource Allocation | [agent-resource-allocation.md](feature-flows/agent-resource-allocation.md) | Per-agent memory/CPU limits |
+| Agent Resource Allocation | [agent-resource-allocation.md](feature-flows/agent-resource-allocation.md) | Per-agent memory/CPU limits + system-wide admin defaults (RES-001) |
 | Container Capabilities | [container-capabilities.md](feature-flows/container-capabilities.md) | Full capabilities mode |
 | Model Selection | [model-selection.md](feature-flows/model-selection.md) | LLM model selection for terminal, tasks, and schedules |
 | Agent Quotas | [agent-quotas.md](feature-flows/agent-quotas.md) | Per-role agent creation limits (QUOTA-001) |
@@ -302,11 +323,18 @@
 | Agents Page UI | [agents-page-ui-improvements.md](feature-flows/agents-page-ui-improvements.md) | Horizontal row tiles with success rate bars, filtering, responsive breakpoints |
 | Alerts Page | [alerts-page.md](feature-flows/alerts-page.md) | Removed in #430 (process engine deletion; cost alerts were PE-only) |
 
+### File Management
+
+| Flow | Document | Description |
+|------|----------|-------------|
+| Web Chat File Upload | [web-chat-file-upload.md](feature-flows/web-chat-file-upload.md) | Drag-drop/picker for authenticated and public chat; shared upload_service (#364) |
+
 ### Chat & Sessions
 
 | Flow | Document | Description |
 |------|----------|-------------|
 | Persistent Chat Tracking | [persistent-chat-tracking.md](feature-flows/persistent-chat-tracking.md) | Database-backed chat persistence |
+| Session Tab | [session-tab.md](feature-flows/session-tab.md) | `--resume`-default chat surface — each turn reattaches to the same Claude memory (SESSION_TAB_2026-04) |
 | Web Terminal | [web-terminal.md](feature-flows/web-terminal.md) | Browser-based terminal for System Agent |
 
 ### Testing & Development

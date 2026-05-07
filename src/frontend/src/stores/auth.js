@@ -37,6 +37,13 @@ export const useAuthStore = defineStore('auth', {
 
     userPicture() {
       return this.user?.picture || null
+    },
+
+    // ROLE-001: 4-tier hierarchy user < operator < creator < admin.
+    // Returns 'user' as the conservative fallback for callers that read
+    // role before the /api/users/me response has landed.
+    role() {
+      return this.user?.role || 'user'
     }
   },
 
@@ -99,6 +106,8 @@ export const useAuthStore = defineStore('auth', {
             this.isAuthenticated = true
             this.setupAxiosAuth()
             console.log('✅ Session restored for:', user.email || user.name)
+            // Refresh role/profile asynchronously — don't block init (#302).
+            this.fetchUserProfile()
           }
         } catch (e) {
           console.warn('Failed to parse stored user, clearing credentials')
@@ -132,12 +141,39 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
-    // Setup axios authorization header and cookie for nginx
+    // Setup axios Authorization header for API calls.
+    //
+    // Issue #188 (UnderDefense pentest 3.3.5): the token used to be
+    // mirrored into a `token` cookie here so an nginx `auth_request`
+    // could validate it. That nginx directive was never actually
+    // configured in any deployment (`grep -r auth_request *.conf` is
+    // empty), so the cookie was a pure attack-surface gift — readable
+    // via document.cookie (no HttpOnly flag — JS-set cookies cannot
+    // be HttpOnly), sent over HTTP without the Secure flag, and
+    // automatically attached to every request as a CSRF vector.
+    //
+    // Removed entirely. API auth uses the Authorization: Bearer header
+    // exclusively. The clear-on-logout below stays so users carrying a
+    // cookie from a pre-fix version get cleaned up on next logout (the
+    // cookie's max-age=1800 also expires it within 30 minutes).
     setupAxiosAuth() {
       if (this.token) {
         axios.defaults.headers.common['Authorization'] = `Bearer ${this.token}`
-        // Set token as cookie for nginx auth_request to validate agent UI access
-        document.cookie = `token=${this.token}; path=/; max-age=1800; SameSite=Strict`
+      }
+    },
+
+    // Fetch the current user's profile from the backend and merge role/email
+    // metadata into `this.user`. Called after admin login and after session
+    // restore so role-gated UI (#302) works without a page refresh.
+    // Failures are swallowed — the user can still use the app at their
+    // pre-fetch role (default 'user').
+    async fetchUserProfile() {
+      try {
+        const response = await axios.get('/api/users/me')
+        this.user = { ...this.user, ...response.data }
+        localStorage.setItem('auth0_user', JSON.stringify(this.user))
+      } catch (e) {
+        console.warn('Failed to fetch /api/users/me:', e?.message || e)
       }
     },
 
@@ -165,6 +201,9 @@ export const useAuthStore = defineStore('auth', {
         localStorage.setItem('token', this.token)
         localStorage.setItem('auth0_user', JSON.stringify(devUser))
         this.setupAxiosAuth()
+
+        // Pull the canonical role from the backend (#302).
+        await this.fetchUserProfile()
 
         console.log('🔐 Admin login: authenticated as', username)
         return true

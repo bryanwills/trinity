@@ -29,7 +29,7 @@ import httpx
 from database import db
 from models import ActivityState, ActivityType, TaskExecutionStatus
 from services.activity_service import activity_service
-from services.slot_service import get_slot_service
+from services.capacity_manager import CapacityFull, get_capacity_manager
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
 from services.platform_prompt_service import (
     ExecutionContext,
@@ -236,6 +236,7 @@ class TaskExecutionService:
         model: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
         resume_session_id: Optional[str] = None,
+        persist_session: bool = False,
         allowed_tools: Optional[list] = None,
         system_prompt: Optional[str] = None,
         execution_id: Optional[str] = None,
@@ -246,6 +247,7 @@ class TaskExecutionService:
         slot_already_held: bool = False,
         schedule_context: Optional[dict] = None,
         attempt: Optional[int] = None,
+        images: Optional[list] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -266,7 +268,7 @@ class TaskExecutionService:
             callers are responsible for translating ``result.status == "failed"``
             into the appropriate HTTP response.
         """
-        slot_service = get_slot_service()
+        capacity = get_capacity_manager()
         activity_id: Optional[str] = None
         # If caller already acquired the slot (async /task path preserves 429-upfront
         # contract by pre-flighting capacity), we still own releasing it in finally.
@@ -307,18 +309,29 @@ class TaskExecutionService:
         # stuck in 'running' status with NULL session_id and duration_ms.
         try:
             # ---- 2. Acquire capacity slot ------------------------------------
+            # CAPACITY-CONSOLIDATE (#428): policy=reject preserves prior
+            # behaviour — TaskExecutionService is invoked when the caller
+            # already decided this execution is admitted (router pre-acquires)
+            # OR is invoked from internal contexts where overflow isn't wanted
+            # (scheduler, fan-out). In both cases we want a hard rejection on
+            # capacity, not a backlog spill.
             if not slot_already_held:
                 max_parallel_tasks = db.get_max_parallel_tasks(agent_name)
-                slot_acquired = await slot_service.acquire_slot(
-                    agent_name=agent_name,
-                    execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
-                    max_parallel_tasks=max_parallel_tasks,
-                    message_preview=message[:100] if message else "",
-                    timeout_seconds=timeout_seconds,  # TIMEOUT-001: Pass for dynamic slot TTL
-                )
-
-                if not slot_acquired:
-                    error_msg = f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running)"
+                try:
+                    cap_result = await capacity.acquire(
+                        agent_name=agent_name,
+                        execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
+                        max_concurrent=max_parallel_tasks,
+                        message_preview=message[:100] if message else "",
+                        timeout_seconds=timeout_seconds,
+                        overflow_policy="reject",
+                    )
+                    slot_acquired = cap_result.state == "admitted"
+                except CapacityFull:
+                    error_msg = (
+                        f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} "
+                        f"parallel tasks running)"
+                    )
                     if execution_id:
                         db.update_execution_status(
                             execution_id=execution_id,
@@ -404,6 +417,8 @@ class TaskExecutionService:
                 "timeout_seconds": timeout_seconds,
                 "execution_id": execution_id,
                 "resume_session_id": resume_session_id,
+                "persist_session": persist_session,
+                "images": images or None,
             }
 
             effective_timeout = float(timeout_seconds or 600) + 10
@@ -440,9 +455,43 @@ class TaskExecutionService:
                     except Exception as e:
                         logger.error(f"[TaskExecService] Failed to serialize execution_log for {execution_id}: {e}")
 
-            context_used = metadata.get("input_tokens", 0)
+            # Context-window pressure metric. Anthropic's `usage` object
+            # has three non-overlapping input buckets: input_tokens (fresh
+            # uncached), cache_creation_tokens (newly cached this turn),
+            # cache_read_tokens (re-read from a prior turn's cache).
+            #
+            # We can't simply sum them. The agent-server in claude_code.py
+            # overrides metadata.input_tokens with `modelUsage.inputTokens`
+            # (an aggregated total across all internal API calls this turn)
+            # whenever the latter is larger — which is virtually always
+            # true on tool-call turns. So input_tokens is sometimes the
+            # disjoint fresh value and sometimes the aggregated total, and
+            # summing it with cache_* double-counts in the second case.
+            #
+            # Stable approach: rely on cache_read + cache_creation, which
+            # are NEVER touched by the override and monotonically track
+            # the size of the cached conversation prefix. This is exactly
+            # what "context-window fullness" means for a --resume session.
+            # Fall back to input_tokens only when caching isn't engaged
+            # (cold turns with caching disabled, or the very first turn
+            # before the cache breakpoint has fired).
+            cache_read = metadata.get("cache_read_tokens") or 0
+            cache_create = metadata.get("cache_creation_tokens") or 0
+            if cache_read + cache_create > 0:
+                context_used = cache_read + cache_create
+            else:
+                context_used = metadata.get("input_tokens") or 0
             sanitized_resp = sanitize_response(response_data.get("response"))
             claude_session_id = response_data.get("session_id") or metadata.get("session_id")
+
+            # Auto-compact events captured by the agent server's stream parser
+            # (Bundle B observability). Serialised once here, persisted on the
+            # execution row + threaded back to the Session router via raw_response
+            # so it can also land on agent_session_messages.
+            compact_events = metadata.get("compact_events") or []
+            compact_metadata_json = (
+                json.dumps(compact_events) if compact_events else None
+            )
 
             # ---- 6. Update execution record ------------------------------
             if execution_id:
@@ -456,6 +505,7 @@ class TaskExecutionService:
                     tool_calls=tool_calls_json,
                     execution_log=execution_log_json,
                     claude_session_id=claude_session_id,
+                    compact_metadata=compact_metadata_json,
                 )
 
             # ---- 7. Complete activity ------------------------------------
@@ -468,6 +518,8 @@ class TaskExecutionService:
                         "cost_usd": metadata.get("cost_usd"),
                         "execution_time_ms": execution_time_ms,
                         "tool_count": len(response_data.get("execution_log", [])),
+                        # #514: short preview surfaced on dashboard timeline hover
+                        "response_preview": (sanitized_resp or "")[:200],
                     },
                 )
 
@@ -527,14 +579,30 @@ class TaskExecutionService:
                         error_msg = e.response.text[:500]
             logger.error(f"[TaskExecService] Failed to execute task on {agent_name}: {error_msg}")
 
-            # SUB-003: Auto-switch subscription on rate-limit errors
+            # SUB-003 (#441): Auto-switch on rate-limit (429) OR auth-class
+            # failures (503 from agent server, or auth indicators in the error
+            # text). Fire-and-forget under broad exception handling so a switch
+            # error never masks the underlying execution failure.
             agent_status_code = getattr(getattr(e, "response", None), "status_code", None)
-            if agent_status_code == 429:
-                try:
-                    from services.subscription_auto_switch import handle_rate_limit_error
-                    await handle_rate_limit_error(agent_name=agent_name, error_message=error_msg)
-                except Exception as switch_err:
-                    logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
+            try:
+                from services.subscription_auto_switch import (
+                    handle_subscription_failure,
+                    is_auth_failure,
+                )
+                if agent_status_code == 429:
+                    await handle_subscription_failure(
+                        agent_name=agent_name,
+                        error_message=error_msg,
+                        failure_kind="rate_limit",
+                    )
+                elif agent_status_code == 503 or is_auth_failure(error_msg):
+                    await handle_subscription_failure(
+                        agent_name=agent_name,
+                        error_message=error_msg,
+                        failure_kind="auth",
+                    )
+            except Exception as switch_err:
+                logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
 
             # Issue #285: Detect auth failures (HTTP 503 from agent server)
             # Return structured error code so callers can handle appropriately
@@ -592,7 +660,7 @@ class TaskExecutionService:
         finally:
             # ---- 8. Release slot (only if acquired) ----------------------
             if slot_acquired:
-                await slot_service.release_slot(
+                await capacity.release(
                     agent_name,
                     execution_id or f"temp-{datetime.utcnow().timestamp()}",
                 )

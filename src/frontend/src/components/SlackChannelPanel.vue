@@ -23,24 +23,44 @@
     <div v-else-if="channel.bound" class="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
-          <span class="inline-block w-2.5 h-2.5 rounded-full bg-green-500"></span>
+          <span class="inline-block w-2.5 h-2.5 rounded-full bg-status-success-500"></span>
           <div>
             <p class="text-sm font-medium text-gray-900 dark:text-white">
               #{{ channel.channel_name }}
             </p>
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ channel.workspace_name }}
-              <span v-if="channel.is_dm_default" class="ml-1 text-indigo-600 dark:text-indigo-400">(DM default)</span>
             </p>
           </div>
         </div>
-        <button
-          @click="unbindChannel"
-          :disabled="unbinding"
-          class="text-sm text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 disabled:opacity-50"
-        >
-          {{ unbinding ? 'Removing...' : 'Unbind' }}
-        </button>
+        <div class="flex items-center gap-2">
+          <!-- DM default control: badge if already default, button otherwise -->
+          <span
+            v-if="channel.is_dm_default"
+            class="inline-flex items-center gap-1 text-xs font-medium text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-800 rounded px-2 py-1"
+            :title="dmDefaultTooltip"
+          >
+            <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+            DM default
+          </span>
+          <button
+            v-else
+            @click="makeDmDefault"
+            :disabled="makingDefault"
+            :title="dmDefaultTooltip"
+            class="text-xs px-2 py-1 border border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {{ makingDefault ? 'Setting...' : 'Make default' }}
+          </button>
+          <button
+            @click="unbindChannel"
+            :disabled="unbinding || unbindBlocked"
+            :title="unbindBlocked ? unbindBlockedTooltip : undefined"
+            class="text-sm text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-800 dark:hover:text-status-danger-300 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {{ unbinding ? 'Removing...' : 'Unbind' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -62,7 +82,7 @@
     <!-- Messages -->
     <div v-if="message" :class="[
       'mt-3 p-3 rounded-lg text-sm',
-      message.type === 'success' ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300' : 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+      message.type === 'success' ? 'bg-status-success-50 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
     ]">
       {{ message.text }}
     </div>
@@ -70,7 +90,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
 
 const props = defineProps({
@@ -83,9 +103,28 @@ const props = defineProps({
 const loading = ref(true)
 const creating = ref(false)
 const unbinding = ref(false)
+const makingDefault = ref(false)
 const accessDenied = ref(false)
 const channel = ref({ bound: false })
 const message = ref(null)
+
+const dmDefaultTooltip =
+  'Direct messages to the bot in this Slack workspace (no @mention, ' +
+  'no channel context) are routed to the DM-default agent. Only one ' +
+  'agent per workspace can be the DM default at a time.'
+
+// Unbind is blocked when this agent is the DM default AND other agents
+// are bound to the same workspace — otherwise DMs would have nowhere to
+// land. The owner has to promote a different agent first. (#584)
+const unbindBlocked = computed(
+  () =>
+    channel.value.bound &&
+    channel.value.is_dm_default &&
+    (channel.value.workspace_agent_count ?? 1) > 1
+)
+const unbindBlockedTooltip =
+  'This agent is the DM default for the workspace. Set a different ' +
+  'agent as DM default first, then you can unbind this one.'
 
 async function loadChannel() {
   loading.value = true
@@ -142,6 +181,30 @@ async function unbindChannel() {
     message.value = { type: 'error', text: detail }
   } finally {
     unbinding.value = false
+  }
+}
+
+async function makeDmDefault() {
+  makingDefault.value = true
+  message.value = null
+  try {
+    const response = await axios.put(
+      `/api/agents/${props.agentName}/slack/channel/dm-default`
+    )
+    const data = response.data
+    if (data.status === 'unchanged') {
+      message.value = { type: 'success', text: 'Already the DM default' }
+    } else {
+      const prev = data.previous ? ` (was ${data.previous})` : ''
+      message.value = { type: 'success', text: `Set as DM default${prev}` }
+    }
+    await loadChannel()
+    setTimeout(() => { message.value = null }, 3000)
+  } catch (e) {
+    const detail = e.response?.data?.detail || 'Failed to set DM default'
+    message.value = { type: 'error', text: detail }
+  } finally {
+    makingDefault.value = false
   }
 }
 

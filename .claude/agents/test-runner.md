@@ -172,6 +172,7 @@ The test suite covers:
 - **Local Deployment** (test_deploy_local.py) - Deploy local agents via MCP (Req 11.2)
 - **Public Links** (test_public_links.py) - Public agent sharing; email verification is driven by agent-level access policy (#311 follow-up, 2026-04-13) (Req 11.3)
 - **Public User Memory** (test_public_user_memory.py) - Per-user persistent memory for email-verified public sessions (MEM-001) [SMOKE]
+- **Site Proxy** (test_site_proxy.py) - Agent website proxy via /site/{token}/{path}; link_type field, URL format, token validation, 502 on no web server, redirect (SITE-001, #633)
 
 ### Operations & Observability
 - **Fleet Operations** (test_ops.py) - Fleet status/health, restart/stop, schedule list/pause/resume, emergency stop, alerts, costs [SLOW]
@@ -189,6 +190,8 @@ The test suite covers:
 - **File Upload** (unit/test_file_upload.py) - Telegram file extraction, download, message router validation, parse_message with files (#354 Phase 1); workspace delivery — filename sanitization (NFKC, traversal, length, collision dedup), chat injection format `[File uploaded by {uploader}]`, all-writes-failed signaling, partial failure handling (#487 Phase 2) [UNIT]
 - **Telegram Voice** (unit/test_telegram_voice.py) - Voice transcription validation (duration/size limits), formatting, placeholder constants (#318) [UNIT]
 - **Inter-Agent Timeout** (test_inter_agent_timeout_unit.py) - FanOutRequest Optional timeout, per-subtask None dispatch, conditional asyncio.timeout wrap (#418) [UNIT]
+- **Subprocess PGroup** (unit/test_subprocess_pgroup.py) - Process-group lifecycle: terminate, drain_reader_threads (natural-drain ordering #531, buffered-data preservation), safe_close_pipes, signal_process_tree (#407, #531) [UNIT]
+- **Empty Result Classification** (unit/test_empty_result_classification.py) - Clean exit with lost result line → 502, two-field null check, raw_messages num_turns fallback, populated-metadata pass-through (#520, #521, #531) [UNIT]
 
 ### Avatars & Image Generation
 - **Avatars** (test_avatars.py) - Avatar serving, generation, regeneration, deletion, emotions, identity prompts, default generation (AVATAR-001/002/003) [SMOKE + Agent]
@@ -202,6 +205,8 @@ The test suite covers:
 - **Web Terminal** (test_web_terminal.py) - WebSocket terminal sessions
 - **Execution Streaming** (test_execution_streaming.py) - SSE streaming for execution logs
 - **Trinity Connect** (test_trinity_connect.py) - [NOT YET IMPLEMENTED] /ws/events endpoint, MCP key auth, filtered event broadcasts (Req SYNC-001)
+- **Voice Tool Execution** (unit/test_voice_tools.py) - `_execute_tool`, `_execute_and_respond`, tool declarations, panel tools (show_markdown/update_panel/append_to_panel/clear_panel), 512KB content cap, routing guard, session cancellation [UNIT] (19 tests)
+- **Voice Auth & Panel Ownership** (unit/test_voice_auth.py) - WS ownership gate (no-token/invalid-token/unknown-session/wrong-user/owner/admin), voice_stop auth, GET /panel ownership (missing-session/owner/wrong-agent/wrong-user/admin) [UNIT] (18 tests)
 
 ### Direct Agent Tests
 - **Agent Server Direct** (agent_server/) - Direct agent server tests [SKIPPED unless TEST_AGENT_NAME set]
@@ -231,10 +236,10 @@ The test suite covers:
 
 ## Test Suite Statistics
 
-**Total Tests**: ~2,257 tests across 124 test files
+**Total Tests**: ~2,283 tests across 125 test files
 **Smoke Tests**: ~578 tests (fast, no agent creation)
-**Unit Tests**: ~165 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop, team-share gate, WhatsApp adapter (67))
-**Core Tests (not slow)**: ~2,112 tests
+**Unit Tests**: ~190 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, voice tools+auth (45: 26 tools + 19 auth), inter-agent timeout, scheduler sync loop, team-share gate, WhatsApp adapter (67), subprocess pgroup (11), empty result classification (13))
+**Core Tests (not slow)**: ~2,124 tests
 **Slow Tests**: ~99 tests (chat execution, fleet ops, system agent ops, execution termination, WhatsApp live-backend integration)
 **WebSocket Tests**: ~10 tests (web terminal, execution streaming)
 
@@ -262,6 +267,90 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 - **Healthy**: >90% pass rate, 0 critical failures
 - **Warning**: 75-90% pass rate, <5 failures
 - **Critical**: <75% pass rate or >5 failures
+
+## Recent Test Additions (2026-05-07)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_voice_tools.py` | Voice Redis cross-worker fix (#704) — `TestRedisSessionFallback`: in-memory hit skips Redis, cross-worker Redis fallback reconstructs session, Redis miss returns None, Redis error degrades gracefully, remove_session deletes Redis key, create_session writes metadata with correct TTL, create_session Redis failure raises + clears memory; `REDIS_URL` added to config stub | +7 tests (file total 26) |
+| `unit/test_voice_auth.py` | Voice audit attribution fix (#705) — `TestVoiceAuditAttribution`: source-inspect regression guard verifying `actor_user=SimpleNamespace(...)` and absence of legacy `actor_type=`/`actor_id=`/`actor_email=` kwargs; `_FakeVoiceService` updated to use `AsyncMock` for `get_session`, `remove_session`, `create_session` (now async) | +1 test (file total 19) |
+| `unit/test_voice_tools.py` | Voice workspace (#699) — `TestExecutePanelTool`: all 4 panel tool handlers (`show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`), 512 KB content cap on `append_to_panel`, routing guard (panel tools must not reach `_execute_tool`); config stub extended with `SECRET_KEY`, `ALGORITHM`, `VOICE_ENABLED` for cross-session stability | +7 tests (file total 19) |
+| `unit/test_voice_auth.py` | Voice workspace (#699) — `TestVoicePanelAuth`: missing session → 200 empty state (no 404 during teardown), owner access, wrong-agent 403, wrong-user 403, admin bypass; `_FakeVoiceSession` extended with `panel_state`; stub extended with `WORKSPACE_PANEL_INSTRUCTIONS` | +5 tests (file total 18) |
+
+**Voice Workspace Panel Tests (#699)** — panel tool execution and endpoint auth:
+
+Panel tools (`show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`) are executed in-process via `_execute_panel_tool()` without touching the agent container. Key behaviors tested:
+- Each handler sets `panel_state["type"]` and `"content"` correctly
+- `append_to_panel` accumulates content and caps at `_PANEL_CONTENT_MAX = 524_288` (512 KB), keeping the tail
+- The `_execute_and_respond` routing guard verifies panel tools never reach `_execute_tool` (the agent container call)
+- `GET /panel` returns empty state (200, not 404) for a non-existent `session_id` — avoids poll errors during the teardown window when the session has just been removed
+- Ownership checks: `session.agent_name != name` → 403; `session.user_id != current_user.id` → 403; admin role bypasses ownership
+
+Run via: `pytest tests/unit/test_voice_tools.py tests/unit/test_voice_auth.py -v` (must run in this order — auth file depends on config stub from tools file).
+
+**Known cross-session collision (pre-existing, not introduced by #699)**: the 3 tests `TestToolDeclaration::test_run_task_declared`, `test_prompt_required`, `TestExecuteAndRespond::test_timeout_sends_error_response` fail when both files run together. Root cause: `test_voice_auth.py` replaces `sys.modules["services.gemini_voice"]` with a minimal stub during collection, dropping `_RUN_TASK_TOOL` and `asyncio` from the already-imported module. The 34 remaining tests all pass. New panel tests (7 + 5) all pass regardless.
+
+---
+
+## Recent Test Additions (2026-05-05)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_subprocess_pgroup.py` | #657 — `drain_reader_threads` async refactor: updated all 5 `drain_reader_threads(...)` call sites to `asyncio.run(drain_reader_threads(...))` following the function being converted to `async def`. All 12 existing tests pass. No new tests required — the existing `TestDrainOrphanKillerTimeout.test_drain_bounded_when_orphan_killer_blocks` was already the regression test for the deadlock scenario; after the fix it completes in ~14s instead of 100s. | 0 new, 12 updated call sites |
+
+---
+
+## Recent Test Additions (2026-05-04)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_database_facade_delegation.py` | AST-based lint guard for the `DatabaseManager` facade (#647) — catches the WEBHOOK-001 regression class where methods exist on the underlying `*Operations` class but the pass-through delegation on `DatabaseManager` is missing, blowing up at runtime with `AttributeError`. Two tests: strict regression check for the four #647 methods (`generate_webhook_token`, `get_schedule_by_webhook_token`, `revoke_webhook_token`, `get_webhook_status`), and a broad scan of every `db.<method>(...)` call site in `routers/` and `services/` guarded by a `KNOWN_FACADE_GAPS` allowlist for 8 unrelated pre-existing gaps. Pure `ast` static analysis — no backend deps required, runs in any Python with pytest. | 2 tests |
+
+**Webhook facade-delegation fix (#647)** — `src/backend/database.py`:
+
+Root cause of all `POST/GET/DELETE /api/agents/{name}/schedules/{id}/webhook` and `POST /api/webhooks/{token}` returning 500 on a live stack since #291 (Nov 2025). WEBHOOK-001 added the four methods to `ScheduleOperations` but never added the matching pass-throughs on the `DatabaseManager` facade — and there's no `__getattr__` proxy. The integration test from PR #643 would have caught it but doesn't run in CI. New unit test runs in any Python (no live stack), would have caught the regression at PR-time.
+
+## Recent Test Additions (2026-05-03)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `test_site_proxy.py` | SITE-001 (#633) — agent website proxy: `test_create_chat_link_default_type`, `test_create_site_link` (URL uses `/site/`), `test_create_invalid_link_type_rejected`, `test_list_links_includes_type`, `test_invalid_token_returns_401`, `test_chat_token_rejected_at_site_endpoint`, `test_valid_site_token_502_when_agent_not_running`, `test_disabled_link_returns_401`, `test_root_path_without_trailing_slash_redirects` | 9 new tests |
+
+---
+
+## Recent Test Additions (2026-04-27)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_subprocess_pgroup.py` | Regression test for #531 — `test_buffered_data_preserved_after_grandchild_kill` verifies that data written to stdout before a grandchild is killed (including the final result JSON line) is not dropped when `drain_reader_threads` is called | +1 test (file total 11) |
+| `unit/test_empty_result_classification.py` | Four new tests for `_classify_empty_result` raw_messages fallback (#531): `test_raw_messages_fallback_derives_num_turns`, `test_raw_messages_fallback_not_used_when_num_turns_present`, `test_raw_messages_empty_falls_back_to_zero`, `test_raw_messages_none_falls_back_to_zero` | +4 tests (file total 13) |
+
+**Pipe drain ordering fix (#531)** — `drain_reader_threads` in `subprocess_pgroup.py`:
+
+Root cause of the "Execution completed without a result message" HTTP 502 on long agentic tasks. The old code called `safe_close_pipes()` immediately after `terminate_process_group()`, discarding the kernel pipe buffer (including the `{"type":"result"}` final JSON line) before the reader thread could drain it. Fixed: kill grandchildren first, then wait up to `post_kill_grace=30s` for natural drain; force-close only as a last resort for genuine wedges.
+
+The new `test_buffered_data_preserved_after_grandchild_kill` test spawns a subprocess that writes a sentinel `RESULT_LINE` then forks a grandchild that holds stdout open; verifies the sentinel survives the grandchild kill. The `_classify_empty_result` tests verify that `num_turns` is derived from `raw_messages` when the result line was lost (since `metadata.num_turns` is only populated by that line), while `tool_count` continues to come from metadata (accumulated per-message during parsing, so accurate even without the result line).
+
+---
+
+## Recent Test Additions (2026-04-25)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_github_init_gitignore.py` | Gitignore widen + migrate-on-push (#462) — full exclusion list coverage, idempotency, doc/constant sync, `git rm --cached` for newly-ignored files | 4 new tests (file total 6) |
+
+**Gitignore Widen + Migrate (#462)** (`unit/test_github_init_gitignore.py`):
+
+- `test_preserves_preexisting_gitignore` — existing `.gitignore` content is retained after init (pre-existing test)
+- `test_fresh_agent_ignores_env_and_mcp_json` — fresh agent gets `.env` and `.mcp.json` exclusions (pre-existing test)
+- `test_full_documented_exclusion_list_present` — all patterns in `_GITIGNORE_PATTERNS` constant are written to `.gitignore` (new)
+- `test_idempotent_double_run` — running `initialize_git_in_container` twice does not duplicate patterns (new)
+- `test_doc_and_constant_in_sync` — `_GITIGNORE_PATTERNS` constant matches the exclusion block in `TRINITY_COMPATIBLE_AGENT_GUIDE.md` (new)
+- `test_rm_cached_for_newly_ignored_files` — `sync_to_github` calls `git rm --cached` for files that are tracked but now match a `.gitignore` pattern (new)
+
+Pure unit tests over `git_service.py` stubs; no backend container required. Run via `pytest tests/unit/test_github_init_gitignore.py`.
+
+---
 
 ## Recent Test Additions (2026-04-23)
 

@@ -85,7 +85,11 @@ def _load_settings_module():
     class _SystemSettingUpdate(BaseModel):
         value: str = ""
 
-    _stub("models", User=_User)
+    class _AgentDefaultResourcesUpdate(BaseModel):
+        max_parallel_tasks: int | None = None
+        execution_timeout_seconds: int | None = None
+
+    _stub("models", User=_User, AgentDefaultResourcesUpdate=_AgentDefaultResourcesUpdate)
 
     db_stub = MagicMock()
     db_stub.set_setting = MagicMock(return_value=_SystemSetting(key="public_chat_url"))
@@ -116,6 +120,10 @@ def _load_settings_module():
         OPS_SETTINGS_DESCRIPTIONS={},
         AGENT_QUOTA_DEFAULTS={},
         AGENT_QUOTA_DESCRIPTIONS={},
+        AGENT_DEFAULT_CPU_KEY="agent_default_cpu",
+        AGENT_DEFAULT_MEMORY_KEY="agent_default_memory",
+        AGENT_DEFAULT_CPU="1.0",
+        AGENT_DEFAULT_MEMORY="1g",
     )
     _stub("services", __path__=[])
 

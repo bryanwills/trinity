@@ -83,7 +83,7 @@
               <button
                 @click="decideRequest(req, true)"
                 :disabled="decisionLoading === req.id"
-                class="px-3 py-1 text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
+                class="px-3 py-1 text-sm font-medium rounded-md text-white bg-status-success-600 hover:bg-status-success-700 disabled:opacity-50"
               >Approve</button>
               <button
                 @click="decideRequest(req, false)"
@@ -133,7 +133,7 @@
       <!-- Share Error/Success Message -->
       <div v-if="shareMessage" :class="[
         'mt-3 p-3 rounded-lg text-sm',
-        shareMessage.type === 'success' ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300' : 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+        shareMessage.type === 'success' ? 'bg-status-success-50 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
       ]">
         {{ shareMessage.text }}
       </div>
@@ -190,7 +190,7 @@
               <button
                 @click="removeShare(share.shared_with_email)"
                 :disabled="unshareLoading === share.shared_with_email"
-                class="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 text-sm font-medium disabled:opacity-50"
+                class="text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-800 dark:hover:text-status-danger-300 text-sm font-medium disabled:opacity-50"
               >
                 <span v-if="unshareLoading === share.shared_with_email">Removing...</span>
                 <span v-else>Remove</span>
@@ -222,6 +222,12 @@
     <!-- Divider -->
     <div class="border-t border-gray-200 dark:border-gray-700"></div>
 
+    <!-- File Sharing Section (FILES-001) -->
+    <FileSharingPanel :agent-name="agentName" />
+
+    <!-- Divider -->
+    <div class="border-t border-gray-200 dark:border-gray-700"></div>
+
     <!-- Public Links Section -->
     <PublicLinksPanel :agent-name="agentName" />
   </div>
@@ -238,6 +244,7 @@ import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
+import FileSharingPanel from './FileSharingPanel.vue'
 
 const props = defineProps({
   agentName: {

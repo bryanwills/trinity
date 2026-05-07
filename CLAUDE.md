@@ -117,7 +117,7 @@ Follow methodology guides in `.claude/skills/`:
 | `code-review` | Verify feedback technically before implementing |
 
 ### 7. Architectural Invariants
-Before adding endpoints, services, DB tables, or frontend views, review the Architectural Invariants section in @docs/memory/architecture.md. Violations of these patterns will break the system. Run `/validate-architecture` weekly to catch drift.
+Before adding endpoints, services, DB tables, or frontend views, review the Architectural Invariants section in @docs/memory/architecture.md. Violations of these patterns will break the system. Run `/validate-architecture` weekly to catch drift. For decisions about new capabilities or significant design choices, also consult `docs/planning/TARGET_ARCHITECTURE.md` — prefer changes that move toward the target, reject changes that move away from it.
 
 ---
 
@@ -126,7 +126,8 @@ Before adding endpoints, services, DB tables, or frontend views, review the Arch
 | File | Purpose |
 |------|---------|
 | `docs/memory/requirements.md` | **SINGLE SOURCE OF TRUTH** - All features |
-| @docs/memory/architecture.md | Current system design (~1000 lines max) |
+| @docs/memory/architecture.md | **Current system design** — describes what is built today (~1000 lines max) |
+| `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design** — describes the optimal destination; use when evaluating tradeoffs and prioritizing work |
 | `docs/memory/feature-flows.md` | Index of vertical slice docs |
 | `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md` | Active multi-sprint plan for execution/orchestration reliability. **Current focus: Tier 2.5 Simplification — #306 (push event bus) → #428/#429/#430.** Consult before touching `task_execution_service`, `slot_service`, `backlog_service`, `execution_queue`, or `cleanup_service`. |
 | GitHub Issues + Project Board | Prioritized task queue — **Trinity Roadmap** board (Todo/In Progress/Done), priority labels (P0-P3), Tier sub-priority (P1a/P1b/P1c) |
@@ -283,6 +284,7 @@ curl -X POST http://localhost:8000/api/agents \
 | Repository | Description |
 |------------|-------------|
 | [abilityai/trinity](https://github.com/abilityai/trinity) | This repository - Autonomous Agent Orchestration Platform |
+| [abilityai/trinity-ops-public](https://github.com/abilityai/trinity-ops-public) | **Claude Code ops agent** — manage any Trinity instance (health, updates, logs, rollback, provisioning) |
 | [abilityai/abilities](https://github.com/abilityai/abilities) | **Canonical agent development toolkit** — plugins for the full autonomous agent lifecycle (scaffolding, onboarding, deployment, scheduling, ops) |
 
 ### Abilities (agent development toolkit)
@@ -291,11 +293,11 @@ The **[abilities](https://github.com/abilityai/abilities)** repo is the canonica
 
 | Plugin | What it does |
 |--------|-------------|
-| **create-agent** | 12 wizards for agent scaffolding (prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, website, custom, clone, adjust) |
-| **agent-dev** | Add skills, memory systems, GitHub backlog workflow, autonomous work loops |
-| **trinity** | Deploy to Trinity platform: connect, onboard, sync |
-| **dev-methodology** | 14 skills for implementation, testing, security, and PR validation |
-| **utilities** | Ops: incident investigation, safe deployment, Docker ops, batch processing |
+| **create-agent** | 12 wizards for agent scaffolding (create, prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, website, custom, clone, adjust) |
+| **agent-dev** | 15 skills: add skills, memory systems, git-sync hooks, GitHub backlog workflow, grooming, sprints, autonomous work loops |
+| **trinity** | 5 skills: connect, onboard, deploy, sync, create-dashboard |
+| **dev-methodology** | 24 skills: implementation, testing, security (CSO audit), PR validation, release, architecture/schema/config validation, feature flows, user doc generation |
+| **utilities** | 7 skills: incident investigation, safe deployment, Docker ops, batch processing, conversation export, bug reports, ops knowledge sync |
 
 **Installation:**
 ```bash

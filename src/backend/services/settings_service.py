@@ -130,6 +130,33 @@ class SettingsService:
         return os.getenv('SLACK_APP_TOKEN', '')
 
     # =========================================================================
+    # Session tab feature flag (Phase 1.6 of SESSION_TAB_2026-04)
+    # =========================================================================
+
+    def is_session_tab_enabled(self) -> bool:
+        """
+        Whether the Session tab UI surface is exposed to users.
+
+        Resolves in this order:
+        1. system_settings row 'session_tab_enabled' ("true"/"false")
+        2. SESSION_TAB_ENABLED env var (only honored as "false"/"0"/"no" to opt out)
+        3. Default: True (GA — Phase 5.3, 2026-05-04)
+
+        Admins can opt out by setting ``session_tab_enabled=false`` in
+        system_settings or by exporting ``SESSION_TAB_ENABLED=false``.
+
+        The flag gates only the new UI surface and the new
+        ``/api/agents/{name}/session*`` endpoints. Chat is unaffected.
+        """
+        stored = self.get_setting('session_tab_enabled')
+        if stored is not None:
+            return str(stored).lower() in ("true", "1", "yes")
+        env_val = os.getenv('SESSION_TAB_ENABLED', '').strip().lower()
+        if env_val in ("false", "0", "no"):
+            return False
+        return True
+
+    # =========================================================================
     # GitHub Templates (TMPL-001)
     # =========================================================================
 
@@ -229,6 +256,11 @@ def get_slack_app_token() -> str:
     return settings_service.get_slack_app_token()
 
 
+def is_session_tab_enabled() -> bool:
+    """Session tab feature flag (Phase 1.6 of SESSION_TAB_2026-04)."""
+    return settings_service.is_session_tab_enabled()
+
+
 def get_ops_setting(key: str, as_type: type = str):
     """Get an ops setting with type conversion."""
     return settings_service.get_ops_setting(key, as_type)
@@ -317,6 +349,28 @@ def get_skills_library_branch() -> str:
     Default: "main"
     """
     return settings_service.get_setting('skills_library_branch', 'main')
+
+
+# ============================================================================
+# Agent Default Resources (RES-001)
+# ============================================================================
+
+AGENT_DEFAULT_CPU_KEY = "agent_default_cpu"
+AGENT_DEFAULT_MEMORY_KEY = "agent_default_memory"
+AGENT_DEFAULT_CPU = "2"
+AGENT_DEFAULT_MEMORY = "4g"
+
+
+def get_agent_default_resources() -> dict:
+    """
+    Get system-wide default CPU and memory for new agent containers.
+
+    Returns dict with 'cpu' (number of processors, string) and 'memory' (e.g. '4g').
+    These are used as fallback when no per-agent resource limits are configured.
+    """
+    cpu = db.get_setting_value(AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_CPU)
+    memory = db.get_setting_value(AGENT_DEFAULT_MEMORY_KEY, AGENT_DEFAULT_MEMORY)
+    return {"cpu": cpu or AGENT_DEFAULT_CPU, "memory": memory or AGENT_DEFAULT_MEMORY}
 
 
 # GitHub Templates (TMPL-001)
