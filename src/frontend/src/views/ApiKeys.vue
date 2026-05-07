@@ -313,6 +313,7 @@ import axios from 'axios'
 import NavBar from '../components/NavBar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { useAuthStore } from '../stores/auth'
+import { copyToClipboard } from '../utils/clipboard'
 
 const authStore = useAuthStore()
 
@@ -528,27 +529,27 @@ const deleteKey = (keyId) => {
 }
 
 const copyApiKey = async () => {
-  try {
-    await navigator.clipboard.writeText(createdApiKey.value)
-    copied.value = true
-    setTimeout(() => {
-      copied.value = false
-    }, 2000)
-  } catch (error) {
-    console.error('Failed to copy:', error)
+  const ok = await copyToClipboard(createdApiKey.value)
+  if (!ok) {
+    alert('Failed to copy API key. Please select the key text and copy it manually.')
+    return
   }
+  copied.value = true
+  setTimeout(() => {
+    copied.value = false
+  }, 2000)
 }
 
 const copyMcpConfig = async () => {
-  try {
-    await navigator.clipboard.writeText(getMcpConfig(createdApiKey.value))
-    copiedConfig.value = true
-    setTimeout(() => {
-      copiedConfig.value = false
-    }, 2000)
-  } catch (error) {
-    console.error('Failed to copy config:', error)
+  const ok = await copyToClipboard(getMcpConfig(createdApiKey.value))
+  if (!ok) {
+    alert('Failed to copy config. Please select the config text and copy it manually.')
+    return
   }
+  copiedConfig.value = true
+  setTimeout(() => {
+    copiedConfig.value = false
+  }, 2000)
 }
 
 const closeKeyModal = () => {
