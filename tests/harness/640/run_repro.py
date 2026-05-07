@@ -132,7 +132,15 @@ def main() -> int:
             continue
 
         result = r["result"]
-        cost = result.get("cost_usd")
+        meta = result.get("metadata") or {}
+        # /api/agents/{name}/chat puts cost / tool_count / error fields under
+        # `metadata`, not at the top level. The harness measures the symptom
+        # described in #678: an execution that completes with `cost_usd=None`
+        # despite running through multiple turns.
+        cost = meta.get("cost_usd")
+        tool_count = meta.get("tool_count")
+        num_turns = meta.get("num_turns")
+        error_type = meta.get("error_type")
         response_text = result.get("response")
         durations.append(r["elapsed"])
 
@@ -145,15 +153,23 @@ def main() -> int:
             null_response_count += 1
 
         marker = "FAIL" if (is_null_cost or is_null_response) else "ok"
-        print(f"[{i+1}/{args.turns}] {marker:>4} cost=${cost} response_len={len(response_text or '')} elapsed={r['elapsed']:.1f}s")
+        print(
+            f"[{i+1}/{args.turns}] {marker:>4} cost=${cost} tools={tool_count} "
+            f"turns={num_turns} response_len={len(response_text or '')} "
+            f"elapsed={r['elapsed']:.1f}s err={error_type}",
+            flush=True,
+        )
 
         if is_null_cost or is_null_response:
             failures.append({
                 "turn": i + 1,
                 "cost": cost,
+                "tool_count": tool_count,
+                "num_turns": num_turns,
                 "response_len": len(response_text or ""),
                 "elapsed": r["elapsed"],
-                "metadata": {k: result.get(k) for k in ("error", "execution_id", "status")},
+                "error_type": error_type,
+                "error_message": meta.get("error_message"),
             })
 
     # ---- Summary ----------------------------------------------------------
