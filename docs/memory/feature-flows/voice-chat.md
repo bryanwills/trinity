@@ -53,13 +53,13 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 │  │  bg-black               │  │  bg-gray-900 (canvas)         │   │
 │  │                         │  │                               │   │
 │  │  <canvas> orb (same     │  │  Panel content rendered via   │   │
-│  │   particle system as    │  │  show_markdown / update_panel │   │
-│  │   VoiceOverlay)         │  │  (DOMPurify-sanitized HTML or │   │
-│  │                         │  │   renderMarkdown())           │   │
-│  │  Status label           │  │                               │   │
-│  │  Tool name badge        │  │  Polled every 300ms via       │   │
-│  │  [Mute] [Start/End]     │  │  GET /voice/{sid}/panel       │   │
-│  │  Voice selector         │  │                               │   │
+│  │   particle system as    │  │  show_markdown → renderMarkdown│  │
+│  │   VoiceOverlay)         │  │  update_panel → DOMPurify +   │   │
+│  │                         │  │  _execScripts (Chart.js ok)   │   │
+│  │  Status label           │  │  Chart.js 4 pre-loaded        │   │
+│  │  Tool name badge        │  │                               │   │
+│  │  [Mute] [Start/End]     │  │  Polled 300ms; updated_at     │   │
+│  │  Voice selector         │  │  gate + in-flight guard       │   │
 │  └─────────────────────────┘  └───────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────────┘
          │
@@ -249,8 +249,11 @@ Uvicorn runs `--workers 2` in production. HTTP requests (REST `/voice/start`, `/
 | Panel tools | `show_markdown`, `update_panel`, `append_to_panel`, `clear_panel` — handled in-process via `_execute_panel_tool()`, never forwarded to agent container |
 | Panel state | `VoiceSession.panel_state` dict (in-memory); type ∈ {empty, markdown, html}; content capped at `_PANEL_CONTENT_MAX=524288` (512 KB) |
 | Panel endpoint | `GET /api/agents/{name}/voice/{session_id}/panel` — returns empty state for missing sessions (no 404 during teardown window); ownership-gated (user_id + agent_name check, admin bypass) |
-| Frontend poll | `setInterval(fetchPanel, 300)` — stops on session end via `watch(voice.isActive)` |
-| XSS protection | `show_markdown` → `renderMarkdown()` (DOMPurify-wrapped); `update_panel`/`append_to_panel` → `DOMPurify.sanitize()` |
+| Frontend poll | `setInterval(fetchPanel, 300)` — in-flight guard (`panelFetching` flag) prevents overlapping requests; skips state update when `updated_at` unchanged (prevents 3×/sec Vue re-renders and preserves content after session ends) |
+| Content preservation | Panel content preserved on session end (poll stops, state not reset); reset on new session **start** via `resetPanelState()` |
+| HTML rendering | `update_panel`/`append_to_panel` → `ref="htmlPanelEl"` + `renderHtmlPanel()`: `DOMPurify.sanitize(html, {ADD_TAGS:['script']})` then `_execScripts()` re-clones `<script>` nodes as live DOM elements so Chart.js `new Chart(...)` calls execute |
+| Chart.js | Chart.js 4.4.0 pre-loaded globally via `injectChartJs()` on mount (CDN `<script>` tag injected once into `document.head`, guarded by `#chartjs-cdn` id check) |
+| XSS protection | `show_markdown` → `renderMarkdown()` (DOMPurify-wrapped); `update_panel` HTML — DOMPurify strips event handlers and `javascript:` hrefs; `<script>` tags are re-executed (Chart.js init) — trade-off: accepted per issue #707 security review, same trust level as agent MCP calls |
 | BETA indicator | Amber "BETA" badge in header button and page header |
 
 ---
@@ -392,18 +395,19 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 - ⏳ Multi-language voice with auto-detection
 - ⏳ Voice cloning / custom voice per agent
 
-### Phase 4: Workspace Mode ✅ Complete (2026-05-07, issue #699, BETA)
+### Phase 4: Workspace Mode ✅ Complete (2026-05-07, issue #699/#707, BETA)
 
 - ✅ Separate full-page workspace at `/agents/:name/workspace`
 - ✅ Split layout: orb (left) + canvas panel (right)
 - ✅ 4 panel tools: `show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`
-- ✅ Panel content rendered safely (DOMPurify sanitization)
 - ✅ `voice_available` feature flag gates workspace button in AgentHeader
 - ✅ Panel ownership gate on REST endpoint
 - ✅ 512 KB content cap on accumulated `append_to_panel` content
-- ⏳ Persist panel state across session end
+- ✅ Panel flicker fixed: `updated_at` change-detection gate + in-flight fetch guard (#707)
+- ✅ Panel content preserved on session end; reset on new session start (#707)
+- ✅ Chart.js 4 pre-loaded; `update_panel` HTML with `<script>` tags executes correctly (#707)
 - ⏳ Export panel content as PDF/markdown
-- ⏳ Agent-controlled canvas with richer widgets (charts, code blocks)
+- ⏳ Multi-page / tabbed canvas
 
 ---
 

@@ -184,7 +184,7 @@
           <!-- HTML content -->
           <div
             v-else-if="panelState.type === 'html'"
-            v-html="sanitizedHtml"
+            ref="htmlPanelEl"
             class="text-gray-300 text-sm leading-relaxed"
           />
         </div>
@@ -195,7 +195,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
@@ -213,7 +213,9 @@ const voice = useVoiceSession(agentName)
 const agent = ref(null)
 const selectedVoice = ref('Kore')
 const panelState = ref({ type: 'empty', content: '', title: null, updated_at: null })
+const htmlPanelEl = ref(null)
 let panelPollTimer = null
+let panelFetching = false
 
 const VOICES = [
   { id: 'Kore',    label: 'Kore — Firm' },
@@ -230,10 +232,6 @@ const renderedContent = computed(() =>
   panelState.value.type === 'markdown' ? renderMarkdown(panelState.value.content || '') : ''
 )
 
-const sanitizedHtml = computed(() =>
-  panelState.value.type === 'html' ? DOMPurify.sanitize(panelState.value.content || '') : ''
-)
-
 const panelUpdatedAgo = computed(() => {
   if (!panelState.value.updated_at) return null
   const secs = Math.round((Date.now() - new Date(panelState.value.updated_at).getTime()) / 1000)
@@ -242,13 +240,47 @@ const panelUpdatedAgo = computed(() => {
   return `${Math.round(secs / 60)}m ago`
 })
 
+// ── HTML panel rendering ─────────────────────────────────────────────────────
+
+// Re-execute <script> tags after innerHTML assignment — v-html and innerHTML
+// both skip script execution. We clone each script node as a live element so
+// Chart.js initialisation code in update_panel HTML runs correctly.
+// Chart.js 4 is pre-loaded globally (see injectChartJs), so agents must NOT
+// add their own CDN <script src> tags.
+function _execScripts(container) {
+  Array.from(container.querySelectorAll('script')).forEach(old => {
+    const s = document.createElement('script')
+    Array.from(old.attributes).forEach(a => s.setAttribute(a.name, a.value))
+    s.textContent = old.textContent
+    old.replaceWith(s)
+  })
+}
+
+function renderHtmlPanel(html) {
+  const el = htmlPanelEl.value
+  if (!el) return
+  el.innerHTML = DOMPurify.sanitize(html, { ADD_TAGS: ['script'], ADD_ATTR: ['type'] })
+  _execScripts(el)
+}
+
+// Re-render HTML panel when panelState content changes
+watch(() => panelState.value, (state) => {
+  if (state.type === 'html') nextTick(() => renderHtmlPanel(state.content || ''))
+}, { deep: true })
+
 // ── Session lifecycle ────────────────────────────────────────────────────────
+
+function resetPanelState() {
+  panelState.value = { type: 'empty', content: '', title: null, updated_at: null }
+}
 
 async function toggleSession() {
   if (voice.isActive.value) {
     stopPanelPoll()
     await voice.stop()
+    // Content preserved in panelState — user can still read what the agent wrote
   } else {
+    resetPanelState()  // Clear previous session's content before starting new one
     await voice.start(null, selectedVoice.value, true) // workspace_mode = true
     startPanelPoll()
   }
@@ -270,19 +302,27 @@ function stopPanelPoll() {
 
 async function fetchPanel() {
   const sid = voice.voiceSessionId.value
-  if (!sid) return
+  if (!sid || panelFetching) return
+  panelFetching = true
   try {
     const r = await axios.get(
       `/api/agents/${agentName}/voice/${sid}/panel`,
       { headers: authStore.authHeader }
     )
-    panelState.value = r.data
+    // Only update state when content has actually changed — prevents 3x/sec
+    // Vue re-renders and avoids overwriting preserved content with empty state
+    // when the session ends and the backend returns the default empty response.
+    if (r.data.updated_at !== panelState.value.updated_at) {
+      panelState.value = r.data
+    }
   } catch (_) {
     // Ignore poll errors (session may have just ended)
+  } finally {
+    panelFetching = false
   }
 }
 
-// Stop poll when session ends naturally
+// Stop poll when session ends naturally (content is preserved in panelState)
 watch(() => voice.isActive.value, (active) => {
   if (!active) stopPanelPoll()
 })
@@ -516,7 +556,16 @@ function resizeCanvas() {
 
 watch(() => voice.status.value, (s) => { targetHueShift = STATE_HUE[s] ?? 0 })
 
+function injectChartJs() {
+  if (document.getElementById('chartjs-cdn')) return
+  const s = document.createElement('script')
+  s.id = 'chartjs-cdn'
+  s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'
+  document.head.appendChild(s)
+}
+
 onMounted(async () => {
+  injectChartJs()
   await fetchAgent()
   currentSprites = buildSprites(0)
   initParticles()

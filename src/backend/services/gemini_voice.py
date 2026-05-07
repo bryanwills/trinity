@@ -103,6 +103,10 @@ Guidelines:
 - Use `show_markdown` by default. Reach for `update_panel` only when structure genuinely adds value.
 - Don't mirror every voice response in the panel — use it when structured content helps.
 - Clear when the topic changes significantly.
+
+Chart.js rule (for `update_panel` HTML):
+- Chart.js 4 is PRE-LOADED globally in the workspace. NEVER add a CDN `<script src>` tag for it — doing so causes a race condition and produces a blank chart.
+- Use `new Chart(...)` directly. Always give the canvas a fixed height: `<canvas id="c" style="max-height:380px"></canvas>`.
 """
 
 # Single tool declaration for all voice sessions
