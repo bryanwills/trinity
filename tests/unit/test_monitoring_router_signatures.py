@@ -89,32 +89,30 @@ pytestmark = pytest.mark.unit
 # ── Importlib-load routers/monitoring.py without dragging in routers/__init__ ─
 
 def _load_monitoring_router():
-    """Load routers/monitoring.py directly.
+    """Load routers/monitoring.py directly with scoped dependency stubs.
 
     Going through `from routers import monitoring` would import 50+
     unrelated routers via routers/__init__.py.
 
-    Two sets of tests collected alphabetically before this file install
-    minimal stubs in sys.modules that persist across collection:
+    Several test files collected alphabetically before this one permanently
+    install minimal stubs in sys.modules at collection time:
 
-    * test_inter_agent_timeout_unit.py installs a fake `dependencies` stub
-      (via setdefault) that lacks require_admin / AuthorizedAgentByName.
-    * test_start_agent_skip_inject.py registers services.agent_service as a
-      bare package stub that lacks get_accessible_agents.
+    * test_inter_agent_timeout_unit.py: fake `dependencies` without require_admin.
+    * test_start_agent_skip_inject.py: bare services.agent_service without get_accessible_agents.
+    * test_inject_assigned_credentials.py: fastapi Mock, so @router.get() returns
+      a Mock instead of the original function.
 
-    We use patch.dict to install correct, typed stubs for the duration of
-    exec_module so FastAPI's route registration doesn't see MagicMock types
-    as Pydantic field types (which raises FastAPIError).
+    We use patch.dict to install correct stubs for the duration of exec_module
+    and recover real fastapi by briefly evicting the polluted entry.
 
     Type notes:
-    - AuthorizedAgentByName is Annotated[str, Depends(func)] → use `str`.
+    - AuthorizedAgentByName is Annotated[str, Depends(func)] → use `str` so
+      FastAPI treats it as a plain path parameter, not an unresolvable Pydantic type.
     - require_admin is a Depends callable → use a plain lambda.
     """
     _deps = types.ModuleType("dependencies")
     _deps.get_current_user = lambda: None
     _deps.require_admin = lambda: None
-    # Annotated[str, Depends(…)] → plain str so FastAPI treats it as a
-    # regular path parameter instead of an unresolvable Pydantic type.
     _deps.AuthorizedAgentByName = str
     _deps.OwnedAgentByName = str
     _deps.get_authorized_agent = lambda: None
@@ -130,6 +128,15 @@ def _load_monitoring_router():
     _mon_svc.stop_monitoring_service = MagicMock()
     _mon_svc.DEFAULT_CONFIG = {}
 
+    # test_inject_assigned_credentials.py permanently overwrites sys.modules['fastapi']
+    # with a Mock at collection time (sys.modules.update), causing @router.get() to
+    # return a Mock instead of the original function.  Evict the polluted entry briefly
+    # so `import fastapi` reloads from disk; then restore the Mock for other tests.
+    _saved_fastapi = sys.modules.pop("fastapi", None)
+    import fastapi as _real_fastapi  # noqa: PLC0415
+    if _saved_fastapi is not None:
+        sys.modules["fastapi"] = _saved_fastapi
+
     path = _BACKEND / "routers" / "monitoring.py"
     spec = importlib.util.spec_from_file_location("routers.monitoring", str(path))
     mod = importlib.util.module_from_spec(spec)
@@ -138,6 +145,7 @@ def _load_monitoring_router():
         "dependencies": _deps,
         "services.agent_service": _agent_svc,
         "services.monitoring_service": _mon_svc,
+        "fastapi": _real_fastapi,
     }):
         spec.loader.exec_module(mod)
     return mod
