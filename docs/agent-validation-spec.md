@@ -20,6 +20,9 @@
 | F-008 | INFO | STATIC | File Structure | `.claude/commands/` directory exists |
 | F-009 | INFO | STATIC | File Structure | At least one `.claude/skills/` or `.claude/commands/` file exists |
 | F-010 | SOFT | STATIC | File Structure | `dashboard.yaml` exists |
+| F-011 | INFO | STATIC | File Structure | `ARCHITECTURE.md` (or `docs/architecture.md`) exists |
+| F-012 | INFO | STATIC | File Structure | `docs/memory/requirements.md` (or `REQUIREMENTS.md`) exists |
+| F-013 | INFO | STATIC | File Structure | `CHANGELOG.md` exists |
 | S-001 | HARD | STATIC | Security | `.env` is excluded in `.gitignore` |
 | S-002 | HARD | STATIC | Security | `.mcp.json` is excluded in `.gitignore` |
 | S-003 | HARD | STATIC | Security | No hardcoded secrets in any committed file |
@@ -148,6 +151,18 @@ An agent with no skills or commands is unlikely to be useful autonomously.
 **F-010** — `dashboard.yaml` exists  
 Severity: SOFT | Type: STATIC  
 Without a dashboard, the Trinity Dashboard tab shows nothing. Not required, but strongly recommended.
+
+**F-011** — `ARCHITECTURE.md` (or `docs/architecture.md`) exists  
+Severity: INFO | Type: STATIC  
+Describes the agent's design, data flows, key components, and how it fits into a broader agentic system. Especially valuable for multi-agent or complex agents. CLAUDE.md can `@import` this file to keep the system prompt concise while giving Claude full architectural context.
+
+**F-012** — `docs/memory/requirements.md` (or `REQUIREMENTS.md`) exists  
+Severity: INFO | Type: STATIC  
+Captures the agent's goals, use cases, and acceptance criteria in a durable document. Helps future maintainers understand scope and prevents feature drift. Recommended location: `docs/memory/requirements.md` to mirror the Trinity development convention.
+
+**F-013** — `CHANGELOG.md` exists  
+Severity: INFO | Type: STATIC  
+Tracks changes between versions. Once an agent is published and iterated on, a changelog helps operators understand what changed and whether an upgrade is safe. Not required for initial versions but expected for any mature published template.
 
 ---
 
