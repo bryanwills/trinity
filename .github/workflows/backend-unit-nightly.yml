@@ -235,59 +235,72 @@ jobs:
             }
 
             for (const p of paths) {
-              const status = JSON.parse(fs.readFileSync(p, 'utf8'));
-              const pr = status.pr_number;
-              const diffPath = `diff-pr${pr}.md`;
+              try {
+                const status = JSON.parse(fs.readFileSync(p, 'utf8'));
+                const pr = status.pr_number;
+                const diffPath = `diff-pr${pr}.md`;
 
-              let body;
-              if (status.merge_conflict) {
-                body = `${marker}\n⚠️ **Nightly unit-suite check skipped — merge conflict against \`dev\`.**\n\nResolve by running \`git merge dev\` locally and pushing the result. The next nightly run will re-test once the conflict is gone.`;
-              } else if (status.regression) {
-                let diffMd = '_diff artifact missing_';
-                if (fs.existsSync(diffPath)) {
-                  diffMd = fs.readFileSync(diffPath, 'utf8');
+                let body;
+                if (status.merge_conflict) {
+                  body = `${marker}\n⚠️ **Nightly unit-suite check skipped — merge conflict against \`dev\`.**\n\nResolve by running \`git merge dev\` locally and pushing the result. The next nightly run will re-test once the conflict is gone.`;
+                } else if (status.regression) {
+                  let diffMd = '_diff artifact missing_';
+                  if (fs.existsSync(diffPath)) {
+                    diffMd = fs.readFileSync(diffPath, 'utf8');
+                  }
+                  body = `${marker}\n⚠️ **Nightly unit-suite found regressions when this PR is merged into \`dev\`.**\n\n<details>\n<summary>Regression details (head_sha: \`${status.head_sha}\`)</summary>\n\n${diffMd}\n\n</details>\n\n_Reproduce locally:_ \`git merge dev && tests/run-core.sh\``;
+                } else {
+                  body = `${marker}\n✅ **Nightly unit-suite clean** when this PR is merged into \`dev\` (head_sha: \`${status.head_sha}\`).`;
                 }
-                body = `${marker}\n⚠️ **Nightly unit-suite found regressions when this PR is merged into \`dev\`.**\n\n<details>\n<summary>Regression details (head_sha: \`${status.head_sha}\`)</summary>\n\n${diffMd}\n\n</details>\n\n_Reproduce locally:_ \`git merge dev && tests/run-core.sh\``;
-              } else {
-                body = `${marker}\n✅ **Nightly unit-suite clean** when this PR is merged into \`dev\` (head_sha: \`${status.head_sha}\`).`;
-              }
 
-              // Find existing sticky comment by marker (paginated).
-              const existing = await github.paginate(
-                github.rest.issues.listComments,
-                {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr,
-                  per_page: 100,
-                }
-              );
-              const sticky = existing.find(c => (c.body || '').includes(marker));
+                // Find existing sticky comment by marker (paginated).
+                // Bot-author filter is required — without it, a user comment
+                // that quotes the marker would match, and the subsequent
+                // updateComment call would 403 (bots can only edit their
+                // own comments) and we'd never create a fresh sticky.
+                const existing = await github.paginate(
+                  github.rest.issues.listComments,
+                  {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr,
+                    per_page: 100,
+                  }
+                );
+                const sticky = existing.find(c =>
+                  (c.body || '').includes(marker)
+                  && c.user
+                  && (c.user.type === 'Bot' || c.user.login === 'github-actions[bot]')
+                );
 
-              if (sticky) {
-                // Skip if body is unchanged — avoids no-op churn.
-                if (sticky.body === body) {
-                  core.info(`PR #${pr}: comment unchanged, skipping.`);
-                  continue;
+                if (sticky) {
+                  // Skip if body is unchanged — avoids no-op churn.
+                  if (sticky.body === body) {
+                    core.info(`PR #${pr}: comment unchanged, skipping.`);
+                    continue;
+                  }
+                  await github.rest.issues.updateComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: sticky.id,
+                    body,
+                  });
+                  core.info(`PR #${pr}: updated sticky comment ${sticky.id}.`);
+                } else if (status.regression || status.merge_conflict) {
+                  // Only create on bad news. Don't spam every PR with a
+                  // green sticky comment on its first night.
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr,
+                    body,
+                  });
+                  core.info(`PR #${pr}: created sticky comment.`);
+                } else {
+                  core.info(`PR #${pr}: clean and no prior comment — nothing to post.`);
                 }
-                await github.rest.issues.updateComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: sticky.id,
-                  body,
-                });
-                core.info(`PR #${pr}: updated sticky comment ${sticky.id}.`);
-              } else if (status.regression || status.merge_conflict) {
-                // Only create on bad news. Don't spam every PR with a
-                // green sticky comment on its first night.
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr,
-                  body,
-                });
-                core.info(`PR #${pr}: created sticky comment.`);
-              } else {
-                core.info(`PR #${pr}: clean and no prior comment — nothing to post.`);
+              } catch (err) {
+                // Per-PR failure must not take out the rest of the matrix.
+                core.warning(`Failed to process ${p}: ${err.message}`);
               }
             }
