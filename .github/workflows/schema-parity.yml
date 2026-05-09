@@ -41,10 +41,12 @@ jobs:
       - name: Run schema parity check
         env:
           # Migration _migrate_slack_bot_token_encryption (migrations.py:1898)
-          # imports services.credential_encryption which checks
-          # CREDENTIAL_ENCRYPTION_KEY. Use a dummy in CI — in-memory DB never
-          # persists encrypted bytes, so the key is unused at runtime.
-          CREDENTIAL_ENCRYPTION_KEY: "test-ci-only-not-real-key-not-used"
+          # imports services.credential_encryption. The key is only accessed
+          # if the migration encrypts a row — which never happens on an empty
+          # in-memory DB. Use a valid-hex placeholder (64 chars of zeros) so
+          # any future code path that DOES call encrypt() produces a real
+          # test failure instead of a "key format" crypto error.
+          CREDENTIAL_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
           # Backend config.py raises at import if REDIS_URL lacks credentials
           # (#589/#645). Set creds-bearing dummies; same pattern tests/unit/conftest.py uses.
           REDIS_URL: "redis://test:test@redis:6379"
