@@ -1,0 +1,53 @@
+name: Schema Parity Gate
+
+# Issue #713: fail PRs that add a migration to src/backend/db/migrations.py
+# without updating src/backend/db/schema.py to match. Runs the
+# tests/unit/test_schema_parity.py pytest suite, which builds two in-memory
+# SQLite snapshots (schema-only vs full init_database lifecycle) and diffs
+# tables/columns/indexes/triggers.
+
+on:
+  pull_request:
+    paths:
+      - 'src/backend/db/**'
+      - 'src/backend/utils/helpers.py'
+      - 'tests/unit/test_schema_parity.py'
+      - 'tests/requirements-test.txt'
+      - '.github/workflows/schema-parity.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'src/backend/db/**'
+      - 'src/backend/utils/helpers.py'
+      - 'tests/unit/test_schema_parity.py'
+      - 'tests/requirements-test.txt'
+      - '.github/workflows/schema-parity.yml'
+
+jobs:
+  schema-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'tests/requirements-test.txt'
+
+      - name: Install test deps
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Run schema parity check
+        env:
+          # Migration _migrate_slack_bot_token_encryption (migrations.py:1898)
+          # imports services.credential_encryption which checks
+          # CREDENTIAL_ENCRYPTION_KEY. Use a dummy in CI — in-memory DB never
+          # persists encrypted bytes, so the key is unused at runtime.
+          CREDENTIAL_ENCRYPTION_KEY: "test-ci-only-not-real-key-not-used"
+          # Backend config.py raises at import if REDIS_URL lacks credentials
+          # (#589/#645). Set creds-bearing dummies; same pattern tests/unit/conftest.py uses.
+          REDIS_URL: "redis://test:test@redis:6379"
+          REDIS_PASSWORD: "test"
+          REDIS_BACKEND_PASSWORD: "test"
+        run: pytest tests/unit/test_schema_parity.py -v --tb=short
