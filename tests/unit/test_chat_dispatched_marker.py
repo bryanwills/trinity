@@ -36,18 +36,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
-# ---------------------------------------------------------------------------
-# Bootstrap (mirrors tests/unit/test_backlog.py:46-63)
-# ---------------------------------------------------------------------------
-_THIS = Path(__file__).resolve()
-_BACKEND = _THIS.parent.parent.parent / "src" / "backend"
-_BACKEND_STR = str(_BACKEND)
-for _shadow in ("utils", "utils.api_client", "utils.assertions", "utils.cleanup"):
-    sys.modules.pop(_shadow, None)
-while _BACKEND_STR in sys.path:
-    sys.path.remove(_BACKEND_STR)
-sys.path.insert(0, _BACKEND_STR)
+# tests/unit/conftest.py adds src/backend to sys.path and pre-installs the
+# canonical `utils` package via _preload_backend_utils(), so no per-file
+# sys.path / sys.modules manipulation is needed here. (Issue #762 lint
+# forbids bare `sys.modules` mutations outside conftest.)
+_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 
 
 # ===========================================================================
@@ -104,15 +97,14 @@ def tmp_db(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
-    def _evict():
-        for mod in ("db.connection", "db.schedules", "database"):
-            sys.modules.pop(mod, None)
+    # Evict any cached backend DB modules so the schedule_ops fixture's
+    # `from db.schedules import ScheduleOperations` re-imports against the
+    # fresh TRINITY_DB_PATH set above. monkeypatch restores the prior
+    # entries at fixture teardown, isolating the next test.
+    for mod in ("db.connection", "db.schedules", "database"):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
 
-    _evict()
-    try:
-        yield db_path
-    finally:
-        _evict()
+    yield db_path
 
 
 @pytest.fixture
