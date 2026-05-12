@@ -31,6 +31,37 @@ import pytest
 import redis as _redis
 
 
+# Modules this test stubs into sys.modules at import time so that
+# monitoring_service.py can be loaded standalone (without going through
+# services/__init__). The snapshot/restore fixture below keeps any
+# per-test mutations from leaking between tests in this file.
+#
+# Recognised by tests/lint_sys_modules.py (Issue #762) as the canonical
+# escape hatch for module-level sys.modules bootstrapping.
+_STUBBED_MODULE_NAMES = [
+    "utils",
+    "utils.helpers",
+    "services.agent_client",
+    "database",
+    "services.docker_service",
+    "services.docker_utils",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot sys.modules state for stubbed names, restore after each test."""
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 # ── Backend setup (matches test_circuit_breaker.py pattern) ──────────────────
 
 _REPO = Path(__file__).resolve().parent.parent.parent
