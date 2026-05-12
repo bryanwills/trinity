@@ -63,6 +63,64 @@ _BACKEND = os.path.abspath(
 )
 
 
+# ─── sys.modules snapshot/restore (Issue #762) ───────────────────────────
+#
+# This file loads ``lifecycle.py`` and ``subscription_auto_switch.py`` in
+# isolation with their heavy deps stubbed via ``sys.modules`` at IMPORT
+# time — the lint's preferred ``monkeypatch.setitem`` is fixture-scoped
+# and cannot rewind a stub planted before any test runs. We adopt the
+# named snapshot/restore escape hatch documented in
+# ``tests/lint_sys_modules.py`` (precedent:
+# ``tests/unit/test_telegram_webhook_backfill.py``): the autouse fixture
+# snapshots these slots at test setup and restores them at teardown so
+# cross-file pollution is bounded to this module's loaders, not leaked
+# into unrelated tests sharing the pytest session.
+
+_STUBBED_MODULE_NAMES = [
+    # _preload_credential_encryption
+    "services",
+    "services.credential_encryption",
+    # _SYS_MOCKS (transient during _load_lifecycle, but defensive)
+    "database",
+    "docker",
+    "services.docker_service",
+    "services.docker_utils",
+    "services.settings_service",
+    "services.skill_service",
+    "fastapi",
+    # _load_lifecycle (private package + the public services.agent_service slot)
+    "agent_service_pkg_under_test_606",
+    "agent_service_pkg_under_test_606.helpers",
+    "agent_service_pkg_under_test_606.read_only",
+    "agent_service_pkg_under_test_606.file_sharing",
+    "services.agent_service",
+    "services.agent_service.helpers",
+    "services.agent_service.read_only",
+    "services.agent_service.file_sharing",
+    # _load_auto_switch
+    "services.subscription_auto_switch",
+    "db_models",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot sys.modules before each test and restore after.
+
+    Bounds the blast radius of this file's module-loader stubs so they
+    cannot leak into other test files in the same pytest session.
+    """
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 # ─── Module loaders ──────────────────────────────────────────────────────
 #
 # Mirrors the approach in ``test_inject_assigned_credentials.py``: load
