@@ -11,6 +11,24 @@ from .models import ChatMessage
 
 logger = logging.getLogger(__name__)
 
+# Cap for in-memory conversation_history. Without it the list grows unbounded
+# across days-long agent uptime — persistent chat history lives in the backend
+# DB; this in-memory copy is only used for the agent-server API (history,
+# session info). Override via AGENT_HISTORY_LIMIT env var. #333 hardening.
+_DEFAULT_HISTORY_LIMIT = 1000
+
+
+def _resolve_history_limit() -> int:
+    raw = os.getenv("AGENT_HISTORY_LIMIT")
+    if not raw:
+        return _DEFAULT_HISTORY_LIMIT
+    try:
+        value = int(raw)
+        return value if value > 0 else _DEFAULT_HISTORY_LIMIT
+    except ValueError:
+        logger.warning("AGENT_HISTORY_LIMIT=%r is not an int; using default", raw)
+        return _DEFAULT_HISTORY_LIMIT
+
 
 class AgentState:
     """
@@ -20,6 +38,7 @@ class AgentState:
 
     def __init__(self):
         self.conversation_history: List[ChatMessage] = []
+        self.history_limit: int = _resolve_history_limit()
         self.agent_name = os.getenv("AGENT_NAME", "unknown")
         self.agent_runtime = os.getenv("AGENT_RUNTIME", "claude-code")
         # Check if the configured runtime is available
@@ -102,6 +121,11 @@ class AgentState:
                 timestamp=datetime.now()
             )
         )
+        # FIFO trim once over the cap. Persistent history is in the backend DB;
+        # the in-memory list is only for /api/chat/history + session counts.
+        overflow = len(self.conversation_history) - self.history_limit
+        if overflow > 0:
+            del self.conversation_history[:overflow]
 
     def reset_session(self):
         """Reset conversation state and token tracking"""

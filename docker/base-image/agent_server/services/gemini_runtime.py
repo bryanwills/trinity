@@ -9,6 +9,7 @@ import uuid
 import asyncio
 import subprocess
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,13 @@ from .activity_tracking import start_tool_execution, complete_tool_execution
 from .runtime_adapter import AgentRuntime
 
 logger = logging.getLogger(__name__)
+
+# Single shared executor for subprocess reading. Mirrors the pattern in
+# claude_code.py:63 — one long-lived worker thread instead of a fresh
+# ThreadPoolExecutor per call. Per-call executors rely on CPython's weakref
+# callback to clean up the worker thread on GC, which is not deterministic
+# under load. #333 hardening.
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gemini-subproc")
 
 # Gemini pricing per 1K tokens (as of Dec 2024, from ai.google.dev/pricing)
 # Free tier has limits, but we calculate what it *would* cost
@@ -211,10 +219,8 @@ class GeminiRuntime(AgentRuntime):
                 return stderr, return_code
 
             # Run the blocking subprocess reading in a thread pool
-            from concurrent.futures import ThreadPoolExecutor
-            executor = ThreadPoolExecutor(max_workers=1)
             loop = asyncio.get_event_loop()
-            stderr_output, return_code = await loop.run_in_executor(executor, read_subprocess_output)
+            stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
 
             # Check for errors
             if return_code != 0:
@@ -608,10 +614,8 @@ class GeminiRuntime(AgentRuntime):
                 return stderr, return_code
 
             # Run the blocking subprocess reading in a thread pool
-            from concurrent.futures import ThreadPoolExecutor
-            executor = ThreadPoolExecutor(max_workers=1)
             loop = asyncio.get_event_loop()
-            stderr_output, return_code = await loop.run_in_executor(executor, read_subprocess_output)
+            stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
 
             # Check for errors
             if return_code != 0:
