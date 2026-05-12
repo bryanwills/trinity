@@ -83,7 +83,7 @@
                   <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 dark:bg-accent-purple-900/50 text-accent-purple-800 dark:text-accent-purple-300">
                     Agent
                   </span>
-                  <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 dark:bg-orange-900/50 text-orange-800 dark:text-orange-300">
+                  <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-urgent-100 dark:bg-status-urgent-900/50 text-status-urgent-800 dark:text-status-urgent-300">
                     System
                   </span>
                 </div>
@@ -232,7 +232,7 @@
                     {{ copiedConfig ? 'Copied!' : 'Copy Config' }}
                   </button>
                 </div>
-                <pre class="bg-gray-900 dark:bg-gray-950 rounded-lg p-4 text-xs overflow-x-auto text-green-400 font-mono border border-gray-700">{{ getMcpConfig(createdApiKey) }}</pre>
+                <pre class="bg-gray-900 dark:bg-gray-950 rounded-lg p-4 text-xs overflow-x-auto text-status-success-400 font-mono border border-gray-700">{{ getMcpConfig(createdApiKey) }}</pre>
               </div>
 
               <div>

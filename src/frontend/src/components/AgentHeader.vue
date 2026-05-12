@@ -162,7 +162,7 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
             </svg>
             Workspace
-            <span class="px-1 py-0.5 text-[10px] font-semibold rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 leading-none">BETA</span>
+            <span class="px-1 py-0.5 text-[10px] font-semibold rounded bg-state-autonomous-100 dark:bg-state-autonomous-900/40 text-state-autonomous-700 dark:text-state-autonomous-400 leading-none">BETA</span>
           </button>
           <!-- Running State Toggle -->
           <RunningStateToggle
