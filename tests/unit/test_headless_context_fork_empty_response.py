@@ -25,8 +25,6 @@ Module under test:
 """
 from __future__ import annotations
 
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -34,16 +32,10 @@ import pytest
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _AGENT_SERVER_DIR = _PROJECT_ROOT / "docker" / "base-image" / "agent_server"
 
-# tests/unit/conftest.py registers `agent_server` as a namespace package
-# pointing at docker/base-image/agent_server — but if a sibling test ran
-# first and shadowed it with tests/agent_server/, evict and re-register.
-if "agent_server" not in sys.modules or not any(
-    str(_AGENT_SERVER_DIR) in p
-    for p in getattr(sys.modules["agent_server"], "__path__", [])
-):
-    _stub = types.ModuleType("agent_server")
-    _stub.__path__ = [str(_AGENT_SERVER_DIR)]
-    sys.modules["agent_server"] = _stub
+# tests/unit/conftest.py:_preload_real_agent_server() already registers
+# docker/base-image/agent_server as a namespace package in sys.modules,
+# so plain `from agent_server.<sub> import <X>` works here without any
+# importlib gymnastics.
 
 from agent_server.models import ExecutionMetadata  # noqa: E402
 from agent_server.services.headless_executor import (  # noqa: E402
