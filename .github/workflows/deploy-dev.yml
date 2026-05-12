@@ -11,15 +11,19 @@ jobs:
 
     steps:
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v2
+        # SHA-pinned to mitigate supply-chain hijack of the v2 floating tag.
+        uses: tailscale/github-action@05c58255396c88c609919d571a8b117099c69020 # v2
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
       - name: Deploy
-        uses: appleboy/ssh-action@v1
+        # SHA-pinned to mitigate supply-chain hijack of the v1 floating tag.
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
         with:
-          host: 100.96.144.19
-          username: trinity
+          # Host + username come from repo secrets so this public workflow file
+          # doesn't disclose the Tailscale topology of the dev environment.
+          host: ${{ secrets.DEV_HOST }}
+          username: ${{ secrets.DEV_USER }}
           key: ${{ secrets.DEV_SSH_KEY }}
           command_timeout: 25m
           script: |
