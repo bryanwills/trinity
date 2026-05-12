@@ -17,32 +17,17 @@ soak. They lock in the leak-surface reductions and the observability hook.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+# tests/unit/conftest.py:_preload_real_agent_server() already registers
+# docker/base-image/agent_server as a namespace package in sys.modules,
+# so plain `from agent_server.<sub> import <X>` works here without any
+# importlib gymnastics in this file.
+
 _BASE_IMAGE = Path(__file__).resolve().parent.parent.parent / "docker" / "base-image"
-_BASE_IMAGE_STR = str(_BASE_IMAGE)
-if _BASE_IMAGE_STR not in sys.path:
-    sys.path.insert(0, _BASE_IMAGE_STR)
-
-# Evict any previously cached `agent_server` (shadow or real) so the
-# explicit file-based loader below wins regardless of sys.path order.
-for _mod in list(sys.modules):
-    if _mod == "agent_server" or _mod.startswith("agent_server."):
-        sys.modules.pop(_mod, None)
-
-_AS_INIT = _BASE_IMAGE / "agent_server" / "__init__.py"
-_as_spec = importlib.util.spec_from_file_location(
-    "agent_server", str(_AS_INIT),
-    submodule_search_locations=[str(_BASE_IMAGE / "agent_server")],
-)
-_as_mod = importlib.util.module_from_spec(_as_spec)
-sys.modules["agent_server"] = _as_mod
-_as_spec.loader.exec_module(_as_mod)
 
 
 # ---------------------------------------------------------------------------
