@@ -103,11 +103,11 @@ class TestRecoverOrphanedExecutions:
         with patch.dict('sys.modules', _SYS_MOCKS):
             result = _run(_recover_fn())
 
-        # Key-by-key — additional diagnostic keys (e.g. skipped_grace from
-        # #748, redis_slots_reclaimed from #749) may be added to the result
-        # dict over time; the contract here is the per-counter shape.
+        # Key-by-key — the result dict now includes skipped_grace (#748) and
+        # redis_slots_reclaimed (#749); assert the stable per-counter contract.
         assert result["recovered"] == 0
         assert result["still_running"] == 0
+        assert result["skipped_grace"] == 0
         assert result["errors"] == 0
 
     def test_container_down_marks_orphaned(self):
