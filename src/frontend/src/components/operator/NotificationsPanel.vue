@@ -523,7 +523,7 @@ function getTypeBadge(type) {
   const classes = {
     alert: 'bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300',
     info: 'bg-status-info-100 dark:bg-status-info-900/30 text-status-info-700 dark:text-status-info-300',
-    status: 'bg-accent-accent-purple-100 dark:bg-accent-accent-purple-900/30 text-accent-accent-purple-700 dark:text-accent-accent-purple-300',
+    status: 'bg-accent-purple-100 dark:bg-accent-purple-900/30 text-accent-purple-700 dark:text-accent-purple-300',
     completion: 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300',
     question: 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300',
   }

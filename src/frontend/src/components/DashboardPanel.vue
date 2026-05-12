@@ -510,7 +510,7 @@ const getStatusColors = (color) => {
     gray: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
     blue: 'bg-status-info-100 text-status-info-800 dark:bg-status-info-900/50 dark:text-status-info-300',
     orange: 'bg-status-urgent-100 text-status-urgent-800 dark:bg-status-urgent-900/50 dark:text-status-urgent-300',
-    purple: 'bg-accent-accent-purple-100 text-accent-accent-purple-800 dark:bg-accent-accent-purple-900/50 dark:text-accent-accent-purple-300'
+    purple: 'bg-accent-purple-100 text-accent-purple-800 dark:bg-accent-purple-900/50 dark:text-accent-purple-300'
   }
   return colorMap[color] || colorMap.gray
 }

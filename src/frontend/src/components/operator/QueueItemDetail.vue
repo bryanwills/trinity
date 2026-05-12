@@ -234,7 +234,7 @@ function optionSelectedClass(idx) {
 
 function typeBadge(type) {
   const badges = {
-    approval: 'bg-accent-accent-purple-100 text-accent-accent-purple-700 dark:bg-accent-accent-purple-900/30 dark:text-accent-accent-purple-400',
+    approval: 'bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/30 dark:text-accent-purple-400',
     question: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
     alert: 'bg-state-autonomous-100 text-state-autonomous-700 dark:bg-state-autonomous-900/30 dark:text-state-autonomous-400'
   }

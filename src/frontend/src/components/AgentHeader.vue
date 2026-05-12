@@ -97,7 +97,7 @@
             <!-- System agent badge -->
             <span
               v-if="agent.is_system"
-              class="px-2 py-0.5 text-xs font-semibold rounded-full bg-accent-accent-purple-100 text-accent-accent-purple-700 dark:bg-accent-accent-purple-900/50 dark:text-accent-accent-purple-300"
+              class="px-2 py-0.5 text-xs font-semibold rounded-full bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300"
               title="System Agent - Platform Orchestrator with full access"
             >
               SYSTEM

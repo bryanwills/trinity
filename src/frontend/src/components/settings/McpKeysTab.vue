@@ -80,7 +80,7 @@
                         :class="key.is_active ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-800 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-800 dark:text-status-danger-300'">
                     {{ key.is_active ? 'Active' : 'Revoked' }}
                   </span>
-                  <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-accent-purple-100 dark:bg-accent-accent-purple-900/50 text-accent-accent-purple-800 dark:text-accent-accent-purple-300">
+                  <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 dark:bg-accent-purple-900/50 text-accent-purple-800 dark:text-accent-purple-300">
                     Agent
                   </span>
                   <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-urgent-100 dark:bg-status-urgent-900/50 text-status-urgent-800 dark:text-status-urgent-300">
