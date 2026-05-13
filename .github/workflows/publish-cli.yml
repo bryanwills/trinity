@@ -84,7 +84,8 @@ jobs:
 
       - name: Publish to PyPI
         if: steps.check.outputs.skip != 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # SHA-pinned to mitigate supply-chain hijack of the release/v1 branch.
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: src/cli/dist/
 
