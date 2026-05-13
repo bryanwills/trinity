@@ -16,16 +16,30 @@ lifecycle.py.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
 import pytest
 
-_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
-_BACKEND_STR = str(_BACKEND)
-while _BACKEND_STR in sys.path:
-    sys.path.remove(_BACKEND_STR)
-sys.path.insert(0, _BACKEND_STR)
+
+# `services.agent_service.capabilities` is pure data, but going through
+# the `services.agent_service` package init triggers eager imports
+# (lifecycle → docker_utils → tenacity / docker) that would force this
+# test to depend on the full backend runtime. Load by file path so the
+# test stays stdlib-only.
+_CAPS_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "src" / "backend" / "services" / "agent_service" / "capabilities.py"
+)
+
+
+def _load_caps():
+    spec = importlib.util.spec_from_file_location("caps_under_test", _CAPS_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 REMOVED_BY_ISSUE_602 = {
@@ -39,25 +53,25 @@ REMOVED_BY_ISSUE_602 = {
 def test_restricted_set_minimal():
     """Restricted (default) set must stay tight — no debugger/raw-socket
     caps even at the baseline."""
-    from services.agent_service.lifecycle import RESTRICTED_CAPABILITIES
+    caps = _load_caps()
 
-    leaked = REMOVED_BY_ISSUE_602 & set(RESTRICTED_CAPABILITIES)
+    leaked = REMOVED_BY_ISSUE_602 & set(caps.RESTRICTED_CAPABILITIES)
     assert not leaked, (
         f"RESTRICTED_CAPABILITIES regained Issue #602 forbidden caps: {leaked}. "
-        "These are security primitives — see lifecycle.py comments before re-adding."
+        "These are security primitives — see capabilities.py comments before re-adding."
     )
 
 
 def test_full_set_excludes_issue_602_removals():
     """FULL_CAPABILITIES (apt-install mode) must not regain the caps
     Issue #602 / Phase 3c removed."""
-    from services.agent_service.lifecycle import FULL_CAPABILITIES
+    caps = _load_caps()
 
-    leaked = REMOVED_BY_ISSUE_602 & set(FULL_CAPABILITIES)
+    leaked = REMOVED_BY_ISSUE_602 & set(caps.FULL_CAPABILITIES)
     assert not leaked, (
         f"FULL_CAPABILITIES regained Issue #602 forbidden caps: {leaked}. "
         "Each entry in REMOVED_BY_ISSUE_602 is a documented security "
-        "primitive — see lifecycle.py FULL_CAPABILITIES comment block "
+        "primitive — see capabilities.py FULL_CAPABILITIES comment block "
         "before re-adding."
     )
 
@@ -65,12 +79,9 @@ def test_full_set_excludes_issue_602_removals():
 def test_full_set_remains_a_superset_of_restricted():
     """FULL must always include everything in RESTRICTED — tightening
     the FULL set should not accidentally drop a baseline cap."""
-    from services.agent_service.lifecycle import (
-        FULL_CAPABILITIES,
-        RESTRICTED_CAPABILITIES,
-    )
+    caps = _load_caps()
 
-    missing = set(RESTRICTED_CAPABILITIES) - set(FULL_CAPABILITIES)
+    missing = set(caps.RESTRICTED_CAPABILITIES) - set(caps.FULL_CAPABILITIES)
     assert not missing, (
         f"FULL_CAPABILITIES dropped baseline caps: {missing}. "
         "FULL must remain a superset of RESTRICTED."
@@ -80,13 +91,9 @@ def test_full_set_remains_a_superset_of_restricted():
 def test_prohibited_caps_never_appear_in_either_set():
     """SYS_ADMIN-class caps must never leak into RESTRICTED or FULL.
     PROHIBITED_CAPABILITIES is the documented blocklist."""
-    from services.agent_service.lifecycle import (
-        FULL_CAPABILITIES,
-        PROHIBITED_CAPABILITIES,
-        RESTRICTED_CAPABILITIES,
-    )
+    caps = _load_caps()
 
-    leaks_full = set(PROHIBITED_CAPABILITIES) & set(FULL_CAPABILITIES)
-    leaks_restricted = set(PROHIBITED_CAPABILITIES) & set(RESTRICTED_CAPABILITIES)
+    leaks_full = set(caps.PROHIBITED_CAPABILITIES) & set(caps.FULL_CAPABILITIES)
+    leaks_restricted = set(caps.PROHIBITED_CAPABILITIES) & set(caps.RESTRICTED_CAPABILITIES)
     assert not leaks_full, f"PROHIBITED caps in FULL set: {leaks_full}"
     assert not leaks_restricted, f"PROHIBITED caps in RESTRICTED set: {leaks_restricted}"

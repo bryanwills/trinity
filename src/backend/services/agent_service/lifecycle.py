@@ -85,58 +85,16 @@ async def wait_for_agent_ready(
 
 
 # =============================================================================
-# Container Security Capability Sets
+# Container Security Capability Sets — see capabilities.py for definitions
 # =============================================================================
-# These define the Linux capabilities granted to agent containers.
-# Security principle: Always drop ALL caps, then add back only what's needed.
-
-# Restricted mode capabilities - minimum for agent operation (default)
-RESTRICTED_CAPABILITIES = [
-    'NET_BIND_SERVICE',  # Bind to ports < 1024
-    'SETGID', 'SETUID',  # Change user/group (for su/sudo)
-    'CHOWN',             # Change file ownership
-    'SYS_CHROOT',        # Use chroot
-    'AUDIT_WRITE',       # Write to audit log
-]
-
-# Full capabilities mode - adds package installation support
-# Used when agents need apt-get, pip install, etc.
-#
-# Issue #602 / Phase 3c (cap tightening): four caps removed from this
-# set after AISEC-C2 review. The remaining set is the minimum that keeps
-# `sudo apt install` working inside an agent container.
-#
-# Dropped (no defensible agent use case — kept here for documentation):
-#   SYS_PTRACE  Lets a process read another process's memory. A malicious
-#               MCP server could read Claude Code's heap and exfil the
-#               OAuth token even if the token isn't in env. This is the
-#               direct AISEC-C2 escalation path; removing it closes it
-#               without waiting for Layer 3b (bubblewrap sandbox).
-#   MKNOD       Creates device nodes under /dev. Agents have no use case
-#               for /dev/* manipulation; primarily a container-escape
-#               primitive (e.g. creating a writable raw disk device).
-#   NET_RAW     Raw / ICMP sockets. Trinity's "ping another agent" UX is
-#               HTTP-level, not ICMP. Removing this prevents raw-packet
-#               crafting (TCP RST injection, ARP spoofing on the docker
-#               bridge, etc.).
-#   FSETID     Lets a process keep setuid/setgid bits on chmod after a
-#               non-owner write — used to plant a setuid binary the next
-#               privileged path can run. No agent workflow needs it.
-FULL_CAPABILITIES = RESTRICTED_CAPABILITIES + [
-    'DAC_OVERRIDE',      # Bypass file permission checks (needed for sudo apt)
-    'FOWNER',            # Bypass permission checks on file owner
-    'KILL',              # Send signals to processes
-]
-
-# These capabilities are NEVER granted - they pose significant security risks
-# Listed for documentation; we achieve this by always using cap_drop=['ALL']
-PROHIBITED_CAPABILITIES = [
-    'SYS_ADMIN',         # Mount filesystems, configure namespace - too powerful
-    'NET_ADMIN',         # Network administration - could escape container
-    'SYS_RAWIO',         # Raw I/O access - direct hardware access
-    'SYS_MODULE',        # Load kernel modules - kernel compromise
-    'SYS_BOOT',          # Reboot system
-]
+# Re-exported from .capabilities so that test code (and other callers
+# that only need the constants) can import them without dragging the
+# docker / fastapi / database transitive imports of this module.
+from .capabilities import (  # noqa: F401
+    RESTRICTED_CAPABILITIES,
+    FULL_CAPABILITIES,
+    PROHIBITED_CAPABILITIES,
+)
 
 
 async def inject_assigned_credentials(agent_name: str, max_retries: int = 3, retry_delay: float = 2.0) -> dict:
