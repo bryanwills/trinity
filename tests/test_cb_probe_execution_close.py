@@ -96,10 +96,14 @@ def _make_execution(status="running"):
 # complete one and evict the task_execution_service module so the test's
 # import statement loads the real class against our complete stub.
 @pytest.fixture(autouse=True)
-def _restore_complete_stubs():
-    """Re-assert our complete stubs against cross-file pollution."""
-    sys.modules["utils.credential_sanitizer"] = _sanitizer_mod
-    sys.modules.pop("services.task_execution_service", None)
+def _restore_complete_stubs(monkeypatch):
+    """Re-assert our complete stubs against cross-file pollution.
+
+    Uses monkeypatch so the lint at tests/lint_sys_modules.py (#762)
+    stays green and the mutations auto-revert on teardown.
+    """
+    monkeypatch.setitem(sys.modules, "utils.credential_sanitizer", _sanitizer_mod)
+    monkeypatch.delitem(sys.modules, "services.task_execution_service", raising=False)
     yield
 
 
