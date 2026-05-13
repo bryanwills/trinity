@@ -3,7 +3,9 @@ Agent info, template info, health, and metrics endpoints.
 """
 import os
 import json
+import asyncio
 import logging
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -14,6 +16,35 @@ from ..state import agent_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _diagnostics() -> Dict[str, Any]:
+    """Lightweight runtime gauges for spotting accumulator leaks. #333."""
+    try:
+        thread_count = threading.active_count()
+    except Exception:
+        thread_count = -1
+
+    try:
+        loop = asyncio.get_running_loop()
+        task_count = len(asyncio.all_tasks(loop))
+    except RuntimeError:
+        task_count = -1
+
+    running_executions = -1
+    try:
+        from ..services.process_registry import get_process_registry
+        running_executions = len(get_process_registry().list_running())
+    except Exception:
+        pass
+
+    return {
+        "thread_count": thread_count,
+        "asyncio_task_count": task_count,
+        "running_executions": running_executions,
+        "conversation_history_size": len(agent_state.conversation_history),
+        "conversation_history_limit": agent_state.history_limit,
+    }
 
 
 @router.get("/")
@@ -66,7 +97,12 @@ async def get_agent_info():
 
 @router.get("/health")
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint.
+
+    Includes lightweight runtime gauges (thread count, asyncio task count,
+    running executions, history size) so a curl against /health is enough to
+    spot accumulator leaks without strace or pprof. #333.
+    """
     return {
         "status": "healthy",
         "agent_name": agent_state.agent_name,
@@ -74,7 +110,8 @@ async def health_check():
         "runtime_available": agent_state.runtime_available,
         # Backward compatibility
         "claude_available": agent_state.claude_code_available,
-        "message_count": len(agent_state.conversation_history)
+        "message_count": len(agent_state.conversation_history),
+        "diagnostics": _diagnostics(),
     }
 
 

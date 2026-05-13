@@ -13,6 +13,7 @@ Refactored per #122 (split of the original 2137-LOC monolith).
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import threading
 import uuid
@@ -46,6 +47,7 @@ from .subprocess_lifecycle import (
     _safe_close_pipes,
     _terminate_process_group,
 )
+from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 
 __all__ = [
     "ClaudeCodeRuntime",
@@ -85,7 +87,7 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     def get_default_model(self) -> str:
         """Get default Claude model."""
-        return "sonnet"  # Claude Sonnet 4.5
+        return "claude-sonnet-4-6"
 
     def get_context_window(self, model: Optional[str] = None) -> int:
         """Get context window for Claude models."""
@@ -188,14 +190,11 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # 2. ANTHROPIC_API_KEY environment variable (API billing)
         # We don't require ANTHROPIC_API_KEY since users may be logged in with their subscription.
 
-        # Issue #138: Default to "sonnet" when no model is specified and none is set on state.
-        # Same fix as Issue #81 for execute_headless_task() — without --model, Claude Code
-        # uses the agent's ~/.claude/settings.json model, which may be incompatible with
-        # the assigned subscription (e.g., haiku on Claude Max), causing misleading
-        # "token expired" errors.
+        # Safety-net fallback: backend always resolves model before calling the agent
+        # (#831), so this branch should only fire for direct agent-server calls.
         if not model and not agent_state.current_model:
-            model = "sonnet"
-            logger.debug("[Chat] No model specified, defaulting to 'sonnet' for subscription compatibility")
+            model = "claude-sonnet-4-6"
+            logger.debug("[Chat] No model specified, defaulting to 'claude-sonnet-4-6'")
 
         # Update model if specified (persists for session)
         if model:
@@ -269,6 +268,10 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # it spawns) into their own process group so we can reap the whole
         # tree on exit — hook grandchildren can otherwise outlive claude
         # and wedge readline() forever via inherited pipe FDs.
+        # Issue #817: TRINITY_EXECUTION_ID env var is inherited by every
+        # descendant across fork/exec/setsid/double-fork. Cleanup uses it
+        # to identify and kill orphans that escape both the pgid sweep
+        # and the FD-based pipe-writer sweep.
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -277,6 +280,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
             text=True,
             bufsize=1,  # Line buffered
             start_new_session=True,
+            env={**os.environ, EXECUTION_TAG_NAME: execution_id},
         )
         # Issue #407: capture pgid now — after wait() reaps the parent,
         # the pid is gone and we lose the ability to signal the group.
@@ -368,13 +372,15 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     f"[Chat] Session {execution_id} timed out after {timeout_seconds}s "
                     f"— killing process group"
                 )
-                _terminate_process_group(process, graceful_timeout=5, pgid=process_pgid)
+                _terminate_process_group(process, graceful_timeout=5, pgid=process_pgid, execution_tag=execution_id)
                 _drain_bounded(process, stdout_thread, stderr_thread,
-                               grace=3, pgid=process_pgid)
+                               grace=3, pgid=process_pgid,
+                               execution_tag=execution_id)
                 raise
 
             _drain_bounded(process, stdout_thread, stderr_thread,
-                           grace=5, pgid=process_pgid)
+                           grace=5, pgid=process_pgid,
+                           execution_tag=execution_id)
 
             stderr = ''.join(stderr_lines)
             stderr = sanitize_text(stderr) if stderr else stderr
@@ -400,7 +406,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                 # off-load to the executor so the event loop stays responsive while we tear down.
                 await loop.run_in_executor(
                     None,
-                    lambda: _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid),
+                    lambda: _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid, execution_tag=execution_id),
                 )
                 await loop.run_in_executor(None, _safe_close_pipes, process)
                 raise HTTPException(

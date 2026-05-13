@@ -10,6 +10,7 @@
 1 tests/test_event_bus.py
 6 tests/test_github_pat_propagation_unit.py
 9 tests/test_inter_agent_timeout_unit.py
+6 tests/test_platform_default_model.py
 4 tests/test_platform_prompt_unit.py
 1 tests/test_proactive_audit_unit.py
 2 tests/test_self_execute.py
@@ -26,6 +27,7 @@
 4 tests/unit/test_channel_image_vision.py
 2 tests/unit/test_chat_sync_backlog.py
 1 tests/unit/test_claude_code_session_id_parser.py
+3 tests/unit/test_cleanup_unreachable_orphan.py
 1 tests/unit/test_config_fail_fast.py
 1 tests/unit/test_credential_sanitizer_backend.py
 1 tests/unit/test_docker_utils.py

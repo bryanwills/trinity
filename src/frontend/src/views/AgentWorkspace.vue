@@ -22,14 +22,14 @@
         :class="[
           'px-2 py-0.5 text-[11px] font-medium rounded-full flex-shrink-0',
           agent.status === 'running'
-            ? 'bg-green-900/50 text-green-400'
+            ? 'bg-status-success-900/50 text-status-success-400'
             : 'bg-gray-700 text-gray-400'
         ]"
       >{{ agent.status }}</span>
 
       <span class="flex-1" />
 
-      <span class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-amber-900/40 text-amber-400 border border-amber-700/50 tracking-wide flex-shrink-0">
+      <span class="px-1.5 py-0.5 text-[10px] font-bold rounded bg-state-autonomous-900/40 text-state-autonomous-400 border border-state-autonomous-700/50 tracking-wide flex-shrink-0">
         BETA
       </span>
     </header>
@@ -86,7 +86,7 @@
             <select
               v-model="selectedVoice"
               :disabled="voice.isActive.value"
-              class="flex-1 text-xs bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300 focus:outline-none focus:border-indigo-500 disabled:opacity-40"
+              class="flex-1 text-xs bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300 focus:outline-none focus:border-action-primary-500 disabled:opacity-40"
             >
               <option v-for="v in VOICES" :key="v.id" :value="v.id">{{ v.label }}</option>
             </select>
@@ -169,23 +169,28 @@
               prose-headings:text-gray-100 prose-headings:font-semibold
               prose-p:text-gray-300 prose-p:leading-relaxed
               prose-strong:text-gray-100
-              prose-code:text-amber-300 prose-code:bg-gray-800 prose-code:px-1 prose-code:rounded prose-code:text-xs
+              prose-code:text-state-autonomous-300 prose-code:bg-gray-800 prose-code:px-1 prose-code:rounded prose-code:text-xs
               prose-pre:bg-gray-800 prose-pre:border prose-pre:border-gray-700
               prose-ul:text-gray-300 prose-ol:text-gray-300
               prose-li:marker:text-gray-500
-              prose-blockquote:border-indigo-500 prose-blockquote:text-gray-400
-              prose-a:text-indigo-400 hover:prose-a:text-indigo-300
+              prose-blockquote:border-action-primary-500 prose-blockquote:text-gray-400
+              prose-a:text-action-primary-400 hover:prose-a:text-action-primary-300
               prose-hr:border-gray-700
               prose-table:text-sm
               prose-th:text-gray-200 prose-th:bg-gray-800
               prose-td:text-gray-300 prose-td:border-gray-700"
           />
 
-          <!-- HTML content -->
-          <div
+          <!-- HTML content — sandboxed iframe so agent-supplied scripts run in
+               an opaque origin and cannot reach parent localStorage / cookies /
+               JWT. Deliberately omits allow-same-origin / allow-forms /
+               allow-popups / allow-top-navigation / allow-modals. -->
+          <iframe
             v-else-if="panelState.type === 'html'"
             ref="htmlPanelEl"
-            class="text-gray-300 text-sm leading-relaxed"
+            sandbox="allow-scripts"
+            class="w-full h-full bg-transparent border-0 block"
+            title="Agent panel"
           />
         </div>
       </div>
@@ -201,9 +206,13 @@ import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useVoiceSession } from '../composables/useVoiceSession'
 import { renderMarkdown } from '../utils/markdown'
-import DOMPurify from 'dompurify'
 import AgentAvatar from '../components/AgentAvatar.vue'
-import Chart from 'chart.js/auto'
+// Chart.js is loaded inside the sandboxed iframe (see renderHtmlPanel). The
+// relative path is intentional: chart.js 4 doesn't expose the UMD bundle via
+// its package `exports` field, so a bare specifier like `chart.js/dist/...`
+// fails to resolve. The relative path bypasses module resolution and Vite's
+// `?url` import emits the file as a hashed same-origin asset.
+import chartJsUrl from '../../node_modules/chart.js/dist/chart.umd.js?url'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -243,25 +252,33 @@ const panelUpdatedAgo = computed(() => {
 
 // ── HTML panel rendering ─────────────────────────────────────────────────────
 
-// Re-execute <script> tags after innerHTML assignment — v-html and innerHTML
-// both skip script execution. We clone each script node as a live element so
-// Chart.js initialisation code in update_panel HTML runs correctly.
-// Chart.js 4 is pre-loaded globally (see injectChartJs), so agents must NOT
-// add their own CDN <script src> tags.
-function _execScripts(container) {
-  Array.from(container.querySelectorAll('script')).forEach(old => {
-    const s = document.createElement('script')
-    Array.from(old.attributes).forEach(a => s.setAttribute(a.name, a.value))
-    s.textContent = old.textContent
-    old.replaceWith(s)
-  })
-}
-
+// Render the agent's HTML inside a sandboxed iframe. The iframe gets an opaque
+// origin (sandbox="allow-scripts" without allow-same-origin), so agent-supplied
+// JS cannot read parent localStorage / cookies / JWT, submit forms, navigate
+// the parent, or open popups. Chart.js is loaded inside the iframe via a
+// same-origin asset URL so new Chart(...) calls in agent HTML still work.
+//
+// Tag delimiters are built via string concat (s_open / s_close) so the SFC
+// parser doesn't see them as nested block tags.
+const s_open = '<' + 's' + 'cript'
+const s_close = '<' + '/' + 's' + 'cript' + '>'
 function renderHtmlPanel(html) {
   const el = htmlPanelEl.value
   if (!el) return
-  el.innerHTML = DOMPurify.sanitize(html, { ADD_TAGS: ['script'], ADD_ATTR: ['type'] })
-  _execScripts(el)
+  const chartUrl = new URL(chartJsUrl, window.location.origin).href
+  el.srcdoc = [
+    '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
+    'body{margin:0;padding:8px;color:#d1d5db;background:transparent;',
+    'font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}',
+    'canvas{max-width:100%}',
+    'table{border-collapse:collapse}th,td{padding:4px 8px}',
+    'a{color:#818cf8}',
+    '</style>',
+    s_open, ' src="', chartUrl, '">', s_close,
+    '</head><body>',
+    html ?? '',
+    '</body></html>',
+  ].join('')
 }
 
 // Re-render HTML panel when panelState content changes
@@ -558,8 +575,6 @@ function resizeCanvas() {
 watch(() => voice.status.value, (s) => { targetHueShift = STATE_HUE[s] ?? 0 })
 
 onMounted(async () => {
-  // Expose Chart globally so agent update_panel HTML snippets can call new Chart(...)
-  if (!window.Chart) window.Chart = Chart
   await fetchAgent()
   currentSprites = buildSprites(0)
   initParticles()

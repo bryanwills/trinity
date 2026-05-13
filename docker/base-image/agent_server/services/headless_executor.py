@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import threading
 import uuid
@@ -48,6 +49,7 @@ from .subprocess_lifecycle import (
     _safe_close_pipes,
     _terminate_process_group,
 )
+from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +117,10 @@ class HeadlessRunContext:
         improvement over the original closure-captured ``process`` variable.
         """
         if self.process is not None:
-            _terminate_process_group(self.process, graceful_timeout=2, pgid=self.process_pgid)
+            _terminate_process_group(
+                self.process, graceful_timeout=2,
+                pgid=self.process_pgid, execution_tag=self.task_session_id,
+            )
             _safe_close_pipes(self.process)
 
 
@@ -139,10 +144,11 @@ def _setup_headless_command(
     --input-format / --append-system-prompt / --max-turns), and unique
     task-session-id generation. Pure — no subprocess spawn, no DI.
     """
-    # Issue #81: Default to "sonnet" when model is not specified.
+    # Safety-net fallback: backend always resolves model before calling the agent
+    # (#831), so this branch should only fire for direct agent-server calls.
     if model is None:
-        model = "sonnet"
-        logger.debug("[Headless Task] No model specified, defaulting to 'sonnet' for subscription compatibility")
+        model = "claude-sonnet-4-6"
+        logger.debug("[Headless Task] No model specified, defaulting to 'claude-sonnet-4-6'")
 
     # Build command - NO --continue flag (stateless) unless resuming
     cmd = ["claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
@@ -251,6 +257,10 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     # spawns) into their own process group so we can reap the whole tree
     # on exit/timeout. Without this, hook grandchildren can outlive
     # claude, keep pipe FDs open, and wedge readline() forever.
+    # Issue #817: TRINITY_EXECUTION_ID env var is inherited by every
+    # descendant across fork/exec/setsid/double-fork. Cleanup uses it
+    # to identify and kill orphans that escape both the pgid sweep
+    # and the FD-based pipe-writer sweep.
     process = subprocess.Popen(
         ctx.cmd,
         stdin=subprocess.PIPE,
@@ -259,6 +269,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
         text=True,
         bufsize=1,  # Line buffered
         start_new_session=True,
+        env={**os.environ, EXECUTION_TAG_NAME: ctx.task_session_id},
     )
     ctx.process = process
     # Issue #407: capture pgid now — after wait() reaps the parent,
@@ -292,7 +303,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
                     # Kill the whole process group so stdout's readline()
                     # gets EOF and we unwind cleanly (Issue #407).
                     try:
-                        _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid)
+                        _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
                     except Exception as kill_err:
                         logger.error(
                             f"[Headless Task] Failed to kill process on auth abort: {kill_err}"
@@ -369,7 +380,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
                                     f"Killing process tree to prevent silent timeout. "
                                     f"Task: {ctx.task_session_id}"
                                 )
-                                _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid)
+                                _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
                                 raise RuntimeError(
                                     f"Permission bypass failed: permissionMode={perm_mode}. "
                                     f"This may be caused by a stale Claude Code session process "
@@ -405,7 +416,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
             ctx.stdout_exc.append(e)
             # Wake the main thread's process.wait() by killing the group
             try:
-                _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid)
+                _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
             except Exception:
                 pass
 
@@ -448,16 +459,18 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
             f"[Headless Task] Task {ctx.task_session_id} timed out after {ctx.effective_timeout}s "
             f"— killing process group"
         )
-        _terminate_process_group(process, graceful_timeout=5, pgid=ctx.process_pgid)
+        _terminate_process_group(process, graceful_timeout=5, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
         _drain_bounded(process, stdout_thread, stderr_thread,
-                       grace=3, pgid=ctx.process_pgid)
+                       grace=3, pgid=ctx.process_pgid,
+                       execution_tag=ctx.task_session_id)
         raise
 
     # Subprocess exited. Drain readers — if a hook grandchild still
     # holds a pipe, the helper will close the pipe FDs so the
     # reader threads can exit.
     _drain_bounded(process, stdout_thread, stderr_thread,
-                   grace=5, pgid=ctx.process_pgid)
+                   grace=5, pgid=ctx.process_pgid,
+                   execution_tag=ctx.task_session_id)
 
     # Re-raise permission-mode failure captured by stdout thread
     if ctx.stdout_exc:
@@ -644,10 +657,39 @@ def _finalize_headless_result(
     response_text = sanitize_text(response_text)
 
     if not response_text:
-        raise HTTPException(
-            status_code=500,
-            detail="Task returned empty response"
-        )
+        # #160: `context: fork` skills do their work in a sub-context whose
+        # output never reaches the parent stream. The parent claude exits
+        # cleanly with a populated result line (cost_usd / duration_ms set
+        # — that's why `_classify_empty_result` above returned None and we
+        # got here), but `response_parts` is empty because no assistant
+        # text was emitted to the parent's stdout. Pre-#160 we 500'd here,
+        # which silently failed every scheduled invocation of any fork
+        # skill (the issue reported 8 consecutive daily failures).
+        #
+        # When the parent reports completion cleanly, trust it: synthesize
+        # a short placeholder reply so the caller gets a 200 instead of an
+        # opaque "Task returned empty response" error. Real plumbing
+        # failures (lost result line, dropped pipe, etc.) are already
+        # handled above by `_classify_empty_result` and never reach here.
+        if ctx.return_code == 0 and ctx.metadata.cost_usd is not None:
+            logger.info(
+                "[Headless Task] Task %s exited cleanly with no assistant "
+                "text in the parent stream (cost=$%s, duration=%sms) — "
+                "likely a `context: fork` skill. Returning placeholder "
+                "response.",
+                ctx.task_session_id,
+                ctx.metadata.cost_usd,
+                ctx.metadata.duration_ms,
+            )
+            response_text = (
+                "(Task completed with no direct output — "
+                "skill may use `context: fork`.)"
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Task returned empty response"
+            )
 
     # Count unique tools used
     tool_use_count = len([e for e in ctx.execution_log if e.type == "tool_use"])
