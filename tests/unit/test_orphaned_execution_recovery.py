@@ -103,8 +103,8 @@ class TestRecoverOrphanedExecutions:
         with patch.dict('sys.modules', _SYS_MOCKS):
             result = _run(_recover_fn())
 
-        # Key-by-key — the result dict now includes skipped_grace (#748) and
-        # redis_slots_reclaimed (#749); assert the stable per-counter contract.
+        # Key-by-key — checks the stable per-counter contract from both
+        # #748 (skipped_grace) and #749 (redis_slots_reclaimed).
         assert result["recovered"] == 0
         assert result["still_running"] == 0
         assert result["skipped_grace"] == 0
