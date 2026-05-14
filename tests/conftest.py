@@ -187,7 +187,7 @@ _preload_backend_routers_namespace()
 # test_voice_tools.py installs an incomplete stub (#762 followup).
 try:
     import services.agent_client  # noqa: F401
-except Exception:
+except ImportError:
     pass
 
 # ---------------------------------------------------------------------------

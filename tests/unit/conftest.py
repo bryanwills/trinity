@@ -147,7 +147,7 @@ _preload_real_agent_server()
 # stub with the real module before each test runs (#762 followup).
 try:
     import services.agent_client  # noqa: F401
-except Exception:
+except ImportError:
     pass
 
 # ---------------------------------------------------------------------------
