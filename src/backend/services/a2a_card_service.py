@@ -24,8 +24,8 @@ Out of scope (subsequent phases):
 - Schema validation against a published JSON Schema (the A2A spec
   doesn't publish a stable schema bundle yet)
 
-A2A v1.0 spec reference: https://github.com/anthropics/a2a-protocol
-(field names mirror the spec verbatim).
+A2A v1.0 spec reference: https://google.github.io/A2A/
+(A2A is Google's open protocol; field names mirror the spec verbatim.)
 """
 
 from __future__ import annotations
