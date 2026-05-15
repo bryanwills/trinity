@@ -34,7 +34,16 @@ import threading
 import time
 from typing import Optional
 
-from .orphan_sweep import kill_cgroup_orphans
+# The unit tests in tests/unit/test_subprocess_pgroup.py import this
+# module flat (sys.path.insert(0, utils/) + import subprocess_pgroup),
+# without loading the agent_server package. A package-relative import
+# would fail there at collection time. Try the relative form first
+# (production path inside agent_server) and fall back to the flat name
+# (tests + any future standalone reuse).
+try:
+    from .orphan_sweep import kill_cgroup_orphans
+except ImportError:  # pragma: no cover - exercised by unit tests
+    from orphan_sweep import kill_cgroup_orphans  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 

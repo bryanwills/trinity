@@ -43,7 +43,14 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional
 
-from .orphan_allowlist import resolve_allowlist, _read_cmdline
+# Same flat-vs-relative dance as subprocess_pgroup.py: when this module
+# is loaded by the unit tests (sys.path-injected, no package context),
+# the relative import fails. Fall back to flat so the test suite can
+# import this file standalone.
+try:
+    from .orphan_allowlist import resolve_allowlist, _read_cmdline
+except ImportError:  # pragma: no cover - exercised by unit tests
+    from orphan_allowlist import resolve_allowlist, _read_cmdline  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
