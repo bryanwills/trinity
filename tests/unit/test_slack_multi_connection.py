@@ -118,6 +118,7 @@ DEFAULT_CONNECTION_COUNT = _mod.DEFAULT_CONNECTION_COUNT
 MIN_CONNECTION_COUNT = _mod.MIN_CONNECTION_COUNT
 MAX_CONNECTION_COUNT = _mod.MAX_CONNECTION_COUNT
 DEDUP_RING_SIZE = _mod.DEDUP_RING_SIZE
+_reconnect_timeout_seconds = _mod._reconnect_timeout_seconds
 
 
 # ---------------------------------------------------------------------------
@@ -902,3 +903,114 @@ class TestStopCleansEverything:
         # All sessions closed, contexts cleared
         assert t._running is False
         assert t.contexts == []
+
+
+# ---------------------------------------------------------------------------
+# #683 — reconnect bounded by asyncio.wait_for
+# ---------------------------------------------------------------------------
+
+class TestReconnectTimeoutSeconds:
+    """`_reconnect_timeout_seconds` env parsing + fallback."""
+
+    def setup_method(self):
+        self._saved = os.environ.pop("SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS", None)
+
+    def teardown_method(self):
+        if self._saved is not None:
+            os.environ["SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS"] = self._saved
+        else:
+            os.environ.pop("SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS", None)
+
+    def test_default_is_30(self):
+        assert _reconnect_timeout_seconds() == 30
+
+    def test_env_override(self):
+        os.environ["SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS"] = "45"
+        assert _reconnect_timeout_seconds() == 45
+
+    def test_non_positive_falls_back(self):
+        os.environ["SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS"] = "0"
+        assert _reconnect_timeout_seconds() == 30
+        os.environ["SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS"] = "-5"
+        assert _reconnect_timeout_seconds() == 30
+
+    def test_malformed_falls_back(self):
+        os.environ["SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS"] = "abc"
+        assert _reconnect_timeout_seconds() == 30
+
+
+class TestReconnectBoundedByTimeout:
+    """#683: a hung connect_to_new_endpoint() must not wedge the
+    watchdog — wait_for cancels it, the timeout is logged, and the
+    next reconnect tick still runs."""
+
+    def test_hung_reconnect_times_out_not_hangs(self, monkeypatch, caplog):
+        import logging as _logging
+
+        # Tiny timeout so the test is fast; env-overridable path also
+        # exercised here.
+        monkeypatch.setenv("SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS", "1")
+
+        t = make_transport(n=2)
+
+        async def _never_returns():
+            # Simulate a stuck SDK call (blocked DNS / no SYN-ACK).
+            await asyncio.sleep(3600)
+
+        t.contexts[0].client.connect_to_new_endpoint = AsyncMock(
+            side_effect=_never_returns
+        )
+
+        async def _go():
+            with caplog.at_level(
+                _logging.ERROR, logger="adapters.transports.slack_socket"
+            ):
+                # Must return within ~1s, NOT hang on the 3600s sleep.
+                await asyncio.wait_for(
+                    t._attempt_reconnect(t.contexts[0], "ping timeout"),
+                    timeout=10,  # generous outer guard; real bound is 1s
+                )
+
+        _run(_go())
+
+        # consecutive_failures incremented (feeds existing backoff path)
+        assert t.contexts[0].consecutive_failures == 1
+        # sibling untouched
+        assert t.contexts[1].consecutive_failures == 0
+        # the timeout was logged with a greppable, distinct message
+        timeout_logs = [
+            r for r in caplog.records
+            if "reconnect timed out" in r.getMessage()
+        ]
+        assert timeout_logs, (
+            f"expected a 'reconnect timed out' ERROR log; got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_next_tick_runs_after_timeout(self, monkeypatch):
+        """After a timed-out reconnect, a subsequent _attempt_reconnect
+        call still executes (the watchdog task is alive)."""
+        monkeypatch.setenv("SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS", "1")
+        t = make_transport(n=1)
+
+        calls = {"n": 0}
+
+        async def _hang_then_succeed():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                await asyncio.sleep(3600)  # first call hangs → times out
+            # second call returns immediately → success
+
+        t.contexts[0].client.connect_to_new_endpoint = AsyncMock(
+            side_effect=_hang_then_succeed
+        )
+
+        async def _go():
+            await t._attempt_reconnect(t.contexts[0], "tick 1")  # times out
+            await t._attempt_reconnect(t.contexts[0], "tick 2")  # succeeds
+
+        _run(_go())
+
+        assert calls["n"] == 2, "second tick must still run after a timeout"
+        # success on tick 2 resets the counter
+        assert t.contexts[0].consecutive_failures == 0

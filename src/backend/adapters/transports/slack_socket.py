@@ -36,6 +36,27 @@ WATCHDOG_PING_TIMEOUT_SECONDS = 5
 WATCHDOG_BACKOFF_INITIAL_SECONDS = 60
 WATCHDOG_BACKOFF_MAX_SECONDS = 300
 
+
+def _reconnect_timeout_seconds() -> int:
+    """Timeout for the watchdog's reconnect call (#683).
+
+    The `start()` path wraps `client.connect()` in
+    `asyncio.wait_for(..., timeout=10)`; the reconnect path had no
+    analogous guard, so a hung `connect_to_new_endpoint()` (blocked
+    DNS, no SYN-ACK, slack.com unreachable) wedged the watchdog task
+    forever — the exact failure #244 set out to prevent. Default 30s
+    (more generous than the 10s initial-connect timeout since a
+    reconnect may legitimately wait on Slack-side endpoint
+    reissuance); env-overridable for ops without a code change.
+    Malformed / non-positive values fall back to the default.
+    """
+    raw = os.getenv("SLACK_SOCKET_RECONNECT_TIMEOUT_SECONDS", "30")
+    try:
+        val = int(raw)
+        return val if val > 0 else 30
+    except (TypeError, ValueError):
+        return 30
+
 # Multi-connection config (#244)
 DEFAULT_CONNECTION_COUNT = 2
 MIN_CONNECTION_COUNT = 1
@@ -531,15 +552,35 @@ class SlackSocketTransport(ChannelTransport):
                 f"(attempt {ctx.consecutive_failures}, next check in {backoff}s)"
             )
 
+        reconnect_timeout = _reconnect_timeout_seconds()
         try:
             # SDK's connect_to_new_endpoint uses an internal lock, so concurrent
             # calls (from SDK monitor + our watchdog) are safe.
-            await ctx.client.connect_to_new_endpoint()
+            #
+            # #683: bound the call. Without wait_for, a hung reconnect
+            # (blocked DNS, no SYN-ACK, slack.com unreachable) blocks
+            # this watchdog task in the await forever — no further
+            # ticks, watchdog silently dead. consecutive_failures was
+            # already incremented above, so a timeout falls straight
+            # into the existing exponential-backoff path on the next
+            # tick.
+            await asyncio.wait_for(
+                ctx.client.connect_to_new_endpoint(),
+                timeout=reconnect_timeout,
+            )
             logger.info(
                 f"Socket Mode watchdog [c={ctx.index}]: reconnected successfully "
                 f"after {ctx.consecutive_failures} attempt(s)"
             )
             ctx.consecutive_failures = 0
+        except asyncio.TimeoutError:
+            # Distinct from a generic reconnect error so the "stuck SDK
+            # call" failure mode is greppable in logs.
+            logger.error(
+                f"Socket Mode watchdog [c={ctx.index}]: reconnect timed out "
+                f"({reconnect_timeout}s) — SDK connect_to_new_endpoint did not "
+                f"return; will retry on next tick"
+            )
         except Exception as e:
             logger.error(
                 f"Socket Mode watchdog [c={ctx.index}]: reconnect failed: {e}"
