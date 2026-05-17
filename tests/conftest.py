@@ -42,10 +42,20 @@ if _dot_env_754.exists():
     try:
         from dotenv import dotenv_values as _dotenv_values_754
         _env_vals_754 = _dotenv_values_754(_dot_env_754)
-        for _k754 in ("INTERNAL_API_SECRET", "SECRET_KEY", "REDIS_BACKEND_PASSWORD"):
+        # INTERNAL_API_SECRET / SECRET_KEY have no earlier default — setdefault
+        # is fine (the caller's explicit export still wins).
+        for _k754 in ("INTERNAL_API_SECRET", "SECRET_KEY"):
             _v754 = _env_vals_754.get(_k754)
             if _v754:
                 _os_589.environ.setdefault(_k754, _v754)
+        # REDIS_BACKEND_PASSWORD was setdefault'd to "test" at line 30 for
+        # backend-config import safety; that placeholder must be OVERRIDDEN
+        # when the real .env value is available, otherwise tests/security/
+        # ACL tests pass garbage to redis-cli. Don't clobber an explicit
+        # caller export (which would have set the var before this module ran).
+        _rbp754 = _env_vals_754.get("REDIS_BACKEND_PASSWORD")
+        if _rbp754 and _os_589.environ.get("REDIS_BACKEND_PASSWORD") in (None, "test"):
+            _os_589.environ["REDIS_BACKEND_PASSWORD"] = _rbp754
         # TRINITY_TEST_PASSWORD aliases ADMIN_PASSWORD so the api_client
         # default ("password") doesn't trip the per-account rate limiter
         # (5 fails / 900s at routers/auth.py:35-46).
