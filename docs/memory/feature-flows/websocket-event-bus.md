@@ -169,8 +169,13 @@ _catchup(client_id, slot, last_event_id, catchup_max)
 
 ## Security
 
-- **Authentication**: unchanged. `/ws` requires JWT; `/ws/events` requires
-  `trinity_mcp_*` API key. Consumer tasks inherit connection-level auth.
+- **Authentication**: `/ws` requires a single-use opaque ticket minted via
+  `POST /api/ws/ticket` (C-002 / #550 — see `architecture.md` "WebSocket
+  Security"). The 32-byte ticket has a 30s TTL and is consumed atomically
+  via Redis `GETDEL`; JWT-in-URL was removed to close pentest finding 3.2.1.
+  `/ws/events` still accepts a `trinity_mcp_*` API key via `?token=` (kept
+  for the documented `wscat`/`websocat` surface). Consumer tasks inherit
+  connection-level auth.
 - **Input validation**: `?last-event-id=` is regex-gated
   (`EID_PATTERN = ^\d+-\d+$`) in `validate_last_event_id()` before reaching
   `XRANGE`. Malformed input → `None` → no catchup.
