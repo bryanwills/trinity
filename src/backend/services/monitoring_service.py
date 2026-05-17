@@ -186,13 +186,22 @@ async def check_network_health(
     agent's repeated unreachability eventually trips dormant and stops the
     health-check write flood.
 
-    #474 — failure classification mirrors AgentClient._request(). Only
+    #474 — failure classification largely mirrors AgentClient._request().
     CIRCUIT_FAILURE_EXCEPTIONS (ConnectError, ConnectTimeout) count toward
-    the circuit; transient socket teardowns and read-timeouts do not. Any
-    HTTP response (200..599) records success — symmetric with _request()
-    so stale failure counters clear as soon as the agent proves reachable.
-    A wedged-but-listening agent (e.g. /health 5xx) is still flagged via
-    aggregate_health()'s status_code >= 500 check, not via the circuit.
+    the circuit; *Timeout / PoolTimeout do not. Any HTTP response (200..599)
+    records success — symmetric with _request() so stale failure counters
+    clear as soon as the agent proves reachable. A wedged-but-listening
+    agent (e.g. /health 5xx) is still flagged via aggregate_health()'s
+    status_code >= 500 check, not via the circuit.
+
+    #474 Layer 2 — /health-specific divergence from _request(): on this
+    endpoint, BrokenPipeError / ConnectionResetError (raw OSError —
+    uncaught in _request() per #798) and httpx.ReadError / WriteError /
+    RemoteProtocolError (transient and circuit-neutral in _request())
+    are reclassified. Raw pipe errors are client-side cancellations and
+    stay circuit-neutral; mid-stream httpx transport errors on this
+    small, fast endpoint are taken as agent liveness signals and DO
+    record_failure(). See the explicit handlers below.
     """
     now = utc_now_iso()
     url = f"http://agent-{agent_name}:8000/health"
@@ -255,9 +264,55 @@ async def check_network_health(
             checked_at=now
         )
 
+    except (BrokenPipeError, ConnectionResetError) as e:
+        # Client-side transport drop — agent isn't sick, the connection died
+        # mid-flight (likely an upstream MCP-sync client cancellation that
+        # cascaded into the pooled keepalive socket). Do NOT record_failure
+        # — the agent's health hasn't been observed. (#474 Layer 2.)
+        #
+        # Layered ABOVE TRANSIENT_TRANSPORT_EXCEPTIONS because the shared
+        # tuple from agent_client.py does not include the raw OSError
+        # subclasses — #798 leaves those uncaught in _request() so they
+        # surface as client bugs, but on a /health probe we'd rather
+        # observe the drop and report `reachable=False` than raise.
+        return NetworkHealthCheck(
+            agent_name=agent_name,
+            reachable=False,
+            error=f"Connection dropped: {type(e).__name__}",
+            checked_at=now
+        )
+
+    except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError) as e:
+        # On a /health probe these ARE liveness signals: if the agent
+        # partially writes then drops (event-loop wedge, OOM mid-write,
+        # segfault), the agent IS unhealthy. Distinct from a client-side
+        # BrokenPipeError above. (#474 Phase 3 Eng finding #3.)
+        #
+        # /health-specific OVERRIDE of TRANSIENT_TRANSPORT_EXCEPTIONS
+        # below: in AgentClient._request() these same exceptions on
+        # arbitrary /api/* paths stay circuit-neutral (#798) because a
+        # mid-stream drop there could be benign (client cancel, busy
+        # agent, network blip). On the dedicated /health endpoint the
+        # response is supposed to be small and immediate, so a partial
+        # response is genuinely "agent crashed mid-write" — circuit
+        # signal applies. Must be layered ABOVE TRANSIENT_TRANSPORT_EXCEPTIONS
+        # so Python's first-match wins.
+        if circuit is not None:
+            circuit.record_failure()
+        return NetworkHealthCheck(
+            agent_name=agent_name,
+            reachable=False,
+            error=f"HTTP transport error on /health: {type(e).__name__}",
+            checked_at=now
+        )
+
     except TRANSIENT_TRANSPORT_EXCEPTIONS as e:
-        # Read/write timeout, pool exhaustion, broken-pipe / reset on a
-        # half-written request, garbled HTTP framing. NOT a circuit signal.
+        # Read/write timeout, pool exhaustion, garbled HTTP framing. NOT a
+        # circuit signal. The ReadError/WriteError/RemoteProtocolError
+        # entries of this tuple are no longer reachable from here — the
+        # /health-specific handler above intercepts them with the opposite
+        # contract. Only the *Timeout / PoolTimeout members hit this branch
+        # in practice.
         return NetworkHealthCheck(
             agent_name=agent_name,
             reachable=False,
