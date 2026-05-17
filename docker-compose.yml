@@ -77,6 +77,11 @@ services:
       # forever — accepts deadlock risk for zero false 503s).
       - BACKEND_AGENT_CALL_LIMIT=${BACKEND_AGENT_CALL_LIMIT:-8}
       - BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S=${BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S:-3600}
+      # Issue #874: uvicorn --reload writes __pycache__/ next to source files
+      # in the ./src/backend bind mount. On Linux dev hosts the host dir is
+      # owned by the developer UID, not container UID 1000, so the writes
+      # fail. macOS Docker Desktop masks the failure; set this for parity.
+      - PYTHONDONTWRITEBYTECODE=1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app
@@ -101,8 +106,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cap_add:
-      - NET_BIND_SERVICE
+    # No cap_add: backend listens on 8000 (>=1024, no NET_BIND_SERVICE needed)
+    # and reaches /var/run/docker.sock via group_add below — not capabilities.
+    # Issue #874: backend runs as UID 1000 (non-root) but still needs to talk
+    # to /var/run/docker.sock. On Linux the socket is group-owned by `docker`
+    # (typically GID 999 on Debian/Ubuntu, ~990 on RHEL family). macOS Docker
+    # Desktop ignores group_add; the default is safe there.
+    group_add:
+      - "${DOCKER_GID:-999}"
     read_only: false
     tmpfs:
       - /tmp:noexec,nosuid,size=100m

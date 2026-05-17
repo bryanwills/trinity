@@ -886,6 +886,8 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 16. **Time-Window SQL uses `iso_cutoff()`, not `datetime('now', ...)`** — Columns written via `utc_now_iso()` are ISO-Z strings (`T` separator, `Z` suffix); SQLite's `datetime('now', ...)` emits a different format (space separator, no suffix), making lexicographic comparison silently incorrect (#476). For rolling-window filters on ISO-Z TEXT columns, compute the cutoff in Python via `iso_cutoff(hours)` from `utils/helpers.py` and pass it as a bound parameter.
 
+17. **Non-root containers** — every Trinity-built image MUST end with a `USER` directive switching to a non-root user. Backend additionally requires `group_add: ${DOCKER_GID:-999}` in compose for Docker socket access on Linux. New service Dockerfiles failing this invariant are rejected at review. Established by #874. CI guards in `.github/workflows/frontend-e2e.yml`: `verify-non-root` execs the running backend/scheduler/mcp-server containers (those hold the credentials and the `docker.sock` mount), asserts UID 1000, and proves `group_add` is wired through on Linux by running `docker.from_env().ping()` from inside the backend (NOT a `/api/agents` HTTP probe — `list_all_agents_fast` swallows Docker exceptions and returns `[]`, which made the original gate a false positive); `verify-prod-frontend-uid` builds the prod frontend image out-of-band (the e2e workflow boots the Vite-dev image) and asserts its UID is 101 (`nginxinc/nginx-unprivileged`). Dev-only images (`docker/frontend/Dockerfile`) are intentionally exempt — they have no production attack surface. Existing deployments upgrading through this change must re-own their data path and `agent-configs` volume per [docs/migrations/NON_ROOT_CONTAINERS_2026-05.md](../migrations/NON_ROOT_CONTAINERS_2026-05.md).
+
 ---
 
 ## Database Schema
@@ -1845,7 +1847,11 @@ credentials. See `docs/migrations/REDIS_AUTH.md` for the upgrade path.
 
 ## Container Security
 
-- Non-root execution (`developer:1000`)
+- **Non-root execution** — every Trinity-built container runs as a non-root user:
+  backend and scheduler as `trinity` (UID 1000), MCP server as `node` (UID 1000),
+  frontend as `nginx` (UID 101), agents as `developer` (UID 1000). Established by
+  issue #874. Backend additionally requires `group_add: ${DOCKER_GID:-999}` in
+  compose for Docker socket access on Linux hosts.
 - `CAP_DROP: ALL` + `CAP_ADD: NET_BIND_SERVICE`
 - `security_opt: no-new-privileges:true`
 - tmpfs `/tmp` with `noexec,nosuid`

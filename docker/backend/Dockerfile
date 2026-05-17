@@ -65,6 +65,18 @@ RUN chmod -R 644 /app/*.py && \
     chmod -R 755 /app/routers /app/services /app/adapters /app/utils /app/db /app/canary && \
     find /app/routers /app/services /app/adapters /app/utils /app/db /app/canary -name "*.py" -exec chmod 644 {} \;
 
+# Run as non-root (CSO hardening, issue #874). UID 1000 must match scheduler
+# because both services share /data (SQLite trinity.db). /agent-configs is
+# included because services/agent_service/deploy.py writes templates there;
+# a root-owned mount point would trigger the silent ./config/agent-templates
+# fallback and templates would vanish on restart.
+RUN groupadd --gid 1000 trinity && \
+    useradd --uid 1000 --gid trinity --home-dir /app --shell /bin/bash trinity && \
+    mkdir -p /data /agent-configs && \
+    chown -R trinity:trinity /app /data /agent-configs
+
+USER trinity
+
 EXPOSE 8000
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--proxy-headers", "--forwarded-allow-ips=*"]
