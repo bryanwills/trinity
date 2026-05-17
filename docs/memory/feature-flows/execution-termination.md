@@ -494,11 +494,11 @@ Three emission sites in `subprocess_pgroup.py` map to three `outcome=` values:
 
 | `outcome=` | Site | Meaning |
 |---|---|---|
-| `natural` | Site B | Reader joined during the post-kill grace window — orphan-killer (`_kill_orphan_pipe_writers` for `setsid()` refugees like `ssh` from `git push`) or grandchild-reap rescued the drain. |
+| `natural` | Site B | Reader joined during the post-kill grace window — `terminate_process_group` reaped the claude pgid; the `kill_cgroup_orphans()` sweep in `finally` mops up any grandchildren that escaped via `setsid()` (e.g. `ssh` from `git push`) before the kernel EOFs the pipe. |
 | `force_close` | Site C | Drain budget exceeded, pipes force-closed; reader thread did exit cleanly afterwards (no daemon leak). |
 | `leaked` | Site C | Drain budget exceeded **and** daemon reader threads survived force-close. Bug-class regression signal — operators should alert on a non-zero rate. |
 
-Fields surfaced for operator queries: `pid`, `pgid`, `outcome`, `drain_elapsed_ms`, `stuck_initial`, `orphan_kill_count` (sentinel `-1` when the /proc scan timed out and `_orphan_result` cannot be trusted), and optional `leaked_count` (present only on `outcome=leaked`).
+Fields surfaced for operator queries: `pid`, `pgid`, `outcome`, `drain_elapsed_ms`, `stuck_initial`, `orphan_kill_count` (vestigial since the #817 follow-up cgroup-sweep refactor — always `0`; the actual orphan-kill count is logged separately as `Cgroup sweep killed N orphan(s) after drain` and can be correlated by `pid`), and optional `leaked_count` (present only on `outcome=leaked`).
 
 **Fleet audit**: `scripts/586-fleet-check.sh` scans Vector-aggregated agent logs (`/data/logs/agents-*.json`) across the configurable lookback window (default 7d), prints a per-container summary of `[METRIC] drain_outcome` and related slow-path events, and exits non-zero if any residual `still stuck after Ns` or `no result message after` events are found — gating the Issue #586 close-out.
 

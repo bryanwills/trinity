@@ -1457,8 +1457,9 @@ spawns a long-running subprocess that calls `setsid()` (`ssh` from
 `git push` is the canonical case — see [#586](https://github.com/abilityai/trinity/issues/586) /
 [#618](https://github.com/abilityai/trinity/pull/618)), the subprocess can
 hold the pipe open during network I/O even after Claude exits. The
-platform catches this in `_kill_orphan_pipe_writers` (SIGKILLs out-of-pgid
-pipe-writers identified by inode) so your agent still completes, but the
+platform catches this via the `kill_cgroup_orphans()` sweep in
+`drain_reader_threads` (SIGKILLs anything in the container cgroup outside
+the allowlist) so your agent still completes, but the
 slow path adds drain latency and shows up in `[METRIC] drain_outcome` log
 lines with `outcome=natural` or `outcome=force_close`. Defensive hooks
 avoid the slow path by releasing the inherited stdout FD before any
