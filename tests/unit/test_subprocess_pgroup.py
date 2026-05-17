@@ -393,6 +393,107 @@ sys.exit(0)
             except Exception:
                 pass
 
+    @pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="_kill_orphan_pipe_writers uses /proc (Linux only)",
+    )
+    def test_setsid_escapee_drained_via_orphan_killer_preserves_result_line(self):
+        """Regression for #586: Stop hook → ``git push`` → ``ssh`` calls
+        ``setsid()``, escaping claude's process group and holding the stdout
+        pipe write-end during network I/O.
+
+        Pathology: terminate_process_group(claude_pgid) leaves the setsid'd
+        grandchild alive (different session), so the reader's readline() never
+        sees EOF. Without ``_kill_orphan_pipe_writers`` firing inside
+        ``drain_reader_threads``, the natural-drain wait times out and the
+        force-close fallback discards the kernel pipe buffer — losing the
+        final ``{"type":"result"}`` JSON line and recording the execution as a
+        502 "no result message" failure.
+
+        This is a sibling of ``test_buffered_data_preserved_after_grandchild_kill``
+        (#531) — same shape, except the grandchild calls ``os.setsid()`` so it
+        escapes the pgid kill. Together they pin the full production path:
+        natural-drain ordering, the 10s scan-timeout cap (#650), the async
+        wrapper (#657), and the result-line preservation contract (#531).
+
+        Non-redundant with ``TestKillOrphanPipeWriters.test_kills_orphan_in_different_session``:
+        that test calls ``_kill_orphan_pipe_writers`` directly and skips the
+        drain wrapper entirely; only this test exercises the full
+        ``drain_reader_threads`` production path with the setsid escape +
+        data-preservation assertion.
+        """
+        # Parent writes the result sentinel, forks a grandchild that calls
+        # setsid() (new session — survives terminate_process_group(pgid)) and
+        # holds stdout open, then exits immediately.
+        script = r"""
+import os, sys, time
+sys.stdout.write("RESULT_LINE\n")
+sys.stdout.flush()
+pid = os.fork()
+if pid == 0:
+    os.setsid()              # the #586 escape — new session/pgid
+    time.sleep(5)            # holds stdout write-end while parent exits
+    os._exit(0)
+sys.exit(0)
+"""
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        pgid = capture_pgid(proc)
+        assert pgid is not None
+        captured: list[str] = []
+        reader_ready = threading.Event()
+
+        def reader():
+            reader_ready.set()
+            assert proc.stdout is not None
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    if not line:
+                        break
+                    captured.append(line.strip())
+            except (ValueError, OSError):
+                pass  # pipe force-closed — acceptable on the fallback path
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        reader_ready.wait(timeout=2)
+
+        # Parent exits; setsid'd grandchild stays alive holding the pipe.
+        proc.wait(timeout=5)
+        time.sleep(0.1)
+        assert t.is_alive(), (
+            "reader should still be blocked — setsid'd grandchild holds pipe open"
+        )
+
+        try:
+            # grace=0 forces the stuck-reader path immediately; post_kill_grace
+            # gives the natural-drain window after the orphan-killer fires.
+            asyncio.run(drain_reader_threads(
+                proc, t,
+                grace=0,
+                post_kill_grace=5,
+                pgid=pgid,
+            ))
+            assert not t.is_alive(), (
+                "reader thread should have exited after drain — "
+                "_kill_orphan_pipe_writers must catch the setsid escapee"
+            )
+            assert "RESULT_LINE" in captured, (
+                f"sentinel lost — captured={captured!r}. "
+                "setsid escapee survived: drain hit the force-close fallback "
+                "and discarded the pre-fork buffered result line."
+            )
+        finally:
+            try:
+                terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
+            except Exception:
+                pass
+
 
 @pytest.mark.unit
 class TestSafeClosePipes:
