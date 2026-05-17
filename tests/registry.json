@@ -466,6 +466,49 @@
       "description": "Unit tests for SLACK-001 bot token encryption added to db/slack.py (#453): round-trip via SlackOperations, raw DB value is JSON envelope, plaintext fallback for legacy xoxb-* rows, decrypt-failure returns None, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, _migrate_slack_bot_token_encryption walks both slack_link_connections and slack_workspaces (idempotent, skips encrypted rows, hard-fails without key, no-op on empty/missing tables). 14 tests. Tests for slack_channels.py + telegram + whatsapp encryption are tracked separately in #664."
     },
     {
+      "file": "unit/test_telegram_token_encryption.py",
+      "feature": "Issue #664",
+      "added": "2026-05-17",
+      "categories": [
+        "backend",
+        "unit",
+        "telegram",
+        "security",
+        "credentials",
+        "encryption"
+      ],
+      "description": "Unit tests for Telegram bot token encryption in db/telegram_channels.py (#664): round-trip via TelegramChannelOperations.create_binding + get_decrypted_bot_token, raw DB value is AES-256-GCM JSON envelope, get_binding_by_agent returns the encrypted blob (plaintext only via accessor), corrupt envelope returns None with ERROR log, wrong-key envelope returns None, re-encryption on update produces a fresh nonce (and token rotation reflects the new plaintext), encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt swallows missing-key error and returns None. No plaintext fallback path — Telegram never shipped plaintext."
+    },
+    {
+      "file": "unit/test_whatsapp_token_encryption.py",
+      "feature": "Issue #664",
+      "added": "2026-05-17",
+      "categories": [
+        "backend",
+        "unit",
+        "whatsapp",
+        "twilio",
+        "security",
+        "credentials",
+        "encryption"
+      ],
+      "description": "Unit tests for Twilio AuthToken encryption in db/whatsapp_channels.py (#664): round-trip via WhatsAppChannelOperations.create_binding + get_decrypted_auth_token, raw DB value is AES-256-GCM JSON envelope, account_sid stays plaintext (public Twilio identifier — pinned so future refactors don't accidentally encrypt or strip it), corrupt envelope returns None, wrong-key envelope returns None, re-encryption on update produces a fresh nonce, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt returns None on missing key."
+    },
+    {
+      "file": "unit/test_slack_workspaces_encryption.py",
+      "feature": "Issue #664",
+      "added": "2026-05-17",
+      "categories": [
+        "backend",
+        "unit",
+        "slack",
+        "security",
+        "credentials",
+        "encryption"
+      ],
+      "description": "Unit tests for SLACK-002 workspace bot token encryption in db/slack_channels.py (#664): round-trip via SlackChannelOperations.create_workspace + get_workspace_by_team / get_workspace_bot_token / get_all_workspaces (each decrypts), raw DB value is AES-256-GCM JSON envelope (no xoxb- substring), plaintext fallback path at slack_channels.py:47-49 returns legacy xoxb-* tokens unchanged with operator-facing WARNING log, corrupt non-xoxb row returns '' (None normalized at line 98) with ERROR log, wrong-key envelope returns '', re-encryption on update produces a fresh nonce, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt returns None for non-xoxb input without key."
+    },
+    {
       "file": "unit/test_github_pat_fallback.py",
       "feature": "#735",
       "added": "2026-05-08",
