@@ -407,9 +407,24 @@ class CapacityManager:
         any orphan backlog that didn't trigger a release callback (e.g. after
         a backend restart between enqueue and drain). Called from main.py's
         60s loop.
+
+        On success — and only on success — writes a `canary:drain_tick_at`
+        Redis key with the current unix timestamp. The canary's B-02
+        invariant (no queued without slots-full) reads this to distinguish
+        "queue stuck waiting for drain" from "drain just hasn't run yet".
+        Written at the END of the sweep so a crash mid-sweep doesn't
+        falsely claim a successful tick — leaving the cursor stale and
+        letting B-02 catch the stuck drain.
         """
+        import time
         await self._backlog.expire_stale(max_age_hours=max_age_hours)
         await self._backlog.drain_orphans_all()
+        try:
+            self._redis.set("canary:drain_tick_at", str(time.time()))
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                f"[Capacity] failed to write canary drain-tick heartbeat: {e}"
+            )
 
     async def cancel_all_overflow(self, agent_name: str, reason: str) -> int:
         """Cancel all queued work (in-memory + persistent) for an agent.
