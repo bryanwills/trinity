@@ -340,7 +340,8 @@ async def request_verification_code(
     # Send email
     email_sent = await email_service.send_verification_code(
         verification.email,
-        verification_data["code"]
+        verification_data["code"],
+        agent_name=link["agent_name"],
     )
 
     if not email_sent:
