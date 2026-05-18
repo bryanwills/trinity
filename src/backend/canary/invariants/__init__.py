@@ -1,15 +1,23 @@
 """
-Canary invariant library — Phase 1 (CANARY-001 / Issue #411).
+Canary invariant library (CANARY-001 / Issue #411).
 
 Each invariant is a pure function `check(snapshot) → list[ViolationReport]`.
 The library is registry-driven so the run-cycle endpoint can enable/disable
 invariants per request.
 
-Phase 1 ships three:
+Phase 1 (#653) shipped:
 
 - S-01: slot–row bijection (Redis ZSET vs SQL running rows)
 - E-02: no phantom state reversal (terminal executions stay terminal)
 - L-03: delete cascades (no orphan rows referencing removed agents)
+
+Phase 2 (#882) adds four single-source SQL/Redis checks — same shape as
+Phase 1, no new source types:
+
+- S-02: no overbooking (ZCARD ≤ max_parallel_tasks)
+- E-01: terminal-state closure (no row past timeout + buffer in `running`)
+- E-05: dispatched rows have session (no >60s running row with NULL session)
+- B-01: queue-status coherence (`db.get_queued_count` vs id-list count)
 
 Subsequent phases register additional invariants here without changes to
 the snapshot collector or the run-cycle endpoint.
@@ -19,16 +27,24 @@ from typing import Callable, Dict, Iterable, List
 
 from ..snapshot import Snapshot, ViolationReport
 from .s01_slot_row_bijection import check as s01_check
+from .s02_no_overbooking import check as s02_check
+from .e01_terminal_state_closure import check as e01_check
 from .e02_no_phantom_reversal import check as e02_check
+from .e05_dispatched_rows_have_session import check as e05_check
 from .l03_delete_cascades import check as l03_check
+from .b01_queue_status_coherence import check as b01_check
 
 
 # Public registry. Keys are the invariant ids the run-cycle endpoint
 # accepts in its `invariants` filter.
 INVARIANTS: Dict[str, Callable[[Snapshot], List[ViolationReport]]] = {
     "S-01": s01_check,
+    "S-02": s02_check,
+    "E-01": e01_check,
     "E-02": e02_check,
+    "E-05": e05_check,
     "L-03": l03_check,
+    "B-01": b01_check,
 }
 
 

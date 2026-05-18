@@ -143,9 +143,20 @@ class AgentSnapshot:
     slot_scores: Dict[str, float] = field(default_factory=dict)
     # SQLite execution_id sets, partitioned by status.
     running_exec_ids: Set[str] = field(default_factory=set)
-    # `started_at` per running id (ISO); used by S-01 grace.
+    # `started_at` per running id (ISO); used by S-01 grace + E-01 / E-05 age.
     running_started_at: Dict[str, str] = field(default_factory=dict)
+    # `claude_session_id` per running id (str or None); used by E-05 to detect
+    # dispatched rows that never acquired a backing session.
+    running_claude_session_ids: Dict[str, Optional[str]] = field(default_factory=dict)
     queued_exec_ids: Set[str] = field(default_factory=set)
+    # `db.get_queued_count(name)` — the production accessor BacklogService
+    # calls on every enqueue/drain. B-01 compares this against
+    # `len(queued_exec_ids)` (independently collected by `_collect_executions`)
+    # so a divergence between the two query paths (e.g. a future cache layer
+    # on the accessor, or a status-filter regression) surfaces as a violation
+    # rather than going silent. `None` means the accessor was unavailable
+    # this cycle (import error in test mode) and B-01 must skip.
+    queued_count_via_service: Optional[int] = None
 
 
 @dataclass
@@ -193,26 +204,73 @@ def _collect_known_agents() -> List[Dict[str, Any]]:
         return [dict(row) for row in cursor.fetchall()]
 
 
-def _collect_executions(agent_name: str) -> Dict[str, Set[str]]:
-    """Per-agent running + queued execution_ids."""
+def _collect_executions(agent_name: str) -> Dict[str, Any]:
+    """Per-agent running + queued execution_ids.
+
+    Adds `claude_session_id` for running rows (E-05) — fetched in the same
+    query so the canary cycle stays O(N agents) and never grows per-row.
+    The column has been on `schedule_executions` since #106; rows predating
+    that migration return NULL and are tolerated by the E-05 grace window.
+    """
     from db.connection import get_db_connection
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # `claude_session_id` may not exist in the minimal test DDLs; guard
+        # with a PRAGMA introspection and select * if absent so the unit
+        # tests don't have to mirror every production column.
+        cursor.execute("PRAGMA table_info(schedule_executions)")
+        cols = {c["name"] for c in cursor.fetchall()}
+        has_session_col = "claude_session_id" in cols
+        select_cols = "id, status, started_at"
+        if has_session_col:
+            select_cols += ", claude_session_id"
         cursor.execute(
-            "SELECT id, status, started_at FROM schedule_executions "
+            f"SELECT {select_cols} FROM schedule_executions "
             "WHERE agent_name = ? AND status IN ('running', 'queued')",
             (agent_name,),
         )
-        out: Dict[str, Any] = {"running": set(), "queued": set(), "started_at": {}}
+        out: Dict[str, Any] = {
+            "running": set(),
+            "queued": set(),
+            "started_at": {},
+            "claude_session_ids": {},
+        }
         for row in cursor.fetchall():
             if row["status"] == "running":
                 out["running"].add(row["id"])
                 if row["started_at"]:
                     out["started_at"][row["id"]] = row["started_at"]
+                out["claude_session_ids"][row["id"]] = (
+                    row["claude_session_id"] if has_session_col else None
+                )
             elif row["status"] == "queued":
                 out["queued"].add(row["id"])
         return out
+
+
+def _collect_queued_count_via_service(agent_name: str) -> Optional[int]:
+    """Call the production `db.get_queued_count` accessor.
+
+    Used by B-01: we compare what this returns against the snapshot's
+    independently-collected `len(queued_exec_ids)` so that any drift
+    between the service-layer accessor and a direct SELECT — a cache
+    layer, a status-filter regression, anything — surfaces as a
+    violation. Returns `None` on import or attribute error so unit
+    tests (which stub `db.connection` but not the full `database`
+    facade) can still build snapshots; the B-01 check then skips that
+    agent rather than firing a false positive.
+    """
+    try:
+        from database import db
+        return int(db.get_queued_count(agent_name))
+    except Exception:  # pragma: no cover - exercised in unit tests via stubbing
+        logger.debug(
+            "canary snapshot: db.get_queued_count unavailable for %s; "
+            "B-01 will skip this agent",
+            agent_name,
+        )
+        return None
 
 
 def _collect_terminal_executions(window_minutes: int = 30) -> Dict[str, str]:
@@ -405,7 +463,16 @@ def collect_snapshot() -> Snapshot:
         except Exception as exc:
             logger.exception("canary snapshot: executions read failed for %s", name)
             snap.sources_unavailable.append(f"sqlite.executions[{name}]: {exc}")
-            execs = {"running": set(), "queued": set()}
+            execs = {
+                "running": set(),
+                "queued": set(),
+                "started_at": {},
+                "claude_session_ids": {},
+            }
+
+        # B-01 inputs: production accessor `db.get_queued_count` for cross-
+        # check against the snapshot's own queued id-list count.
+        queued_via_service = _collect_queued_count_via_service(name)
 
         snap.agents.append(
             AgentSnapshot(
@@ -417,7 +484,9 @@ def collect_snapshot() -> Snapshot:
                 slot_scores=redis_state["scores"].get(name, {}),
                 running_exec_ids=execs["running"],
                 running_started_at=execs.get("started_at", {}),
+                running_claude_session_ids=execs.get("claude_session_ids", {}),
                 queued_exec_ids=execs["queued"],
+                queued_count_via_service=queued_via_service,
             )
         )
 

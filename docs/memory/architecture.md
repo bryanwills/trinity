@@ -697,7 +697,7 @@ export, enable/disable toggle. Issue #20 can be closed.
 **Storage**: `canary_violations` table in main SQLite DB. JSON-encoded
 `observed_state` column carries invariant-specific payload.
 
-**Phase 1 invariants** (S-01, E-02, L-03):
+**Phase 1 invariants** (#653 — S-01, E-02, L-03):
 - **S-01 — Slot–row bijection**: per agent, set of execution_ids in
   `agent:slots:{name}` (Redis ZSET, drain sentinels filtered) equals set
   of execution_ids in `schedule_executions WHERE status='running'`.
@@ -715,6 +715,26 @@ export, enable/disable toggle. Issue #20 can be closed.
   in `agent_ownership`; no Redis `agent:slots:{name}` for missing agent.
   Severity: critical for orphaned `schedule_executions` or Redis slots,
   major otherwise. Catches Issue #129 bug class.
+
+**Phase 2 invariants** (#882 — S-02, E-01, E-05, B-01):
+- **S-02 — No overbooking**: per agent, `ZCARD(agent:slots:{name})`
+  (drain sentinels filtered) ≤ `agent_ownership.max_parallel_tasks`.
+  Severity: critical. Catches `acquire_slot` concurrency-bypass
+  regressions — distinct from S-01 because the violation can be self-
+  consistent (Redis and SQL agree on N+1 running tasks against a cap of N).
+- **E-01 — Terminal-state closure**: no `status='running'` row whose
+  `started_at` is older than the agent's `execution_timeout_seconds + 300s`
+  (matches `SLOT_TTL_BUFFER` so the check fires *after* cleanup has had
+  its window to act). Severity: critical. Tier B.
+- **E-05 — Dispatched rows have session**: no `status='running'` row
+  older than 60s with `claude_session_id IS NULL`. Severity: major.
+  Tier B. Guards Issue #106.
+- **B-01 — Queue-status coherence**: per agent, `db.get_queued_count`
+  (the accessor `BacklogService` calls) agrees with the snapshot's
+  independently-collected `len(queued_exec_ids)`. Severity: critical.
+  Tier A. Trivially-green today after the #428 consolidation; exists as
+  a regression guard against a future cache layer or status-filter drift
+  on the production accessor.
 
 **Fleet**: `config/canary-fleet.yaml` — synthetic load generators
 (`canary-fleet-burst`, `canary-fleet-long`) deployed via the existing

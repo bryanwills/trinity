@@ -963,10 +963,18 @@ class TestRunner:
         snap = reload_canary["canary"].collect_snapshot()
         results = reload_canary["canary"].run_invariants(snap)
 
-        assert set(results.keys()) == {"S-01", "E-02", "L-03"}
+        assert set(results.keys()) == {
+            "S-01", "S-02", "E-01", "E-02", "E-05", "L-03", "B-01",
+        }
         assert results["S-01"] == []
+        assert results["S-02"] == []
+        assert results["E-01"] == []
         assert results["E-02"] == []
+        assert results["E-05"] == []
         assert len(results["L-03"]) == 1
+        # B-01 is skipped in unit-test mode (no live `database` facade), so
+        # queued_count_via_service is None per agent → no violations.
+        assert results["B-01"] == []
 
     def test_run_invariants_subset(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1")
@@ -981,6 +989,264 @@ class TestRunner:
         results = reload_canary["canary"].run_invariants(snap, ids=["NOPE", "L-03"])
         assert "NOPE" not in results
         assert "L-03" in results
+
+
+# ---------------------------------------------------------------------------
+# S-02 — no overbooking
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantS02:
+    def test_holds_when_slot_count_within_cap(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1", max_parallel=3)
+        reload_canary["redis"].zadd(
+            "agent:slots:a1", {"e1": 1.0, "e2": 2.0, "e3": 3.0}
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s02_no_overbooking as s02
+        assert s02.check(snap) == []
+
+    def test_fires_when_slot_count_exceeds_cap(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1", max_parallel=2)
+        reload_canary["redis"].zadd(
+            "agent:slots:a1", {"e1": 1.0, "e2": 2.0, "e3": 3.0}
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s02_no_overbooking as s02
+        violations = s02.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "S-02"
+        assert v.severity == "critical"
+        assert v.observed_state["slot_count"] == 3
+        assert v.observed_state["max_parallel_tasks"] == 2
+        assert v.observed_state["overbooked_by"] == 1
+
+    def test_drain_sentinels_filtered_before_cap_check(
+        self, canary_db, reload_canary
+    ):
+        """Drain sentinels briefly push ZCARD over the cap; not a violation."""
+        _add_agent(canary_db, "a1", max_parallel=2)
+        reload_canary["redis"].zadd(
+            "agent:slots:a1",
+            {"e1": 1.0, "e2": 2.0, "drain-a1-1234567890.5": 3.0},
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s02_no_overbooking as s02
+        assert s02.check(snap) == []
+
+    def test_skipped_when_redis_unavailable(self, canary_db, reload_canary):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        snap = Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            sources_unavailable=["redis: connection refused"],
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=1,
+                    execution_timeout_seconds=900,
+                    slot_ids={"e1", "e2", "e3"},
+                )
+            ],
+        )
+        from canary.invariants import s02_no_overbooking as s02
+        assert s02.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# E-01 — terminal-state closure
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantE01:
+    @staticmethod
+    def _snap(
+        *,
+        snap_time="2026-05-18T12:00:00Z",
+        started_at="2026-05-18T11:00:00Z",
+        timeout=900,
+        running_ids=("e1",),
+    ):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time=snap_time,
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=timeout,
+                    running_exec_ids=set(running_ids),
+                    running_started_at={eid: started_at for eid in running_ids},
+                )
+            ],
+        )
+
+    def test_holds_when_running_row_within_window(self):
+        # Started 100s ago, timeout 900s + buffer 300s = 1200s window.
+        snap = self._snap(
+            snap_time="2026-05-18T12:01:40Z",
+            started_at="2026-05-18T12:00:00Z",
+        )
+        from canary.invariants import e01_terminal_state_closure as e01
+        assert e01.check(snap) == []
+
+    def test_fires_when_running_row_past_timeout_plus_buffer(self):
+        # Started 1 hour ago, timeout 900s + buffer 300s = 1200s window.
+        # 3600s > 1200s → violation.
+        snap = self._snap(
+            snap_time="2026-05-18T12:00:00Z",
+            started_at="2026-05-18T11:00:00Z",
+            timeout=900,
+        )
+        from canary.invariants import e01_terminal_state_closure as e01
+        violations = e01.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "E-01"
+        assert v.severity == "critical"
+        assert v.observed_state["age_seconds"] == 3600
+        assert v.observed_state["execution_timeout_seconds"] == 900
+
+    def test_skips_row_without_started_at(self):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        snap = Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    running_exec_ids={"e1"},
+                    running_started_at={},
+                )
+            ],
+        )
+        from canary.invariants import e01_terminal_state_closure as e01
+        assert e01.check(snap) == []
+
+    def test_skips_row_with_malformed_started_at(self):
+        snap = self._snap(started_at="not-an-iso-timestamp")
+        from canary.invariants import e01_terminal_state_closure as e01
+        assert e01.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# E-05 — dispatched rows have session
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantE05:
+    @staticmethod
+    def _snap(*, started_at, session_id):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    running_exec_ids={"e1"},
+                    running_started_at={"e1": started_at},
+                    running_claude_session_ids={"e1": session_id},
+                )
+            ],
+        )
+
+    def test_holds_when_session_id_present(self):
+        # Old row but with a session — fine.
+        snap = self._snap(
+            started_at="2026-05-18T11:00:00Z",
+            session_id="abc-session-uuid",
+        )
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        assert e05.check(snap) == []
+
+    def test_holds_when_row_within_grace_and_no_session(self):
+        # 30s old, grace is 60s → still in grace.
+        snap = self._snap(
+            started_at="2026-05-18T11:59:30Z",
+            session_id=None,
+        )
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        assert e05.check(snap) == []
+
+    def test_fires_when_old_row_lacks_session(self):
+        # 1 hour old with no session — fires.
+        snap = self._snap(
+            started_at="2026-05-18T11:00:00Z",
+            session_id=None,
+        )
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        violations = e05.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "E-05"
+        assert v.severity == "major"
+        assert v.observed_state["age_seconds"] == 3600
+
+
+# ---------------------------------------------------------------------------
+# B-01 — queue-status coherence
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantB01:
+    @staticmethod
+    def _snap(*, queued_ids, service_count):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    queued_exec_ids=set(queued_ids),
+                    queued_count_via_service=service_count,
+                )
+            ],
+        )
+
+    def test_holds_when_counts_agree(self):
+        snap = self._snap(queued_ids={"q1", "q2"}, service_count=2)
+        from canary.invariants import b01_queue_status_coherence as b01
+        assert b01.check(snap) == []
+
+    def test_holds_when_both_zero(self):
+        snap = self._snap(queued_ids=set(), service_count=0)
+        from canary.invariants import b01_queue_status_coherence as b01
+        assert b01.check(snap) == []
+
+    def test_fires_when_service_undercounts(self):
+        snap = self._snap(queued_ids={"q1", "q2", "q3"}, service_count=1)
+        from canary.invariants import b01_queue_status_coherence as b01
+        violations = b01.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "B-01"
+        assert v.severity == "critical"
+        assert v.observed_state["service_count"] == 1
+        assert v.observed_state["snapshot_count"] == 3
+
+    def test_fires_when_service_overcounts(self):
+        snap = self._snap(queued_ids={"q1"}, service_count=5)
+        from canary.invariants import b01_queue_status_coherence as b01
+        violations = b01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["service_count"] == 5
+        assert violations[0].observed_state["snapshot_count"] == 1
+
+    def test_skips_when_service_count_none(self):
+        """Snapshot built without the `database` facade reachable."""
+        snap = self._snap(queued_ids={"q1"}, service_count=None)
+        from canary.invariants import b01_queue_status_coherence as b01
+        assert b01.check(snap) == []
 
 
 # ---------------------------------------------------------------------------
