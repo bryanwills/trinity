@@ -444,16 +444,22 @@ async def create_folder(path: str):
     Returns:
         Success status and directory info
     """
-    # Security: Only allow workspace access (mirrors update_file)
-    allowed_base = Path("/home/developer")
+    # Security: Only allow workspace access. allowed_base is resolved so the
+    # containment check below compares resolved-path to resolved-path.
+    allowed_base = Path("/home/developer").resolve()
 
     if path.startswith('/'):
         requested_path = Path(path).resolve()
     else:
         requested_path = (allowed_base / path).resolve()
 
-    # Ensure requested path is within workspace
-    if not str(requested_path).startswith(str(allowed_base)):
+    # Ensure the resolved path is strictly within the workspace. Uses
+    # resolved-path containment via is_relative_to() rather than
+    # str.startswith(), which has a sibling-prefix bypass
+    # (e.g. "/home/developer-x".startswith("/home/developer") is True).
+    # This also acts as the CWE-022 path-traversal barrier — .resolve()
+    # collapses any "../" before the check. (CodeQL py/path-injection)
+    if not requested_path.is_relative_to(allowed_base):
         raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
 
     # Cannot create the home directory itself
