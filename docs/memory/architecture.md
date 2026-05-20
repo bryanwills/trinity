@@ -475,7 +475,7 @@ picks up on its next poll. (#389 S1a)
 
 ## API Endpoints
 
-### Agents (32 endpoints)
+### Agents (33 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/agents` | List all agents |
@@ -498,6 +498,7 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/stats` | Get live telemetry |
 | GET | `/api/agents/{name}/activity` | Get activity summary |
 | GET | `/api/agents/{name}/info` | Get template metadata |
+| GET | `/api/agents/{name}/a2a/agent-card` | A2A v1.0 Agent Card for external orchestrator discovery (#737) |
 | GET | `/api/agents/{name}/files` | List workspace files (tree structure) |
 | GET | `/api/agents/{name}/files/download` | Download file |
 | GET | `/api/agents/{name}/folders` | Get shared folder config (NEW: 2025-12-13) |
