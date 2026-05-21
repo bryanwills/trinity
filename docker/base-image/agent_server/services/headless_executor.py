@@ -704,14 +704,25 @@ def _finalize_headless_result(
         # likely an auth failure even if we didn't see the exact pattern.
         # Issue #516: require return_code > 0 — signal exits are handled above and
         # would otherwise produce a false positive here (zero tokens after kill).
+        # #904: do NOT phrase this as an authentication issue. The confirmed-auth
+        # path (`_is_auth_failure_message` branch above) already fired if there
+        # was a real signal; reaching this code means exit > 0 with no
+        # recognized auth indicator AND no signal classification — the cause
+        # is genuinely unknown (OOM surfacing as exit 1, broken pipe from the
+        # orphan killer, real auth, etc.). Naming "authentication" in the
+        # detail caused SUB-003's substring matcher to fire a futile
+        # auto-switch on every OOM and burn the 2h skip-list slot.
         if ctx.return_code > 0 and ctx.metadata.input_tokens == 0 and ctx.metadata.output_tokens == 0:
             logger.warning(
-                f"[Headless Task] Zero tokens processed with exit code {ctx.return_code} — "
-                f"likely auth failure. Stderr: {error_preview[:200]}"
+                f"[Headless Task] Zero tokens processed with exit code {ctx.return_code}. "
+                f"Stderr: {error_preview[:200]}"
             )
             raise HTTPException(
                 status_code=503,
-                detail=f"Execution failed with no output (possible authentication issue): {error_preview[:300]}"
+                detail=(
+                    f"Execution failed with no output (exit code {ctx.return_code}): "
+                    f"{error_preview[:300]}"
+                ),
             )
 
         # Also check if stderr contains a rate limit message

@@ -152,7 +152,22 @@ def _diagnose_exit_failure(return_code: int, metadata: Optional["ExecutionMetada
         # Issue #81: This error message was misleading when the actual issue was
         # model incompatibility. Now that we default to 'sonnet' for headless tasks,
         # this message is more likely to be accurate.
-        return "Subscription token may be expired or revoked. Generate a new one with 'claude setup-token'."
+        # #904: stop declaring "token expired" as the diagnosis when we have
+        # zero evidence — exit > 0 with no stderr happens on cgroup OOM kills
+        # whose signal classification didn't fire (e.g. claude wrapping the
+        # SIGKILL as a clean exit 1) just as often as on real token expiry.
+        # The old wording fed SUB-003's substring matcher and triggered a
+        # futile auto-switch on every OOM. Avoid any phrase that
+        # `_is_auth_failure_message` matches (no "token expired",
+        # "setup-token", "oauth token", etc.) so the result can't loop back
+        # into the auth-503 path when used as `error_preview` in
+        # `headless_executor.py`.
+        return (
+            f"Process failed with exit code {return_code} and no diagnostic output. "
+            f"Most likely causes: OOM kill (raise the agent's memory limit), "
+            f"schedule timeout (extend timeout_seconds), or container restart. "
+            f"Check the agent container logs."
+        )
 
     # Exit code hints
     hints = {

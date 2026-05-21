@@ -380,6 +380,103 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Key Features**: SIGINT/SIGKILL flow, queue release, activity tracking
 - **Flow**: `docs/memory/feature-flows/execution-termination.md`
 
+### 10.4.1 Signal-Exit Classification Correctness (#904)
+- **Status**: ✅ Implemented (2026-05-21)
+- **GitHub Issue**: #904
+- **Description**: When a Claude subprocess inside an agent container is killed by an external signal (SIGKILL from cgroup OOM, schedule timeout, operator cancel), the error path must classify it as a signal kill — not as a subscription auth failure. Previously, the chat (`/api/chat`) path on the agent server lacked the `_classify_signal_exit` call that the headless path had (added by #516), so the same OOM kill produced different error strings depending on which entry point dispatched the work. The fallback heuristic in `headless_executor.py` also worded the zero-tokens 503 detail as "(possible authentication issue)", which downstream substring matchers in `services/subscription_auto_switch.py` and `src/scheduler/service.py` treated as a real auth signal — firing a futile SUB-003 auto-switch on every cgroup OOM and burning the 2h skip-list slot for the alternative subscription.
+- **Key Features**:
+  - Chat path (`docker/base-image/agent_server/services/claude_code.py`) now calls `_classify_signal_exit(return_code, metadata)` before the generic `if return_code != 0` block — same contract as the headless path. SIGKILL/SIGTERM/SIGINT exits raise 504 with the explicit "Execution terminated by SIGKILL after N tool calls / M turns" detail.
+  - `headless_executor.py` zero-tokens fallback (the `return_code > 0 and input_tokens == 0 and output_tokens == 0` branch) no longer says "authentication issue" — the new detail is `"Execution failed with no output (exit code N): {stderr}"`. The dedicated "Authentication failure" 503 raised on a confirmed `is_auth_failure_message` match a few lines above remains the only path that surfaces the auth phrasing.
+  - `_diagnose_exit_failure` (line 155, `error_classifier.py`) no longer returns the bare "Subscription token may be expired or revoked. Generate a new one with 'claude setup-token'." string for the OAuth-without-API-key case. The new wording is "Process failed with exit code N and no diagnostic output. Common causes: OOM kill (raise agent memory), schedule timeout (extend timeout_seconds), expired subscription token (`claude setup-token`)." — it lists token expiry as one of several possibilities instead of declaring it the diagnosis.
+- **SUB-003 interaction**: see §20.4 — `is_auth_failure` now skips messages containing signal/OOM/timeout markers so even if a residual wording carries an indicator, an unambiguous SIGKILL won't trigger auto-switch.
+- **Files**:
+  - `docker/base-image/agent_server/services/claude_code.py` — wire `_classify_signal_exit`
+  - `docker/base-image/agent_server/services/headless_executor.py` — reword zero-tokens 503
+  - `docker/base-image/agent_server/services/error_classifier.py` — reword `_diagnose_exit_failure` OAuth-only branch
+  - `src/backend/services/subscription_auto_switch.py` — negative markers in `is_auth_failure`
+  - `src/scheduler/service.py` — same negative markers in `_is_auth_failure`
+
+### 10.4.2 Backend Agent-Call Semaphore (#904 RC-1)
+- **Status**: ✅ Implemented (2026-05-21)
+- **GitHub Issue**: #904 (RC-1 surface)
+- **Description**: Backpressure on outbound agent HTTP calls from
+  `task_execution_service.agent_post_with_retry`. Before this, one
+  misbehaving agent whose `/api/chat` or `/api/task` held for several
+  minutes could leave N parallel coroutines `await`ing on `httpx.post`
+  while each periodically issued **synchronous** `sqlite3` calls
+  (`db/connection.py`). Under enough contention the synchronous
+  writes stalled the event loop long enough that the Docker
+  healthcheck (10s) flipped the backend to `unhealthy` and the
+  dashboard's parallel API fan-out (`/api/agents`,
+  `/api/ops/fleet/health`, `/api/operator-queue?status=pending`,
+  `/api/agents/execution-stats`) appeared frozen to the operator.
+  Restarting the offending agent container was the only workaround.
+- **Key Features**:
+  - **Per-agent semaphore** sized to the agent's
+    `max_parallel_tasks` (default 3, set via
+    `db.get_max_parallel_tasks`). Lazily created the first time a
+    call to that agent reaches the wrapper. Limits how many backend
+    coroutines can be mid-call to a single agent at once — a
+    misbehaving agent can never dominate the backend's available
+    coroutines beyond its own ceiling.
+  - **Global semaphore** capped at
+    `BACKEND_AGENT_CALL_LIMIT` env var (default 8). Bounds the total
+    fan-out across all agents. With a default of 8, the backend
+    always has spare async capacity for dashboard / health requests
+    even when every agent is mid-call.
+  - **Backward-compatible queue wait**: acquires use
+    `asyncio.wait_for(..., timeout=BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S)`
+    with a **default of 3600s** — matches the platform's max
+    `execution_timeout_seconds` (TIMEOUT-001, default 3600s, #665).
+    Pre-#904 the worst-case wall-clock per call was the agent
+    timeout (~610s default); 3600s leaves a generous margin so any
+    call that would have eventually succeeded still does. The cap
+    is NOT a "fail short-tail calls fast" knob — it's a deadlock
+    safety valve (see below). Past the timeout the wrapper raises
+    `BackendAgentCallBudgetExhausted`, translated to HTTP 503 in
+    `execute_task` / `routers/chat.py`. Set
+    `BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S=0` to disable entirely (opt-in
+    — accepts deadlock risk for zero false 503s).
+  - **Deadlock safety valve**: agent-to-agent chains
+    (`chat_with_agent` MCP tool, X→Y→Z collaborations) can
+    deadlock when concurrent chain depth exceeds the global
+    semaphore. Each chain holds a slot for its outer caller while
+    waiting on the next hop, which itself wants a slot. With
+    `cap=8` and >8 simultaneous deep chains the system would hang
+    forever without a timeout. The 3600s ceiling surfaces such a
+    deadlock as a 503 within an hour, lets the queue drain, and
+    keeps the system unstuck.
+  - **Fail-closed-but-fair**: when the per-agent or global cap is
+    saturated, the caller waits the configured timeout, then 503s.
+    The agent's task-execution slot
+    (`CapacityManager.admit`) is released on the 503 path so the
+    same `execution_id` can be retried.
+  - **Configurable** via env vars (no DB schema change):
+    - `BACKEND_AGENT_CALL_LIMIT` (int, default 8) — global cap
+    - `BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S` (float, default 3600) —
+      acquire timeout; 0 = wait forever
+- **Observability**:
+  - `[TaskExecService] Acquired agent-call slot for {agent} (agent_inflight=N/M, global_inflight=K/L)`
+    on every successful acquire (debug level for hot path).
+  - `[TaskExecService] Backend call budget exhausted for {agent}
+    after {wait_ms}ms (agent_cap={N}, global_cap={M})` warning on
+    timeout — surfaces in Vector platform.json.
+- **Out of scope (separate follow-ups)**:
+  - **Sync→async DB**: the sqlite3 calls that stall the event loop
+    remain synchronous. The semaphore mitigates the contention by
+    bounding fan-out, but a true fix needs
+    `run_in_executor`-wrapped DB calls. Larger refactor; tracked
+    separately.
+  - **RC-4 cgroup OOM observability**: not addressed in this PR.
+- **Files**:
+  - `src/backend/services/task_execution_service.py` — semaphore
+    primitives + `agent_post_with_retry` integration
+  - `src/backend/services/agent_call_limiter.py` — extracted
+    primitives (kept slim — module-level singletons +
+    `BackendAgentCallBudgetExhausted` exception)
+  - `src/backend/config.py` — env-var read of the two new knobs
+  - `docker-compose.yml` — env-var pass-through for backend service
+
 ### 10.5 Model Selection for Tasks & Schedules (MODEL-001)
 - **Status**: ✅ Implemented (2026-03-02)
 - **Description**: Select which Claude model to use for task execution and scheduled runs
@@ -1404,6 +1501,7 @@ All subsections 18.1–18.10 were deleted with the code. Flow docs archived at `
   - `src/backend/routers/subscriptions.py` - Setting endpoints
   - `src/backend/routers/chat.py` - 429 interception hooks
   - `src/frontend/src/views/Settings.vue` - Toggle UI
+- **Negative markers on `is_auth_failure` (#904, 2026-05-21)**: substring match on `AUTH_INDICATORS` now short-circuits to False when the error message also contains an unambiguous signal-kill / OOM / timeout marker (`sigkill`, `sigterm`, `sigint`, `exit code -9`, `exit code 137`, `exit code 143`, `out of memory`, `oom`, `memory cgroup`, `terminated by`, `killed by`). Prevents the SUB-003 trigger from firing on cgroup OOM kills whose detail string happens to contain a word like "token" or "authentication" via downstream wrapping. The same exclusion list lives in `src/scheduler/service.py:_is_auth_failure` to keep the two surfaces from drifting (see §10.4.1).
 
 ### 20.5 Per-Subscription Usage Tracking (SUB-004)
 - **Status**: ✅ Implemented (2026-04-01)
