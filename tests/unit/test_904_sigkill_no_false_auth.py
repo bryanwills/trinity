@@ -29,6 +29,40 @@ _BACKEND = _REPO_ROOT / "src" / "backend"
 _SCHEDULER = _REPO_ROOT / "src" / "scheduler"
 
 
+# `_load_backend_is_auth_failure` and the scheduler slice both stub
+# heavy backend imports (`database`, `db_models`, apscheduler.*) via
+# `sys.modules[name] = stub` so the pure-function code under test
+# exec's without pulling in the real `DatabaseManager()` / APScheduler
+# objects. The sanctioned snapshot/restore pattern (precedent:
+# `tests/unit/test_agent_cleanup_parity.py`) tells
+# `tests/lint_sys_modules.py:_has_stubbed_module_names_helper` to
+# exempt this file from the no-bare-`sys.modules`-mutation lint.
+_STUBBED_MODULE_NAMES = [
+    "database",
+    "db_models",
+    "apscheduler",
+    "apscheduler.schedulers",
+    "apscheduler.schedulers.asyncio",
+    "apscheduler.triggers",
+    "apscheduler.triggers.cron",
+    "apscheduler.executors",
+    "apscheduler.executors.asyncio",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {n: sys.modules.get(n) for n in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 # -----------------------------------------------------------------------------
 # subscription_auto_switch.is_auth_failure  — backend side
 # -----------------------------------------------------------------------------
