@@ -24,6 +24,44 @@ while _BACKEND_STR in sys.path:
 sys.path.insert(0, _BACKEND_STR)
 
 
+# Sibling tests (e.g. `test_execution_retention_prune.py`,
+# `test_audit_retention_prune.py`, `test_session_operations.py`) stub
+# `sys.modules["db.<sub>"]` with `importlib`-loaded modules bound at
+# exec time to *their* tmp-DB-pointing `db.connection`. Those stubs
+# are not restored on teardown, so a later import from this test
+# would return a stale stub whose `get_db_connection()` points at a
+# deleted tmp file — surfacing as `sqlite3.OperationalError: no such
+# table: agent_schedules` / `users` under pytest-randomly seeds that
+# happen to run those tests first.
+#
+# Sanctioned `_STUBBED_MODULE_NAMES` + autouse `_restore_sys_modules`
+# pattern (precedent: `tests/unit/test_agent_cleanup_parity.py`) —
+# snapshots the real modules, defensively pops any stale stubs so
+# this file's imports re-resolve fresh, and restores on teardown so
+# *we* don't pollute sibling tests either.
+_STUBBED_MODULE_NAMES = [
+    "db.schedules",
+    "db.users",
+    "db.agents",
+    "db.monitoring",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {n: sys.modules.get(n) for n in _STUBBED_MODULE_NAMES}
+    for name in _STUBBED_MODULE_NAMES:
+        sys.modules.pop(name, None)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 def _make_db_schema(conn: sqlite3.Connection) -> None:
     """Minimal schema covering agent_schedules + schedule_executions + users."""
     cur = conn.cursor()
