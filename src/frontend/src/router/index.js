@@ -108,13 +108,25 @@ const routes = [
     path: '/network',
     redirect: '/'
   },
-  // #847 Phase 0 — enterprise SSO admin view. The Vue source ships in
-  // the OSS bundle but the route is gated by `requiresEntitlement`
-  // ('sso' must be in `enterpriseStore.enterpriseFeatures`). NavBar
-  // hides the link when not entitled. Backend `/api/enterprise/sso/*`
-  // returns 404 in OSS-only builds (no submodule mounted), so even a
-  // direct URL visit shows the view's empty/error state cleanly. See
-  // `docs/planning/ENTERPRISE_ARCHITECTURE.md`.
+  // #847 Phase 0 — enterprise tab. The Vue source ships in the OSS
+  // bundle but routes are gated by `requiresEntitlement` (must be in
+  // `enterpriseStore.enterpriseFeatures`). Backend
+  // `/api/enterprise/*` returns 404 in OSS-only builds (no submodule
+  // mounted), so even a direct URL visit shows the view's empty
+  // state cleanly. See `docs/planning/ENTERPRISE_ARCHITECTURE.md`.
+  //
+  // Landing page uses the special `requiresAnyEntitlement: true`
+  // marker — visible whenever ANY enterprise feature is entitled,
+  // so OSS users with one of {sso, scim, siem, …} can reach the
+  // catalogue overview. Per-feature routes below use the specific
+  // `requiresEntitlement: '<id>'` so non-entitled features 302 to
+  // the catalogue.
+  {
+    path: '/enterprise',
+    name: 'EnterpriseLanding',
+    component: () => import('../views/enterprise/Index.vue'),
+    meta: { requiresAuth: true, requiresAnyEntitlement: true }
+  },
   {
     path: '/enterprise/sso',
     name: 'EnterpriseSSO',
@@ -199,17 +211,28 @@ router.beforeEach(async (to, from, next) => {
   // Check if route requires authentication
   if (to.meta.requiresAuth) {
     if (authStore.isAuthenticated) {
-      // #847 — enterprise entitlement guard. For routes carrying
-      // `meta.requiresEntitlement`, ensure the named feature is in
-      // the server-driven entitlement list before navigation. NavBar
-      // already hides links to non-entitled routes; this guard
+      // #847 — enterprise entitlement guard.
+      // Two modes:
+      //   * `meta.requiresEntitlement: '<id>'` — gate on the named
+      //     feature. Used by `/enterprise/sso` etc.
+      //   * `meta.requiresAnyEntitlement: true` — gate on
+      //     `hasAnyEnterprise` (the catalogue landing page is
+      //     reachable whenever any enterprise feature is entitled).
+      // NavBar already hides links to non-entitled routes; the guard
       // catches direct URL visits / bookmarks.
       const entitlement = to.meta.requiresEntitlement
-      if (entitlement) {
+      const requireAny = to.meta.requiresAnyEntitlement
+      if (entitlement || requireAny) {
         const { useEnterpriseStore } = await import('../stores/enterprise')
         const enterpriseStore = useEnterpriseStore()
         await enterpriseStore.loadFeatureFlags()
-        if (!enterpriseStore.isEntitled(entitlement)) {
+        if (entitlement && !enterpriseStore.isEntitled(entitlement)) {
+          // Non-entitled per-feature → bounce to the catalogue if
+          // the user can see ANY enterprise feature, else dashboard.
+          next(enterpriseStore.hasAnyEnterprise ? '/enterprise' : '/')
+          return
+        }
+        if (requireAny && !enterpriseStore.hasAnyEnterprise) {
           next('/')
           return
         }

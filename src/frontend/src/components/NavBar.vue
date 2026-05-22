@@ -66,15 +66,18 @@
             >
               Settings
             </router-link>
-            <!-- #847 Phase 0 — Enterprise nav link, only rendered when the
-                 enterprise SSO feature is entitled. The enterprise frontend
-                 submodule registers `/enterprise/sso`; we don't link to it
-                 if the user can't reach it. The store's
-                 `featureFlagsLoaded` guard means this is hidden until the
-                 first fetch resolves (a few hundred ms after login). -->
+            <!-- #847 Phase 0 — Enterprise catalogue landing. Visible
+                 iff ANY enterprise feature is entitled
+                 (`hasAnyEnterprise`). The landing lists each enterprise
+                 feature as a card with status; non-entitled and
+                 Coming-soon features render disabled. OSS-only builds
+                 have an empty `enterpriseFeatures` list so this link
+                 is hidden entirely. The store's `featureFlagsLoaded`
+                 guard means the link doesn't flicker on first paint
+                 (loadFeatureFlags fires in onMounted below). -->
             <router-link
-              v-if="enterpriseStore.isEntitled('sso')"
-              to="/enterprise/sso"
+              v-if="enterpriseStore.hasAnyEnterprise"
+              to="/enterprise"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/enterprise') }"
             >
@@ -280,7 +283,7 @@ const themeStore = useThemeStore()
 const notificationsStore = useNotificationsStore()
 const operatorQueueStore = useOperatorQueueStore()
 // #847 Phase 0 — feature-flags load is fired on mount below; the
-// `Enterprise` nav link template is `v-if="enterpriseStore.isEntitled('sso')"`.
+// `Enterprise` nav link template is `v-if="enterpriseStore.hasAnyEnterprise"`.
 const enterpriseStore = useEnterpriseStore()
 const { isConnected } = useWebSocket()
 
