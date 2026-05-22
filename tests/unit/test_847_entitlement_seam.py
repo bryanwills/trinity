@@ -219,8 +219,13 @@ def test_main_py_uses_conditional_enterprise_import():
         "enterprise import must be inside a try/except ImportError block "
         "so OSS-only builds (no submodule) boot cleanly"
     )
-    # And the trailing block should catch ImportError
-    tail = src[idx : idx + 400]
+    # And the trailing block should catch ImportError. Window is
+    # generous (~1500 chars) because the success-branch body has
+    # comment lines explaining the `print(..., flush=True)` rationale
+    # — easy for a future tweak to push the `except` past a tight
+    # search window without changing the contract this test is
+    # actually guarding.
+    tail = src[idx : idx + 1500]
     assert "except ImportError" in tail, (
         "enterprise import must be guarded by `except ImportError`"
     )
