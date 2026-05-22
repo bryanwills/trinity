@@ -89,8 +89,7 @@ def test_oss_only_denies_every_feature_even_when_registered(monkeypatch, value):
     """TRINITY_OSS_ONLY hard-overrides the registry. Even after
     `register_module("sso")`, the deny path fires."""
     monkeypatch.setenv("TRINITY_OSS_ONLY", value)
-    if "services.entitlement_service" in sys.modules:
-        del sys.modules["services.entitlement_service"]
+    monkeypatch.delitem(sys.modules, "services.entitlement_service", raising=False)
     from services.entitlement_service import EntitlementService
 
     svc = EntitlementService()
@@ -103,8 +102,7 @@ def test_oss_only_denies_every_feature_even_when_registered(monkeypatch, value):
 def test_oss_only_falsy_keeps_registry_behaviour(monkeypatch, value):
     """Falsy spellings leave the registry behaviour intact."""
     monkeypatch.setenv("TRINITY_OSS_ONLY", value)
-    if "services.entitlement_service" in sys.modules:
-        del sys.modules["services.entitlement_service"]
+    monkeypatch.delitem(sys.modules, "services.entitlement_service", raising=False)
     from services.entitlement_service import EntitlementService
 
     svc = EntitlementService()
@@ -118,14 +116,18 @@ def test_oss_only_falsy_keeps_registry_behaviour(monkeypatch, value):
 # -----------------------------------------------------------------------------
 
 
-def _import_requires_entitlement_or_skip():
+def _import_requires_entitlement_or_skip(monkeypatch):
     """Import ``dependencies.requires_entitlement`` or skip if backend
     venv isn't available locally (e.g. ``passlib`` missing in a stub
     dev environment). CI installs the full backend deps so this
-    skip never fires there."""
+    skip never fires there.
+
+    Caller passes the test's monkeypatch fixture so the stale
+    `dependencies` sys.modules entry (left by another test in the
+    same session) is removed via the auto-restoring API rather than
+    a bare `del sys.modules[...]` (which the lint check forbids)."""
+    monkeypatch.delitem(sys.modules, "dependencies", raising=False)
     try:
-        if "dependencies" in sys.modules:
-            del sys.modules["dependencies"]
         from dependencies import requires_entitlement
         return requires_entitlement
     except ImportError as e:
@@ -136,9 +138,8 @@ def test_requires_entitlement_allows_when_entitled(monkeypatch):
     """The Depends() callable returns None on allow. Allow path
     requires registering the module first — empty registry denies."""
     monkeypatch.delenv("TRINITY_OSS_ONLY", raising=False)
-    if "services.entitlement_service" in sys.modules:
-        del sys.modules["services.entitlement_service"]
-    requires_entitlement = _import_requires_entitlement_or_skip()
+    monkeypatch.delitem(sys.modules, "services.entitlement_service", raising=False)
+    requires_entitlement = _import_requires_entitlement_or_skip(monkeypatch)
 
     # Register "sso" so the dependency allows the call.
     from services.entitlement_service import entitlement_service
@@ -153,9 +154,8 @@ def test_requires_entitlement_raises_403_when_denied(monkeypatch):
     from fastapi import HTTPException
 
     monkeypatch.setenv("TRINITY_OSS_ONLY", "1")
-    if "services.entitlement_service" in sys.modules:
-        del sys.modules["services.entitlement_service"]
-    requires_entitlement = _import_requires_entitlement_or_skip()
+    monkeypatch.delitem(sys.modules, "services.entitlement_service", raising=False)
+    requires_entitlement = _import_requires_entitlement_or_skip(monkeypatch)
 
     inner = requires_entitlement("sso")
     with pytest.raises(HTTPException) as exc:
@@ -173,8 +173,7 @@ def test_set_for_testing_swaps_singleton(monkeypatch):
     """Replacing the singleton lets tests force specific behaviour
     without monkeypatching the env or sys.modules."""
     monkeypatch.delenv("TRINITY_OSS_ONLY", raising=False)
-    if "services.entitlement_service" in sys.modules:
-        del sys.modules["services.entitlement_service"]
+    monkeypatch.delitem(sys.modules, "services.entitlement_service", raising=False)
     import services.entitlement_service as ent_mod
 
     class _StubFalse:

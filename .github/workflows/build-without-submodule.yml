@@ -63,9 +63,14 @@ jobs:
 
       - name: Generate ephemeral secrets for boot
         run: |
+          # ADMIN_PASSWORD must meet OWASP ASVS 2.1 complexity
+          # (length 12+, upper, lower, digit, special) since
+          # /api/setup/admin-password validates it. Use a fixed
+          # known-strong test password — this container is ephemeral
+          # and CI-only, no security exposure.
           {
             echo "SECRET_KEY=$(openssl rand -hex 32)"
-            echo "ADMIN_PASSWORD=$(openssl rand -hex 16)"
+            echo "ADMIN_PASSWORD=Trinity-CI-Test-2026!Aa1"
             echo "REDIS_PASSWORD=$(openssl rand -hex 24)"
             echo "REDIS_BACKEND_PASSWORD=$(openssl rand -hex 24)"
             echo "CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32)"
@@ -92,6 +97,31 @@ jobs:
             exit 1
           )
 
+      - name: Complete first-time setup
+        run: |
+          # A fresh DB requires first-time setup before /api/token works
+          # (`is_setup_completed()` is checked in routers/auth.py). The
+          # setup token is printed to stdout at backend boot; grep it
+          # from container logs and POST to /api/setup/admin-password.
+          # Without this, the auth-gated assertions below get HTTP 403
+          # from /api/token and curl-f returns empty body.
+          ADMIN_PASSWORD=$(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)
+          SETUP_TOKEN=$(docker logs trinity-backend 2>&1 | grep -oE 'Setup token: [A-Za-z0-9_-]+' | head -1 | awk '{print $3}')
+          if [ -z "$SETUP_TOKEN" ]; then
+            echo "::error::Could not extract setup token from backend logs"
+            docker logs trinity-backend --tail 200 | grep -i setup
+            exit 1
+          fi
+          echo "Found setup token (length ${#SETUP_TOKEN})"
+          # Schema (src/backend/routers/setup.py:28): password,
+          # confirm_password, setup_token. Password must meet OWASP
+          # complexity — ADMIN_PASSWORD above is set to a known-strong
+          # value to satisfy that.
+          RESP=$(curl -sf -X POST http://localhost:8000/api/setup/admin-password \
+            -H "Content-Type: application/json" \
+            -d "{\"setup_token\":\"${SETUP_TOKEN}\",\"password\":\"${ADMIN_PASSWORD}\",\"confirm_password\":\"${ADMIN_PASSWORD}\"}")
+          echo "Setup response: $RESP"
+
       - name: Assert OSS-only feature flags
         run: |
           ADMIN_PASSWORD=$(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)
@@ -110,14 +140,11 @@ jobs:
 
       - name: Assert SSO router not mounted
         run: |
-          ADMIN_PASSWORD=$(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)
-          TOKEN=$(curl -sf -X POST http://localhost:8000/api/token \
-            -d "username=admin&password=${ADMIN_PASSWORD}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-          # Without the enterprise submodule, the /api/enterprise/sso router
-          # is never mounted — FastAPI returns 404 for any path under it.
+          # No auth needed — the /api/enterprise/sso/* router is
+          # entitlement-gated (not user-gated). When the submodule
+          # is absent, the router never mounts and any path under
+          # /api/enterprise returns 404.
           CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer $TOKEN" \
             http://localhost:8000/api/enterprise/sso/providers)
           if [ "$CODE" != "404" ]; then
             echo "::error::Expected 404 from /api/enterprise/sso/providers in OSS-only build, got HTTP $CODE"
