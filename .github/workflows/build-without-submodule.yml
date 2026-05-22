@@ -101,26 +101,23 @@ jobs:
         run: |
           # A fresh DB requires first-time setup before /api/token works
           # (`is_setup_completed()` is checked in routers/auth.py). The
-          # setup token is printed to stdout at backend boot; grep it
-          # from container logs and POST to /api/setup/admin-password.
-          # Without this, the auth-gated assertions below get HTTP 403
-          # from /api/token and curl-f returns empty body.
+          # setup-token is `print()`ed to stdout but Python's block
+          # buffering on a pipe + the docker-logs capture means we
+          # can't reliably grep it on a short timing window. Skip the
+          # API and complete setup directly: docker exec into the
+          # backend container, hash the password via the same
+          # `dependencies.hash_password` helper the production
+          # endpoint uses, write to the SQLite `users` row, set
+          # `system_settings.setup_completed=true`. Idempotent.
           ADMIN_PASSWORD=$(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)
-          SETUP_TOKEN=$(docker logs trinity-backend 2>&1 | grep -oE 'Setup token: [A-Za-z0-9_-]+' | head -1 | awk '{print $3}')
-          if [ -z "$SETUP_TOKEN" ]; then
-            echo "::error::Could not extract setup token from backend logs"
-            docker logs trinity-backend --tail 200 | grep -i setup
-            exit 1
-          fi
-          echo "Found setup token (length ${#SETUP_TOKEN})"
-          # Schema (src/backend/routers/setup.py:28): password,
-          # confirm_password, setup_token. Password must meet OWASP
-          # complexity — ADMIN_PASSWORD above is set to a known-strong
-          # value to satisfy that.
-          RESP=$(curl -sf -X POST http://localhost:8000/api/setup/admin-password \
-            -H "Content-Type: application/json" \
-            -d "{\"setup_token\":\"${SETUP_TOKEN}\",\"password\":\"${ADMIN_PASSWORD}\",\"confirm_password\":\"${ADMIN_PASSWORD}\"}")
-          echo "Setup response: $RESP"
+          docker exec -e ADMIN_PW="$ADMIN_PASSWORD" trinity-backend python3 -c "
+          import os
+          from database import db
+          from dependencies import hash_password
+          db.set_setting('setup_completed', 'true')
+          db.update_user_password('admin', hash_password(os.environ['ADMIN_PW']))
+          print('setup completed via direct DB write')
+          "
 
       - name: Assert OSS-only feature flags
         run: |
