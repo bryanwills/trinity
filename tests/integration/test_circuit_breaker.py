@@ -304,7 +304,11 @@ class TestDormantState:
         assert fake_db.create_operator_queue_item.call_count == 1
         called_agent, item = fake_db.create_operator_queue_item.call_args.args
         assert called_agent == agent_name
-        assert item["type"] == "circuit_breaker_dormant"
+        # Type is the generic 'alert' so the existing Operating Room UI
+        # renders an Acknowledge control. The narrower CB-specific marker
+        # is in context.alert_type for callers that need to filter.
+        assert item["type"] == "alert"
+        assert item["context"]["alert_type"] == "circuit_breaker_dormant"
         assert item["priority"] == "high"
         assert item["status"] == "pending"
         assert item["agent_name"] == agent_name
@@ -352,6 +356,53 @@ class TestDormantState:
         assert cs.allow_request() is True
         # The probe-lock is held, so a second request right after is denied.
         assert cs.allow_request() is False
+
+    def test_dormant_probe_failure_rearms_full_dormant_cooldown(
+        self, agent_name, redis_client, monkeypatch
+    ):
+        """#921: when a dormant probe fails, next_probe_at must be rearmed to
+        the full DORMANT_COOLDOWN — NOT the open-state exponential backoff.
+
+        Locks in the cadence the fix promises: one probe per ~1h while
+        dormant, regardless of how many times the agent stays unreachable.
+        Without this guarantee a dormant CB could churn through fast
+        retries via the open-state backoff curve, defeating the purpose."""
+        # Wide gap between the two cooldown families so the assertion can
+        # distinguish them: dormant=0.5s, open exp cap=0.001s.
+        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_COOLDOWN_SECONDS", 0.5)
+        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.001)
+        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.001)
+
+        cs = agent_client.CircuitState(agent_name)
+        # Drive into dormant.
+        for _ in range(
+            agent_client.CIRCUIT_FAILURE_THRESHOLD
+            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            + 2
+        ):
+            if cs.record_failure() == "dormant":
+                break
+        assert cs.state == "dormant"
+
+        # Wait past the cooldown, take the probe, then simulate it failing.
+        time.sleep(0.6)
+        assert cs.allow_request() is True  # probe admitted
+        cs.record_failure()                # probe failed → record_failure on dormant
+
+        # next_probe_at should be ~0.5s in the future (DORMANT_COOLDOWN),
+        # not ~0.001s (open-state max). Use the redis_client fixture to
+        # read the raw value; the hash field is a unix timestamp.
+        key = f"agent:circuit:{agent_name}"
+        next_probe_at = float(redis_client.hget(key, "next_probe_at"))
+        gap = next_probe_at - time.time()
+        assert agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS - 0.1 <= gap <= agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS + 0.1, (
+            f"expected gap ~{agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS}s "
+            f"(dormant cooldown), got {gap:.3f}s — open-state backoff would "
+            f"have yielded ~{agent_client.CIRCUIT_MAX_COOLDOWN_SECONDS}s"
+        )
+        # Still dormant, no state slide back to open.
+        assert cs.state == "dormant"
 
 
 # ── Probe-lock cross-worker semantics ────────────────────────────────────────

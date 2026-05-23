@@ -286,10 +286,15 @@ def _emit_dormant_alert(agent_name: str) -> None:
         from database import db
         from utils.helpers import utc_now_iso
         now = utc_now_iso()
+        # Use the generic 'alert' type so the existing Operating Room UI
+        # (QueueCard.vue / QueueItemDetail.vue branch on 'approval|question|alert')
+        # renders an Acknowledge control. The narrower discriminator goes in
+        # context.alert_type for callers that want to filter — same pattern
+        # the existing `sync_failing` work should adopt when its UI is touched.
         item = {
             "id": f"cb-dormant-{agent_name}-{now}",
             "agent_name": agent_name,
-            "type": "circuit_breaker_dormant",
+            "type": "alert",
             "status": "pending",
             "priority": "high",
             "title": "Agent circuit breaker DORMANT",
@@ -302,6 +307,7 @@ def _emit_dormant_alert(agent_name: str) -> None:
             ),
             "context": {
                 "agent_name": agent_name,
+                "alert_type": "circuit_breaker_dormant",
                 "transition": "dormant",
                 "dormant_after_open_probes": CIRCUIT_DORMANT_AFTER_OPEN_PROBES,
                 "dormant_cooldown_seconds": CIRCUIT_DORMANT_COOLDOWN_SECONDS,
