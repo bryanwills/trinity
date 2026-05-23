@@ -267,6 +267,57 @@ def is_circuit_failure(exc: BaseException) -> bool:
     return isinstance(exc, CIRCUIT_FAILURE_EXCEPTIONS)
 
 
+# ----- Dormant-transition notification (#921) -------------------------------
+#
+# When the breaker enters dormant, surface it in the Operating Room queue so
+# operators see "agent silently failing scheduled tasks" without having to
+# grep logs. Fire-and-forget: if the DB insert blows up, we still log the
+# transition and the breaker is unaffected. Best-effort by design.
+
+def _emit_dormant_alert(agent_name: str) -> None:
+    """Insert a circuit_breaker_dormant operator-queue entry.
+
+    Called from CircuitState.record_failure on the closed/open → dormant
+    transition. The Lua atomicity of _RECORD_FAILURE_LUA guarantees exactly
+    one worker observes the transition, so this fires at most once per
+    distinct dormant entry — no de-dupe layer required.
+    """
+    try:
+        from database import db
+        from utils.helpers import utc_now_iso
+        now = utc_now_iso()
+        item = {
+            "id": f"cb-dormant-{agent_name}-{now}",
+            "agent_name": agent_name,
+            "type": "circuit_breaker_dormant",
+            "status": "pending",
+            "priority": "high",
+            "title": "Agent circuit breaker DORMANT",
+            "question": (
+                f"{agent_name}'s circuit breaker entered DORMANT after "
+                f"{CIRCUIT_DORMANT_AFTER_OPEN_PROBES} consecutive failed probes. "
+                f"Scheduled tasks fast-fail until the agent recovers via the "
+                f"~{int(CIRCUIT_DORMANT_COOLDOWN_SECONDS / 60)} min cooldown "
+                f"probe or an admin reset."
+            ),
+            "context": {
+                "agent_name": agent_name,
+                "transition": "dormant",
+                "dormant_after_open_probes": CIRCUIT_DORMANT_AFTER_OPEN_PROBES,
+                "dormant_cooldown_seconds": CIRCUIT_DORMANT_COOLDOWN_SECONDS,
+            },
+            "created_at": now,
+        }
+        db.create_operator_queue_item(agent_name, item)
+        logger.warning(
+            "[CB] circuit_breaker_dormant operator-queue entry emitted for %s",
+            agent_name,
+        )
+    except Exception:
+        # Don't let alert-delivery failure mask the breaker transition.
+        logger.exception("[CB] failed to emit dormant alert for %s", agent_name)
+
+
 # ----- Public state object --------------------------------------------------
 
 class CircuitState:
@@ -344,6 +395,11 @@ class CircuitState:
                         CIRCUIT_DORMANT_AFTER_OPEN_PROBES,
                         CIRCUIT_DORMANT_COOLDOWN_SECONDS,
                     )
+                    # #921: surface the transition in the Operating Room so
+                    # operators see it without having to grep logs. The Lua
+                    # atomicity guarantees exactly one worker observes the
+                    # transition, so this fires once per dormant entry.
+                    _emit_dormant_alert(self.agent_name)
             return new_state
         except Exception as e:
             logger.warning("Circuit record_failure swallowed (%s)", e)

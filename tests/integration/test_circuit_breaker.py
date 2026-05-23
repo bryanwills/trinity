@@ -259,6 +259,68 @@ class TestDormantState:
         for _ in range(5):
             assert cs.allow_request() is False
 
+    def test_dormant_transition_emits_operator_queue_alert(self, agent_name, monkeypatch):
+        """#921: closed/open → dormant transition fires a
+        circuit_breaker_dormant entry in the Operating Room queue so
+        operators see the silently-failing agent without grepping logs.
+
+        Stubs the lazy `database` import inside `_emit_dormant_alert` with
+        an in-memory fake so we can drive the transition against the real
+        Redis CB without needing the live backend SQLite.
+        """
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        # Faster transition into dormant.
+        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.01)
+        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.01)
+
+        fake_db = MagicMock()
+        fake_module = types.ModuleType("database")
+        fake_module.db = fake_db
+        monkeypatch.setitem(sys.modules, "database", fake_module)
+        # utils.helpers is normally available; we don't need to stub it,
+        # but if running on a stripped sys.path we provide a shim.
+        if "utils.helpers" not in sys.modules:
+            shim = types.ModuleType("utils.helpers")
+            shim.utc_now_iso = lambda: "2026-05-23T00:00:00Z"
+            monkeypatch.setitem(sys.modules, "utils.helpers", shim)
+
+        cs = agent_client.CircuitState(agent_name)
+        last = None
+        for _ in range(
+            agent_client.CIRCUIT_FAILURE_THRESHOLD
+            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            + 2
+        ):
+            last = cs.record_failure()
+            if last == "dormant":
+                break
+        assert last == "dormant"
+
+        # Alert fired exactly once on the transition.
+        assert fake_db.create_operator_queue_item.call_count == 1
+        called_agent, item = fake_db.create_operator_queue_item.call_args.args
+        assert called_agent == agent_name
+        assert item["type"] == "circuit_breaker_dormant"
+        assert item["priority"] == "high"
+        assert item["status"] == "pending"
+        assert item["agent_name"] == agent_name
+        assert "DORMANT" in item["title"]
+        assert item["context"]["transition"] == "dormant"
+        assert (
+            item["context"]["dormant_cooldown_seconds"]
+            == agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS
+        )
+
+        # Subsequent failures stay dormant (prior==new) — no transition,
+        # no second alert. Verifies the once-per-entry guarantee.
+        for _ in range(3):
+            cs.record_failure()
+        assert fake_db.create_operator_queue_item.call_count == 1
+
     def test_dormant_probes_after_cooldown(self, agent_name, monkeypatch):
         """#921: once the dormant cooldown elapses, exactly one probe is
         admitted per worker race. Restores baseline recovery behaviour
