@@ -353,7 +353,7 @@ def test_create_schedule_path_skips_enforcement_when_timeout_none(monkeypatch):
     fake_user = types.SimpleNamespace(username="owner", role="user")
 
     # Invoke the async route handler directly.
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         sched_router.create_schedule(
             name="alice",
             schedule_data=schedule_data,
@@ -424,7 +424,7 @@ def test_create_schedule_path_runs_enforcement_when_timeout_set(monkeypatch):
 
     fake_user = types.SimpleNamespace(username="owner", role="user")
 
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         sched_router.create_schedule(
             name="alice",
             schedule_data=schedule_data,
