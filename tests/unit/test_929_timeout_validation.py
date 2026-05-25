@@ -1,0 +1,272 @@
+"""
+Tests for Issue #929 — write-time validation of schedule timeout vs agent cap.
+
+Two surfaces:
+  * `db.get_max_active_schedule_timeout(agent)` / `find_active_schedules_exceeding_timeout`
+    — read accessors used by the agent-cap-lowering check.
+  * `routers/schedules._enforce_timeout_below_agent_cap` — the inline guard
+    fired on `POST/PUT /api/agents/{name}/schedules`.
+
+Tests bypass FastAPI TestClient: the router helper is a pure function over
+`db.*`, and the DB accessors are exercised directly against an ephemeral
+SQLite file routed via the same `db.connection.DB_PATH` monkeypatch pattern
+as `test_agent_soft_delete.py`.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+
+def _stub_passlib():
+    """Stub the passlib.context dependency that routers/__init__.py drags in
+    via auth — bcrypt is not needed for these tests. Same pattern as
+    `tests/unit/test_monitoring_router_signatures.py`.
+    """
+    if "passlib" in sys.modules:
+        return
+    passlib = types.ModuleType("passlib")
+    context = types.ModuleType("passlib.context")
+
+    class _CryptContext:
+        def __init__(self, **_):
+            pass
+
+        def hash(self, pw):
+            return f"stub${pw}"
+
+        def verify(self, pw, hashed):
+            return hashed == f"stub${pw}"
+
+    context.CryptContext = _CryptContext
+    sys.modules["passlib"] = passlib
+    sys.modules["passlib.context"] = context
+
+
+_stub_passlib()
+
+_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
+_BACKEND_STR = str(_BACKEND)
+while _BACKEND_STR in sys.path:
+    sys.path.remove(_BACKEND_STR)
+sys.path.insert(0, _BACKEND_STR)
+
+
+def _make_db_schema(conn: sqlite3.Connection) -> None:
+    """Subset of Trinity's schema sufficient for the accessors under test."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE agent_ownership (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT UNIQUE NOT NULL,
+            owner_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            execution_timeout_seconds INTEGER DEFAULT 3600,
+            deleted_at TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE agent_schedules (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            name TEXT NOT NULL,
+            cron_expression TEXT NOT NULL,
+            message TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            timezone TEXT DEFAULT 'UTC',
+            description TEXT,
+            owner_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            timeout_seconds INTEGER DEFAULT 3600,
+            deleted_at TEXT
+        )
+        """
+    )
+    conn.commit()
+
+
+@pytest.fixture
+def tmp_agent_db(tmp_path, monkeypatch):
+    try:
+        import db.connection as connection_mod
+    except ImportError:
+        pytest.skip("backend venv required (no `db.connection` import)")
+
+    db_path = tmp_path / "trinity.db"
+    conn = sqlite3.connect(str(db_path))
+    _make_db_schema(conn)
+    conn.close()
+    monkeypatch.setattr(connection_mod, "DB_PATH", str(db_path))
+    return str(db_path)
+
+
+def _seed_agent(db_path: str, name: str, cap_seconds: int = 3600) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO agent_ownership(agent_name, owner_id, created_at, execution_timeout_seconds) "
+        "VALUES (?, 1, '2026-01-01T00:00:00Z', ?)",
+        (name, cap_seconds),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _seed_schedule(
+    db_path: str,
+    agent_name: str,
+    schedule_id: str,
+    timeout_seconds: int,
+    deleted: bool = False,
+) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO agent_schedules(id, agent_name, name, cron_expression, message, "
+        "owner_id, created_at, updated_at, timeout_seconds, deleted_at) "
+        "VALUES (?, ?, ?, '0 * * * *', 'test', 1, '2026-01-01T00:00:00Z', "
+        "'2026-01-01T00:00:00Z', ?, ?)",
+        (schedule_id, agent_name, schedule_id, timeout_seconds,
+         '2026-05-01T00:00:00Z' if deleted else None),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# DB accessor tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_max_active_schedule_timeout_no_schedules(tmp_agent_db):
+    """No schedules → None (the agent-cap-lowering check then short-circuits)."""
+    from db.schedules import ScheduleOperations
+
+    _seed_agent(tmp_agent_db, "alice")
+    ops = ScheduleOperations(user_ops=None, agent_ops=None)
+    assert ops.get_max_active_schedule_timeout("alice") is None
+
+
+def test_get_max_active_schedule_timeout_picks_max(tmp_agent_db):
+    """MAX(timeout_seconds) across active rows."""
+    from db.schedules import ScheduleOperations
+
+    _seed_agent(tmp_agent_db, "alice")
+    _seed_schedule(tmp_agent_db, "alice", "s1", 1800)
+    _seed_schedule(tmp_agent_db, "alice", "s2", 3600)
+    _seed_schedule(tmp_agent_db, "alice", "s3", 600)
+
+    ops = ScheduleOperations(user_ops=None, agent_ops=None)
+    assert ops.get_max_active_schedule_timeout("alice") == 3600
+
+
+def test_get_max_active_schedule_timeout_excludes_soft_deleted(tmp_agent_db):
+    """Soft-deleted rows can't pin the cap — they don't fire anymore (#834)."""
+    from db.schedules import ScheduleOperations
+
+    _seed_agent(tmp_agent_db, "alice")
+    _seed_schedule(tmp_agent_db, "alice", "s_live", 1800)
+    _seed_schedule(tmp_agent_db, "alice", "s_dead", 7200, deleted=True)
+
+    ops = ScheduleOperations(user_ops=None, agent_ops=None)
+    assert ops.get_max_active_schedule_timeout("alice") == 1800
+
+
+def test_find_active_schedules_exceeding_timeout_returns_offenders(tmp_agent_db):
+    """Returns id/name/timeout dicts only for schedules above the ceiling."""
+    from db.schedules import ScheduleOperations
+
+    _seed_agent(tmp_agent_db, "alice")
+    _seed_schedule(tmp_agent_db, "alice", "s_under", 1200)
+    _seed_schedule(tmp_agent_db, "alice", "s_at", 1800)
+    _seed_schedule(tmp_agent_db, "alice", "s_over1", 3000)
+    _seed_schedule(tmp_agent_db, "alice", "s_over2", 5400)
+    _seed_schedule(tmp_agent_db, "alice", "s_dead_over", 7200, deleted=True)
+
+    ops = ScheduleOperations(user_ops=None, agent_ops=None)
+    offenders = ops.find_active_schedules_exceeding_timeout("alice", 1800)
+
+    offender_ids = {o["id"] for o in offenders}
+    assert offender_ids == {"s_over1", "s_over2"}
+    # Sorted DESC by timeout so the largest offender is first.
+    assert offenders[0]["id"] == "s_over2"
+    assert offenders[0]["timeout_seconds"] == 5400
+
+
+def test_find_active_schedules_exceeding_timeout_empty_when_all_under(tmp_agent_db):
+    from db.schedules import ScheduleOperations
+
+    _seed_agent(tmp_agent_db, "alice")
+    _seed_schedule(tmp_agent_db, "alice", "s1", 600)
+    _seed_schedule(tmp_agent_db, "alice", "s2", 1200)
+
+    ops = ScheduleOperations(user_ops=None, agent_ops=None)
+    assert ops.find_active_schedules_exceeding_timeout("alice", 1800) == []
+
+
+# ---------------------------------------------------------------------------
+# Router-helper test (`_enforce_timeout_below_agent_cap`)
+# ---------------------------------------------------------------------------
+#
+# The helper calls `db.get_execution_timeout(agent_name)` then raises a
+# 400 HTTPException with a structured detail dict when over-cap. We don't
+# need a TestClient — patch `db.get_execution_timeout` for isolation.
+
+
+# Load routers/schedules.py directly via importlib — same pattern as
+# `test_voice_auth.py` / `test_monitoring_router_signatures.py`. Going through
+# `from routers import schedules` drags routers/__init__.py and 50+ siblings
+# that need passlib, docker_service, twilio, slack_sdk, etc.
+import importlib.util as _ilu
+
+_sched_path = _BACKEND / "routers" / "schedules.py"
+
+
+def _load_sched_router():
+    _stub_passlib()  # idempotent — guard against late eviction by other fixtures
+    try:
+        spec = _ilu.spec_from_file_location("routers.schedules", str(_sched_path))
+        module = _ilu.module_from_spec(spec)
+        sys.modules["routers.schedules"] = module
+        spec.loader.exec_module(module)
+        return module
+    except (ImportError, ModuleNotFoundError) as exc:
+        pytest.skip(f"backend venv required (no `routers.schedules` import): {exc}")
+
+
+def test_enforce_helper_allows_at_or_below_cap(monkeypatch):
+    """Schedule timeout == cap and < cap both succeed silently."""
+    sched_router = _load_sched_router()
+    # raising=False guards against sibling unit tests (test_904_*) that
+    # swap `db` for a method-light stub before this test loads.
+    monkeypatch.setattr(
+        sched_router.db, "get_execution_timeout", lambda _name: 3600, raising=False
+    )
+    sched_router._enforce_timeout_below_agent_cap("alice", 3600)
+    sched_router._enforce_timeout_below_agent_cap("alice", 60)
+
+
+def test_enforce_helper_rejects_above_cap_with_structured_detail(monkeypatch):
+    """Above cap → HTTP 400 with `error=schedule_timeout_exceeds_agent_cap`."""
+    from fastapi import HTTPException
+
+    sched_router = _load_sched_router()
+    monkeypatch.setattr(
+        sched_router.db, "get_execution_timeout", lambda _name: 3600, raising=False
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        sched_router._enforce_timeout_below_agent_cap("alice", 7200)
+
+    assert exc_info.value.status_code == 400
+    detail = exc_info.value.detail
+    assert detail["error"] == "schedule_timeout_exceeds_agent_cap"
+    assert detail["agent_cap_seconds"] == 3600
+    assert detail["requested_seconds"] == 7200
+    assert "Raise the agent cap" in detail["message"]

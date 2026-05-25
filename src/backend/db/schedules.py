@@ -310,6 +310,49 @@ class ScheduleOperations:
             """, (agent_name,))
             return [self._row_to_schedule(row) for row in cursor.fetchall()]
 
+    def get_max_active_schedule_timeout(self, agent_name: str) -> Optional[int]:
+        """Max `timeout_seconds` across the agent's non-soft-deleted schedules.
+
+        Used by `PUT /api/agents/{name}/timeout` (#929) to refuse lowering
+        the agent cap below the ceiling that current schedules rely on.
+        Returns ``None`` when the agent has no active schedules.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT MAX(timeout_seconds) AS max_t
+                FROM agent_schedules
+                WHERE agent_name = ? AND deleted_at IS NULL
+            """, (agent_name,))
+            row = cursor.fetchone()
+            if not row or row["max_t"] is None:
+                return None
+            return int(row["max_t"])
+
+    def find_active_schedules_exceeding_timeout(
+        self, agent_name: str, ceiling_seconds: int
+    ) -> List[Dict]:
+        """Active schedules whose ``timeout_seconds > ceiling_seconds`` (#929).
+
+        Returns a thin list of ``{id, name, timeout_seconds}`` dicts for
+        the agent-cap-lowering error payload — the caller surfaces them
+        so the operator knows which schedules need editing first.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, name, timeout_seconds
+                FROM agent_schedules
+                WHERE agent_name = ?
+                  AND deleted_at IS NULL
+                  AND timeout_seconds > ?
+                ORDER BY timeout_seconds DESC
+            """, (agent_name, ceiling_seconds))
+            return [
+                {"id": row["id"], "name": row["name"], "timeout_seconds": row["timeout_seconds"]}
+                for row in cursor.fetchall()
+            ]
+
     def list_all_enabled_schedules(self) -> List[Schedule]:
         """List all enabled schedules (for scheduler initialization).
 
