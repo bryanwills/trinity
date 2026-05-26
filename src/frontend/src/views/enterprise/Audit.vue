@@ -1,16 +1,18 @@
 <script setup>
 /**
- * Enterprise Audit Log dashboard (#941).
+ * Enterprise Audit Log dashboard (#941, v2).
  *
  * Admin-facing read view over the platform audit log. Frontend ships
  * in the OSS bundle; route is gated by `requiresEntitlement: 'audit'`
  * in `router/index.js` so OSS-only deploys (where the entitlement
  * service does not register `'audit'`) bounce to the catalogue.
  *
- * v1 scope (#941): list + filter + detail panel. Out of scope here:
- * CSV/JSON export UI, hash-chain verify button, stats tiles, SIEM
- * push. The backend endpoints supporting those already exist; the UI
- * lands in follow-up issues.
+ * v2 (this revision): stats tiles header, time-preset chips, inline
+ * cell drill-down, hash-chain verify badge, CSV/JSON export. All five
+ * sit on top of existing audit-log endpoints — no backend changes.
+ *
+ * Out of scope: SIEM webhook push (separate enterprise pillar),
+ * sparkline chart (bundle weight), WebSocket live updates.
  */
 import { computed, onMounted, watch } from 'vue'
 import { useAuditLogStore } from '../../stores/auditLog'
@@ -20,9 +22,17 @@ const store = useAuditLogStore()
 // template's v-model writes pass through to the store unchanged.
 const filters = store.filters
 
+const TIME_PRESETS = [
+  { key: '1h', label: 'Last 1h' },
+  { key: '24h', label: 'Last 24h' },
+  { key: '7d', label: 'Last 7d' },
+  { key: '30d', label: 'Last 30d' },
+  { key: 'all', label: 'All time' },
+]
+
 onMounted(async () => {
   await store.loadDistinct()
-  await store.loadList()
+  await Promise.all([store.loadList(), store.loadStats()])
 })
 
 // Re-load list when offset changes (pagination clicks).
@@ -33,15 +43,68 @@ watch(
   }
 )
 
+// Manual time-filter edits flip the preset back to "custom" so the
+// chips reflect reality. We watch the two time fields rather than
+// hooking the inputs because v-model binds directly to the store.
+watch(
+  () => [filters.start_time, filters.end_time],
+  () => {
+    // If the new bounds happen to match an active preset's "now − Xh"
+    // computation, we still mark as custom — exact match is too fragile
+    // (ms drift). Manual edit always means custom.
+    if (
+      store.activePreset !== 'custom' &&
+      !isPresetSelected(store.activePreset)
+    ) {
+      store.activePreset = 'custom'
+    }
+  }
+)
+
+function isPresetSelected(_key) {
+  // The preset action sets `activePreset` explicitly. Anywhere else
+  // that touches `start_time` or `end_time` (manual form edits, the
+  // drill-down handler) demotes to 'custom'. This helper exists as a
+  // hook for future precise-match logic without changing the watcher.
+  return false
+}
+
 function applyFilters() {
   store.offset = 0
-  store.loadList()
+  store.activePreset = 'custom'
+  Promise.all([store.loadList(), store.loadStats()])
 }
 
 function resetFilters() {
   store.resetFilters()
   store.loadDistinct(true)
-  store.loadList()
+  Promise.all([store.loadList(), store.loadStats()])
+}
+
+async function applyPreset(key) {
+  await store.applyTimePreset(key)
+}
+
+async function drilldownEvent(eventType) {
+  if (!eventType) return
+  await store.drilldownFilter('event_type', eventType)
+}
+
+async function drilldownActor(entry) {
+  // Prefer actor_id (queryable). Fall back to actor_type if no id.
+  if (entry.actor_id) {
+    await store.drilldownFilter('actor_id', entry.actor_id)
+  } else if (entry.actor_type) {
+    await store.drilldownFilter('actor_type', entry.actor_type)
+  }
+}
+
+async function verifyChain() {
+  await store.verifyChain()
+}
+
+async function exportAs(format) {
+  await store.downloadExport(format)
 }
 
 async function openDetail(entry) {
@@ -108,7 +171,129 @@ const detailsJson = computed(() => {
         Tamper-evident record of administrative actions. Default filter
         shows the last 24 hours.
       </p>
+
+      <!-- Hash-chain verify badge — manual trigger, visible-range only. -->
+      <div class="mt-3 flex items-center gap-2">
+        <span
+          class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded"
+          :class="{
+            'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300':
+              store.verifyState === 'idle',
+            'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-200':
+              store.verifyState === 'verifying',
+            'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-200':
+              store.verifyState === 'valid',
+            'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-200':
+              store.verifyState === 'invalid',
+            'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-200':
+              store.verifyState === 'error',
+          }"
+        >
+          <span v-if="store.verifyState === 'idle'">Hash chain · not verified</span>
+          <span v-else-if="store.verifyState === 'verifying'">Verifying…</span>
+          <span v-else-if="store.verifyState === 'valid'">
+            ✓ Valid · {{ store.verifyResult?.checked || 0 }} entries
+          </span>
+          <span v-else-if="store.verifyState === 'invalid'">
+            ✗ Tamper detected · first invalid id #{{ store.verifyResult?.first_invalid_id }}
+          </span>
+          <span v-else>⚠ Verify failed</span>
+        </span>
+        <button
+          class="px-2 py-0.5 text-xs rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+          :disabled="store.verifyState === 'verifying' || store.entries.length === 0"
+          :title="
+            store.entries.length === 0
+              ? 'Load some entries first.'
+              : `Verify ids #${Math.min(...store.entries.map(e => e.id))}–#${Math.max(...store.entries.map(e => e.id))} on this page`
+          "
+          @click="verifyChain"
+        >
+          Verify visible range
+        </button>
+      </div>
     </header>
+
+    <!-- Stats tiles -->
+    <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+      <div class="p-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Total events
+        </div>
+        <div class="text-2xl font-semibold text-gray-900 dark:text-white mt-1">
+          {{ store.statsLoading ? '…' : (store.stats?.total ?? '—') }}
+        </div>
+        <div class="text-[11px] text-gray-400 mt-1">in window</div>
+      </div>
+
+      <button
+        class="p-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-left hover:border-blue-400 transition disabled:opacity-60 disabled:hover:border-gray-200 disabled:cursor-default"
+        :disabled="!store.topEventType"
+        :title="store.topEventType ? `Click to filter by ${store.topEventType.key}` : ''"
+        @click="store.topEventType && drilldownEvent(store.topEventType.key)"
+      >
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Top event type
+        </div>
+        <div class="text-lg font-semibold text-gray-900 dark:text-white mt-1 truncate">
+          {{ store.topEventType?.key || '—' }}
+        </div>
+        <div class="text-[11px] text-gray-400 mt-1">
+          {{ store.topEventType ? `${store.topEventType.count} events` : 'no data' }}
+        </div>
+      </button>
+
+      <button
+        class="p-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-left hover:border-blue-400 transition disabled:opacity-60 disabled:hover:border-gray-200 disabled:cursor-default"
+        :disabled="!store.topActorType"
+        :title="store.topActorType ? `Click to filter by actor_type=${store.topActorType.key}` : ''"
+        @click="store.topActorType && store.drilldownFilter('actor_type', store.topActorType.key)"
+      >
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Top actor type
+        </div>
+        <div class="text-lg font-semibold text-gray-900 dark:text-white mt-1 truncate">
+          {{ store.topActorType?.key || '—' }}
+        </div>
+        <div class="text-[11px] text-gray-400 mt-1">
+          {{ store.topActorType ? `${store.topActorType.count} events` : 'no data' }}
+        </div>
+      </button>
+
+      <div class="p-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Time window
+        </div>
+        <div class="text-sm font-medium text-gray-900 dark:text-white mt-1 break-all">
+          {{ store.timeWindowLabel }}
+        </div>
+        <div class="text-[11px] text-gray-400 mt-1">{{ store.activePreset }}</div>
+      </div>
+    </section>
+
+    <!-- Time-preset chips -->
+    <div class="flex flex-wrap items-center gap-2 mb-4">
+      <span class="text-xs text-gray-500 dark:text-gray-400 mr-1">Time:</span>
+      <button
+        v-for="p in TIME_PRESETS"
+        :key="p.key"
+        class="px-2.5 py-1 text-xs font-medium rounded-full transition"
+        :class="
+          store.activePreset === p.key
+            ? 'bg-blue-600 text-white'
+            : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
+        "
+        @click="applyPreset(p.key)"
+      >
+        {{ p.label }}
+      </button>
+      <span
+        v-if="store.activePreset === 'custom'"
+        class="px-2.5 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-200"
+      >
+        Custom
+      </span>
+    </div>
 
     <!-- Filter form -->
     <section
@@ -191,7 +376,7 @@ const detailsJson = computed(() => {
           />
         </div>
       </div>
-      <div class="mt-3 flex gap-2">
+      <div class="mt-3 flex flex-wrap items-center gap-2">
         <button
           class="px-3 py-1.5 text-sm font-medium rounded bg-blue-600 text-white hover:bg-blue-700"
           @click="applyFilters"
@@ -204,12 +389,32 @@ const detailsJson = computed(() => {
         >
           Reset
         </button>
-        <span
-          v-if="store.error"
-          class="ml-auto text-xs text-red-600 dark:text-red-400 self-center"
-        >
-          {{ store.error }}
+        <div class="flex-1"></div>
+        <span class="text-xs text-gray-500 dark:text-gray-400 hidden sm:inline">
+          Export current view:
         </span>
+        <button
+          class="px-3 py-1.5 text-sm font-medium rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+          :disabled="store.exporting"
+          title="Download a CSV of the current filter window (uses /api/audit-log/export)."
+          @click="exportAs('csv')"
+        >
+          ⬇ CSV
+        </button>
+        <button
+          class="px-3 py-1.5 text-sm font-medium rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+          :disabled="store.exporting"
+          title="Download a JSON array of the current filter window."
+          @click="exportAs('json')"
+        >
+          ⬇ JSON
+        </button>
+      </div>
+      <div
+        v-if="store.error"
+        class="mt-2 text-xs text-red-600 dark:text-red-400"
+      >
+        {{ store.error }}
       </div>
     </section>
 
@@ -258,13 +463,29 @@ const detailsJson = computed(() => {
                 {{ formatTimestamp(entry.timestamp) }}
               </td>
               <td class="px-3 py-2 text-gray-900 dark:text-white">
-                <span class="font-medium">{{ entry.event_type }}</span>
+                <button
+                  class="font-medium underline-offset-2 hover:underline hover:text-blue-700 dark:hover:text-blue-300"
+                  :title="`Filter by event_type=${entry.event_type}`"
+                  @click.stop="drilldownEvent(entry.event_type)"
+                >
+                  {{ entry.event_type }}
+                </button>
                 <span class="ml-1 text-xs text-gray-500 dark:text-gray-400"
                   >· {{ entry.event_action }}</span
                 >
               </td>
               <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
-                {{ actorLabel(entry) }}
+                <button
+                  class="underline-offset-2 hover:underline hover:text-blue-700 dark:hover:text-blue-300"
+                  :title="
+                    entry.actor_id
+                      ? `Filter by actor_id=${entry.actor_id}`
+                      : `Filter by actor_type=${entry.actor_type}`
+                  "
+                  @click.stop="drilldownActor(entry)"
+                >
+                  {{ actorLabel(entry) }}
+                </button>
               </td>
               <td class="px-3 py-2 text-gray-700 dark:text-gray-200">
                 {{ targetLabel(entry) }}

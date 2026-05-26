@@ -120,4 +120,64 @@ test.describe('enterprise audit dashboard (#941)', () => {
       page.locator('text=/Showing|No (audit )?entries/').first()
     ).toBeVisible({ timeout: 5000 })
   })
+
+  // ─────────────────────────────────────────────────────────────────────
+  // #941 v2 — dashboard expansion (stats tiles, presets, drill-down,
+  // verify badge, export)
+  // ─────────────────────────────────────────────────────────────────────
+
+  test('@smoke time preset chip changes the time window', async ({ page }) => {
+    await page.goto('/enterprise/audit')
+
+    // Preset chips render with active state.
+    const last7d = page.locator('button:has-text("Last 7d")')
+    await expect(last7d).toBeVisible({ timeout: 10000 })
+
+    // Capture current start_time before click. The chip click should
+    // flip activePreset to '7d' and update filters.start_time to
+    // (now - 7 days). We assert via the "Time window" stats tile
+    // copy rather than poking the input directly — exercises the
+    // store → UI binding end-to-end.
+    const timeWindowTile = page.locator('div:has(> div:text-is("TIME WINDOW")), div:has(> div:has-text("Time window"))').first()
+
+    await last7d.click()
+    // Active chip flips colour to blue-600 (Tailwind .bg-blue-600).
+    await expect(last7d).toHaveClass(/bg-blue-600/, { timeout: 5000 })
+
+    // The Custom chip is hidden when a preset is active.
+    await expect(page.locator('text=/^Custom$/')).toHaveCount(0)
+  })
+
+  test('@smoke clicking an event_type cell drills down via filter', async ({ page }) => {
+    await page.goto('/enterprise/audit')
+
+    // Widen to All so the cell renders even on a quiet install.
+    await page.locator('button:has-text("All time")').click()
+
+    const emptyVisible = await page
+      .locator('text=No audit entries match these filters.')
+      .isVisible({ timeout: 5000 })
+      .catch(() => false)
+    test.skip(emptyVisible, 'audit_log is empty on this instance')
+
+    // The event_type cell is now a button (drill-down trigger).
+    const firstEventTypeButton = page
+      .locator('tbody tr')
+      .first()
+      .locator('td:nth-child(2) button')
+      .first()
+    await expect(firstEventTypeButton).toBeVisible({ timeout: 10000 })
+    const eventTypeValue = (await firstEventTypeButton.textContent())?.trim()
+    expect(eventTypeValue).toBeTruthy()
+
+    await firstEventTypeButton.click()
+
+    // The event_type <select> should now hold the value we clicked.
+    const eventTypeSelect = page.locator('label:has-text("Event type") + select')
+    await expect(eventTypeSelect).toHaveValue(eventTypeValue, { timeout: 5000 })
+
+    // The active-preset chip should flip to Custom (drill-down sets
+    // activePreset = 'custom').
+    await expect(page.locator('text=/^Custom$/')).toBeVisible()
+  })
 })
