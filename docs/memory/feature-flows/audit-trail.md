@@ -447,6 +447,29 @@ Entries written before hash chain was enabled are skipped during verification.
 
 Run: `.venv/bin/python -m pytest tests/test_audit_log_unit.py -v`
 
+### Phase 5 — Dashboard tests (#941)
+
+`tests/unit/test_847_audit_dashboard.py` — covers the two new distinct
+endpoints + the router-ordering invariant:
+
+| Test | Asserts |
+|---|---|
+| `test_distinct_event_types_empty_table_returns_empty_list` | empty table → `[]`, no exception |
+| `test_distinct_event_types_returns_sorted_unique_list` | duplicates collapsed, sorted ASCII |
+| `test_distinct_actor_types_empty_table_returns_empty_list` | same, actor_types column |
+| `test_distinct_actor_types_returns_sorted_unique_list` | same, actor_types column |
+| `test_distinct_endpoints_admin_gated_and_before_catch_all` | `Depends(require_admin)` present; declared BEFORE `/{event_id}` (invariant #4) |
+| `test_distinct_endpoints_do_not_apply_entitlement_gate` | static pin: backend stays OSS (no `requires_entitlement` on audit_log endpoints) |
+
+`src/frontend/e2e/audit-dashboard.spec.js` — Playwright `@smoke`
+suite, 4 cases: admin sees Enterprise nav + audit card available;
+click card lands on `/enterprise/audit`; row click opens side panel
+with hash chain disclosure; filter dropdown populated from
+distinct endpoint.
+
+Run pytest: `.venv/bin/python -m pytest tests/unit/test_847_audit_dashboard.py tests/unit/test_847_entitlement_seam.py -v`
+Run e2e: `cd src/frontend && npm run test:e2e -- audit-dashboard.spec`
+
 ## Related Flows
 - `docs/requirements/AUDIT_TRAIL_ARCHITECTURE.md` — full SEC-001 spec (840 lines, all four phases)
 - `services/process_engine/services/audit.py` — the separate Process Engine audit service this coexists with
