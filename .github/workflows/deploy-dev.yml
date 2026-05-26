@@ -33,7 +33,19 @@ jobs:
             echo "=== Pull ==="
             git fetch origin dev
             git checkout dev
-            git pull origin dev
+            # The dev VM has a persistent checkout that may carry hand-applied
+            # fixes (e.g. docker-compose.prod.yml tweaks). `git pull` aborts on
+            # dirty tree, blocking every deploy. Stash with a deploy-run-keyed
+            # message so the changes are recoverable via `git stash list` (and
+            # survive in the reflog for ~90 days) without polluting history.
+            # If the working tree is clean, stash is a no-op (exit 0).
+            #
+            # Long-term fix is to move the build to CI + push images to a
+            # registry so the dev VM is stateless (see #942). Until then, this
+            # keeps deploys unblocked while preserving the audit trail.
+            STASH_MSG="auto-stash-deploy-${GITHUB_RUN_ID:-manual}"
+            git stash push -u -m "${STASH_MSG}" || echo "No local changes to stash"
+            git pull --ff-only origin dev
             echo "Version: $(git log -1 --oneline)"
 
             echo "=== Build ==="
