@@ -209,9 +209,9 @@ If you're an AI agent given this repository:
 - **Shared Folders** — File-based state sharing between agents via Docker volumes
 - **System Manifest Deployment** — Deploy multi-agent systems from a single YAML configuration
 - **Scheduling** — Cron-based automation with dedicated scheduler service and Redis distributed locks
-- **MCP Integration** — 72 tools for external agent orchestration via Model Context Protocol
+- **MCP Integration** — 74 tools for external agent orchestration via Model Context Protocol
 - **Trinity Connect** — WebSocket event streaming for local Claude Code integration
-- **Channel Adapters** — Pluggable external messaging: Slack (Socket Mode + webhooks, per-channel agent binding) and Telegram (DMs, groups, voice transcription, file uploads)
+- **Channel Adapters** — Pluggable external messaging: Slack (Socket Mode + webhooks, per-channel agent binding), Telegram (DMs, groups, voice transcription, file uploads), and WhatsApp via Twilio (DMs, media, `/login` flow)
 - **Unified Access Control** — Verified-email allow-list governs access across web, Slack, and Telegram with per-agent `require_email` / `open_access` policies (#311)
 - **Proactive Messaging** — Agents initiate user conversations via `send_message` / `send_group_message` MCP tools (#321, #349)
 
@@ -342,7 +342,7 @@ trinity/
 ├── src/
 │   ├── backend/          # FastAPI backend API
 │   ├── frontend/         # Vue.js 3 + Tailwind CSS web UI
-│   ├── mcp-server/       # Trinity MCP server (72 tools)
+│   ├── mcp-server/       # Trinity MCP server (74 tools)
 │   ├── cli/              # Trinity CLI (pip install trinity-cli)
 │   └── scheduler/        # Dedicated scheduler service (Redis locks)
 ├── docker/
