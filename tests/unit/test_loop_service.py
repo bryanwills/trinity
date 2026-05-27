@@ -177,9 +177,6 @@ class _FakeDB:
                     r["completed_at"] = "now"
                     return
 
-    def attach_execution_to_loop_run(self, run_id: str, execution_id: str):
-        self.finalize_loop_run(run_id, execution_id=execution_id)
-
     def list_loop_runs(self, loop_id: str):
         return [dict(r) for r in sorted(
             self.runs.get(loop_id, []), key=lambda r: r["run_number"],

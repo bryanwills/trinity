@@ -272,16 +272,6 @@ class LoopOperations:
             conn.commit()
         return run_id
 
-    def attach_execution_to_run(self, run_id: str, execution_id: str) -> None:
-        """Late-bind execution_id once task_execution_service returns it."""
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE agent_loop_runs SET execution_id = ? WHERE id = ?",
-                (execution_id, run_id),
-            )
-            conn.commit()
-
     def finalize_loop_run(
         self,
         run_id: str,
