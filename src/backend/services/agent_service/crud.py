@@ -365,27 +365,20 @@ async def create_agent_internal(
             pass  # Agent clones at startup
         elif config.template.startswith("local:"):
             # Local template - strip "local:" prefix for path resolution.
-            # Two valid origins (#950):
-            #   1. Curated catalog at /agent-configs/templates (read-only mount
-            #      from ./config/agent-templates on host) — bind via HOST_TEMPLATES_PATH.
-            #   2. Deploy-local at /data/deployed-templates (writable, written by
-            #      deploy_local_agent_logic) — bind via HOST_DEPLOYED_TEMPLATES_PATH.
-            # Curated wins on collision so an operator-curated template can't be
-            # shadowed by a same-named deploy-local upload.
+            # Curated templates (under /agent-configs/templates) bind their
+            # host path to /template; the agent's startup.sh copies it to
+            # /home/developer on first boot. Deploy-local templates (under
+            # /data/deployed-templates) do NOT bind here — deploy.py has
+            # already pre-populated the agent's workspace volume directly
+            # via put_archive (#950). The bind-mount transport relied on
+            # backend's /data and the agent's host bind resolving to the
+            # same host path, which was true in prod compose (host bind)
+            # but not in dev compose (named volume).
             template_name = config.template[6:]
             curated_path = Path("/agent-configs/templates") / template_name
-            deployed_path = Path("/data/deployed-templates") / template_name
-
             if curated_path.exists():
                 host_templates_base = os.getenv("HOST_TEMPLATES_PATH", "./config/agent-templates")
                 host_template_path = Path(host_templates_base) / template_name
-                template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
-            elif deployed_path.exists():
-                host_deployed_base = os.getenv(
-                    "HOST_DEPLOYED_TEMPLATES_PATH",
-                    f"{os.getenv('TRINITY_DATA_PATH', './trinity-data')}/deployed-templates",
-                )
-                host_template_path = Path(host_deployed_base) / template_name
                 template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
 
         if generated_files:

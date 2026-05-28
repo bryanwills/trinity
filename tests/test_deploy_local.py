@@ -207,19 +207,21 @@ resources:
             assert "agent" in data
             assert data["agent"]["name"] == agent_name
 
-            # Wait for agent to start
-            time.sleep(5)
-
             # Verify agent exists
             check = api_client.get(f"/api/agents/{agent_name}")
             assert_status(check, 200)
 
-            # Regression for #950: the agent's workspace must contain the
-            # template files (template.yaml + CLAUDE.md). Before the fix,
-            # the backend silently wrote the extracted archive to a
-            # container-only path; the new agent's bind-mount missed it
-            # and /home/developer came up empty. Poll because the agent's
-            # startup.sh copies /template -> /home/developer asynchronously.
+            # Regression for #950: deploy must actually populate the new
+            # agent's workspace with the template files. Before the fix
+            # the backend wrote the extracted archive to a container-only
+            # path and the new agent came up empty. The fix pre-populates
+            # the workspace volume directly via put_archive, so files are
+            # present before the agent's first boot.
+            start_resp = api_client.post(f"/api/agents/{agent_name}/start")
+            assert_status_in(start_resp, [200, 202])
+
+            # Poll /files because the agent's HTTP server takes a few
+            # seconds to come up; the files themselves are already on disk.
             deadline = time.time() + 60
             seen_template = seen_claude = False
             last_payload = None

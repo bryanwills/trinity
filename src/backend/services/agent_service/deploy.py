@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from io import BytesIO
 
+import docker
 from fastapi import HTTPException, Request
 
 from models import (
@@ -41,6 +42,112 @@ MAX_FILES = 1000
 # writable, and owned by UID 1000 — separate from the curated catalog at
 # /agent-configs/templates which is intentionally read-only.
 DEPLOYED_TEMPLATES_DIR_IN_BACKEND = "/data/deployed-templates"
+
+# Image used by the workspace pre-population transient container (#950).
+# Pinned to a specific tag so a Docker Hub `latest` swap can't silently
+# change deploy behavior.
+_PREPOP_IMAGE = "alpine:3.20"
+
+
+def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) -> None:
+    """Pre-populate `agent-{version_name}-workspace` with the template files (#950).
+
+    Creates (or reuses) the docker named volume that the agent container
+    will mount at `/home/developer`, then copies the extracted template
+    contents into it via an ephemeral alpine container (`put_archive`).
+    A `.trinity-initialized` marker is included in the same tar so the
+    agent's `startup.sh` skips its `/template`→`/home/developer` copy on
+    boot. This bypasses the host-path bind-mount transport that was
+    inconsistent between dev (named volume `/data`) and prod (host bind
+    `/data`) compose files.
+
+    Failures raise HTTPException(500) — partial pre-population would
+    leave the deploy in an inconsistent state.
+    """
+    workspace_vol = f"agent-{version_name}-workspace"
+    client = docker.from_env()
+
+    try:
+        client.volumes.get(workspace_vol)
+    except docker.errors.NotFound:
+        client.volumes.create(
+            name=workspace_vol,
+            labels={
+                "trinity.platform": "agent-workspace",
+                "trinity.agent-name": version_name,
+            },
+        )
+
+    # Stream template + .trinity-initialized marker into the volume.
+    # Both files captured under uid=1000/gid=1000 so the agent container
+    # (running as `developer`, UID 1000 per #874) can read & write them.
+    tar_buf = BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+        def _set_owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
+            info.uid = 1000
+            info.gid = 1000
+            info.uname = "developer"
+            info.gname = "developer"
+            return info
+
+        tar.add(str(template_dir), arcname=".", filter=_set_owner)
+
+        marker = tarfile.TarInfo(name=".trinity-initialized")
+        marker.size = 0
+        marker.uid = 1000
+        marker.gid = 1000
+        marker.uname = "developer"
+        marker.gname = "developer"
+        tar.addfile(marker, BytesIO(b""))
+
+    tar_buf.seek(0)
+    tar_bytes = tar_buf.read()
+
+    transient = None
+    try:
+        # Auto-pull the image if it isn't already present on the daemon
+        # (docker SDK's `containers.create` doesn't pull, unlike `run`).
+        try:
+            client.images.get(_PREPOP_IMAGE)
+        except docker.errors.ImageNotFound:
+            logger.info(f"Pulling {_PREPOP_IMAGE} for workspace pre-pop")
+            client.images.pull(_PREPOP_IMAGE)
+        transient = client.containers.create(
+            _PREPOP_IMAGE,
+            # Chown the volume root after put_archive — Docker creates new
+            # volumes root-owned, and put_archive only sets ownership on
+            # the entries inside, not on the mount point itself. Without
+            # this, the agent (UID 1000) can't write to /home/developer.
+            command=["sh", "-c", "chown 1000:1000 /dest && chmod 755 /dest"],
+            volumes={workspace_vol: {"bind": "/dest", "mode": "rw"}},
+        )
+        ok = transient.put_archive("/dest", tar_bytes)
+        if not ok:
+            raise RuntimeError("put_archive returned False")
+        transient.start()
+        result = transient.wait(timeout=30)
+        if result.get("StatusCode", 1) != 0:
+            log_tail = transient.logs(tail=20).decode(errors="replace")
+            raise RuntimeError(
+                f"chown step failed (exit {result.get('StatusCode')}): {log_tail}"
+            )
+        logger.info(
+            f"Pre-populated workspace volume {workspace_vol} from {template_dir}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": f"Failed to pre-populate workspace for {version_name}: {e}",
+                "code": "WORKSPACE_PREPOP_FAILED",
+            },
+        )
+    finally:
+        if transient is not None:
+            try:
+                transient.remove(force=True)
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -411,6 +518,17 @@ async def deploy_local_agent_logic(
                 credentials_imported[".env"] = "created"
             credentials_injected = len(body.credentials)
             logger.info(f"Wrote {credentials_injected} credentials to template for agent {version_name}")
+
+        # 9c. Pre-populate the agent's workspace volume from the extracted
+        # template (#950). Sidesteps the bind-mount transport entirely:
+        # dev compose uses a docker-managed named volume for /data while
+        # prod uses a host bind, so any host-path math in crud.py would be
+        # right on prod and wrong on dev. By writing into the workspace
+        # volume directly here, both environments behave identically.
+        # The `.trinity-initialized` marker tells the agent's startup.sh
+        # to skip its `/template` -> `/home/developer` copy (which won't
+        # run anyway since no /template bind is set up — see crud.py).
+        _prepopulate_workspace_from_template(version_name, dest_path)
 
         agent_status = await create_agent_fn(
             agent_config,

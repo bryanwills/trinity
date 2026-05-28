@@ -185,11 +185,11 @@ class DeployLocalResponse(BaseModel):
    - Pattern: `my-agent` -> `my-agent-2` -> `my-agent-3`
    - Stops previous version if running
 
-8. **Template Copy** (#950)
-   - Always write to `/data/deployed-templates/{version_name}/`
-   - `/data` is host-mapped via `TRINITY_DATA_PATH`, writable, owned by UID 1000
-   - Curated catalog at `/agent-configs/templates` stays read-only (operators' source of truth)
-   - On write failure: HTTP 500 with `code=DEPLOYED_TEMPLATES_DIR_UNWRITABLE` (fail fast — the prior probe-and-silent-fallback wrote into the backend's own filesystem, producing empty agents)
+8. **Template Persist + Workspace Pre-population** (#950)
+   - Write the validated archive contents to `/data/deployed-templates/{version_name}/` for inspection and future `template.yaml` lookups. On write failure: HTTP 500 with `code=DEPLOYED_TEMPLATES_DIR_UNWRITABLE`.
+   - **Pre-populate the agent's workspace volume directly** via `put_archive` into an ephemeral `alpine:3.20` container that mounts `agent-{version_name}-workspace`. Includes a `.trinity-initialized` marker so the agent's `startup.sh` skips its `/template` → `/home/developer` copy on boot.
+   - Curated catalog at `/agent-configs/templates` stays read-only (operators' source of truth).
+   - **Why no bind-mount transport for deploy-local**: dev compose uses a docker-managed named volume for `/data` while prod uses a host bind. Any host-path math in `crud.py` was right on prod and wrong on dev, producing empty agents on dev. Pre-populating the workspace volume directly is uniform across both.
 
 9. **Agent Creation**
     - Extract runtime config from template
