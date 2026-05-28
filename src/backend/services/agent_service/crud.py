@@ -44,15 +44,27 @@ logger = logging.getLogger(__name__)
 # filesystem reads (CodeQL py/path-injection on #950 PR).
 _LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 
+# Roots that a resolved local-template path must stay within (#950).
+_LOCAL_TEMPLATE_ROOTS = (
+    Path("/agent-configs/templates").resolve(),
+    Path("/data/deployed-templates").resolve(),
+)
 
-def _validate_local_template_name(template_name: str) -> str:
-    """Reject template names that could traverse out of the templates dir.
 
-    `config.template` is user-supplied; the `local:` prefix is stripped
-    and the remainder is joined onto `/agent-configs/templates` or
-    `/data/deployed-templates` before `.exists()` / `open()` calls. A
-    name like `../../etc` would resolve outside the templates dir.
-    Raises HTTPException(400) on rejection.
+def _safe_local_template_path(template_name: str, root: Path) -> Path:
+    """Join `template_name` onto `root` and prove it didn't traverse out.
+
+    Two-step defense:
+
+    1. Regex allowlist on the name (rejects `..`, `/`, `\\`, leading
+       dots etc.) — fail fast with HTTP 400 for obviously hostile input.
+    2. Resolve the joined path and assert `is_relative_to(root)` — this
+       is the pattern CodeQL recognises as a `py/path-injection`
+       barrier, so the static analyser stops marking subsequent
+       `.exists()` / `open()` calls on the returned path as tainted.
+
+    Either failure raises `HTTPException(400)` with structured code
+    `INVALID_LOCAL_TEMPLATE_NAME`.
     """
     if (
         not template_name
@@ -69,7 +81,18 @@ def _validate_local_template_name(template_name: str) -> str:
                 "code": "INVALID_LOCAL_TEMPLATE_NAME",
             },
         )
-    return template_name
+    candidate = (root / template_name).resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Resolved template path {candidate} escaped expected root {root}."
+                ),
+                "code": "INVALID_LOCAL_TEMPLATE_NAME",
+            },
+        )
+    return candidate
 
 
 def _get_default_resource(key: str) -> str:
@@ -310,12 +333,17 @@ async def create_agent_internal(
         elif config.template.startswith("local:"):
             # Local template - strip "local:" prefix. Look in curated catalog
             # first (/agent-configs/templates), then in deploy-local writable
-            # store (/data/deployed-templates) per #950. Name is validated
-            # before any filesystem join to block traversal.
-            template_name = _validate_local_template_name(config.template[6:])
-            template_path = Path("/agent-configs/templates") / template_name
+            # store (/data/deployed-templates) per #950. Each candidate path
+            # is validated + resolved to prove it stays under the root before
+            # any filesystem access (regex barrier + is_relative_to barrier).
+            raw_name = config.template[6:]
+            template_path = _safe_local_template_path(
+                raw_name, _LOCAL_TEMPLATE_ROOTS[0]
+            )
             if not (template_path / "template.yaml").exists():
-                template_path = Path("/data/deployed-templates") / template_name
+                template_path = _safe_local_template_path(
+                    raw_name, _LOCAL_TEMPLATE_ROOTS[1]
+                )
 
             template_yaml = template_path / "template.yaml"
 
@@ -409,11 +437,16 @@ async def create_agent_internal(
             # backend's /data and the agent's host bind resolving to the
             # same host path, which was true in prod compose (host bind)
             # but not in dev compose (named volume).
-            template_name = _validate_local_template_name(config.template[6:])
-            curated_path = Path("/agent-configs/templates") / template_name
+            raw_name = config.template[6:]
+            curated_path = _safe_local_template_path(
+                raw_name, _LOCAL_TEMPLATE_ROOTS[0]
+            )
             if curated_path.exists():
                 host_templates_base = os.getenv("HOST_TEMPLATES_PATH", "./config/agent-templates")
-                host_template_path = Path(host_templates_base) / template_name
+                # raw_name already validated by _safe_local_template_path; the
+                # join here is on a value that survived the regex + resolve
+                # barriers above, so the bind source can't traverse out.
+                host_template_path = Path(host_templates_base) / curated_path.name
                 template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
 
         if generated_files:
