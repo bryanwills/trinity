@@ -214,6 +214,33 @@ resources:
             check = api_client.get(f"/api/agents/{agent_name}")
             assert_status(check, 200)
 
+            # Regression for #950: the agent's workspace must contain the
+            # template files (template.yaml + CLAUDE.md). Before the fix,
+            # the backend silently wrote the extracted archive to a
+            # container-only path; the new agent's bind-mount missed it
+            # and /home/developer came up empty. Poll because the agent's
+            # startup.sh copies /template -> /home/developer asynchronously.
+            deadline = time.time() + 60
+            seen_template = seen_claude = False
+            last_payload = None
+            while time.time() < deadline:
+                files_resp = api_client.get(f"/api/agents/{agent_name}/files")
+                if files_resp.status_code == 200:
+                    last_payload = files_resp.text
+                    seen_template = "template.yaml" in last_payload
+                    seen_claude = "CLAUDE.md" in last_payload
+                    if seen_template and seen_claude:
+                        break
+                time.sleep(2)
+            assert seen_template, (
+                f"#950 regression: template.yaml not found in deployed agent "
+                f"workspace within 60s. Last payload: {last_payload!r}"
+            )
+            assert seen_claude, (
+                f"#950 regression: CLAUDE.md not found in deployed agent "
+                f"workspace within 60s. Last payload: {last_payload!r}"
+            )
+
         finally:
             cleanup_test_agent(api_client, agent_name)
 

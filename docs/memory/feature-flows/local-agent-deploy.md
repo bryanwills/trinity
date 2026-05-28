@@ -185,9 +185,11 @@ class DeployLocalResponse(BaseModel):
    - Pattern: `my-agent` -> `my-agent-2` -> `my-agent-3`
    - Stops previous version if running
 
-8. **Template Copy**
-   - Try `/agent-configs/templates` first (with write test)
-   - Fall back to `./config/agent-templates/{version_name}/`
+8. **Template Copy** (#950)
+   - Always write to `/data/deployed-templates/{version_name}/`
+   - `/data` is host-mapped via `TRINITY_DATA_PATH`, writable, owned by UID 1000
+   - Curated catalog at `/agent-configs/templates` stays read-only (operators' source of truth)
+   - On write failure: HTTP 500 with `code=DEPLOYED_TEMPLATES_DIR_UNWRITABLE` (fail fast — the prior probe-and-silent-fallback wrote into the backend's own filesystem, producing empty agents)
 
 9. **Agent Creation**
     - Extract runtime config from template

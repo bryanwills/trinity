@@ -274,13 +274,14 @@ async def create_agent_internal(
                 )
             )
         elif config.template.startswith("local:"):
-            # Local template - strip "local:" prefix
-            template_name = config.template[6:]  # Remove "local:" prefix
-            templates_dir = Path("/agent-configs/templates")
-            if not templates_dir.exists():
-                templates_dir = Path("./config/agent-templates")
+            # Local template - strip "local:" prefix. Look in curated catalog
+            # first (/agent-configs/templates), then in deploy-local writable
+            # store (/data/deployed-templates) per #950.
+            template_name = config.template[6:]
+            template_path = Path("/agent-configs/templates") / template_name
+            if not (template_path / "template.yaml").exists():
+                template_path = Path("/data/deployed-templates") / template_name
 
-            template_path = templates_dir / template_name
             template_yaml = template_path / "template.yaml"
 
             if template_yaml.exists():
@@ -363,14 +364,28 @@ async def create_agent_internal(
         if config.template.startswith("github:"):
             pass  # Agent clones at startup
         elif config.template.startswith("local:"):
-            # Local template - strip "local:" prefix for path resolution
-            template_name = config.template[6:]  # Remove "local:" prefix
-            templates_dir = Path("/agent-configs/templates")
-            template_path_in_backend = templates_dir / template_name
+            # Local template - strip "local:" prefix for path resolution.
+            # Two valid origins (#950):
+            #   1. Curated catalog at /agent-configs/templates (read-only mount
+            #      from ./config/agent-templates on host) — bind via HOST_TEMPLATES_PATH.
+            #   2. Deploy-local at /data/deployed-templates (writable, written by
+            #      deploy_local_agent_logic) — bind via HOST_DEPLOYED_TEMPLATES_PATH.
+            # Curated wins on collision so an operator-curated template can't be
+            # shadowed by a same-named deploy-local upload.
+            template_name = config.template[6:]
+            curated_path = Path("/agent-configs/templates") / template_name
+            deployed_path = Path("/data/deployed-templates") / template_name
 
-            if template_path_in_backend.exists():
+            if curated_path.exists():
                 host_templates_base = os.getenv("HOST_TEMPLATES_PATH", "./config/agent-templates")
                 host_template_path = Path(host_templates_base) / template_name
+                template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
+            elif deployed_path.exists():
+                host_deployed_base = os.getenv(
+                    "HOST_DEPLOYED_TEMPLATES_PATH",
+                    f"{os.getenv('TRINITY_DATA_PATH', './trinity-data')}/deployed-templates",
+                )
+                host_template_path = Path(host_deployed_base) / template_name
                 template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
 
         if generated_files:

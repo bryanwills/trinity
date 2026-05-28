@@ -31,6 +31,10 @@ services:
       - VOICE_MODEL=${VOICE_MODEL:-}  # Gemini Live model override (default: gemini-2.5-flash-native-audio-preview-12-2025)
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
+      # #950 — host path for deploy_local_agent's writable template store.
+      # Backend writes archives to /data/deployed-templates (mapped from this
+      # host path) and needs the host path to bind into new agent containers.
+      - HOST_DEPLOYED_TEMPLATES_PATH=${HOST_DEPLOYED_TEMPLATES_PATH:-${TRINITY_DATA_PATH:-${PWD}/trinity-data}/deployed-templates}
       # OpenTelemetry Configuration (Optional)
       - OTEL_ENABLED=${OTEL_ENABLED:-0}
       - OTEL_COLLECTOR_ENDPOINT=${OTEL_COLLECTOR_ENDPOINT:-http://trinity-otel-collector:4317}

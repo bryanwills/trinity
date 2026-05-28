@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 MAX_ARCHIVE_SIZE = 50 * 1024 * 1024  # 50 MB
 MAX_FILES = 1000
 
+# Container-side path for deployed-local templates (#950). Sits under
+# /data which is host-bound to TRINITY_DATA_PATH (default ./trinity-data),
+# writable, and owned by UID 1000 — separate from the curated catalog at
+# /agent-configs/templates which is intentionally read-only.
+DEPLOYED_TEMPLATES_DIR_IN_BACKEND = "/data/deployed-templates"
+
 
 # =============================================================================
 # Safe Tar Extraction Utilities
@@ -326,22 +332,29 @@ async def deploy_local_agent_logic(
             except Exception as e:
                 logger.warning(f"Failed to stop previous version {previous_version.name}: {e}")
 
-        # 8. Copy to templates directory
-        # Try /agent-configs/templates first, but check if writable (not just if exists)
-        # The read-only mount makes this path exist but not writable
-        templates_dir = Path("/agent-configs/templates")
-
-        # Check if writable by attempting to create a test file
+        # 8. Copy to deployed-templates directory (#950).
+        # The historical /agent-configs/templates mount is intentionally read-only
+        # in compose to protect the curated catalog; the prior writability probe
+        # always failed and silently fell back to ./config/agent-templates which
+        # resolved INSIDE the backend container, leaving the new agent's bind
+        # mount pointing at a host path that didn't exist → empty agents.
+        # /data is host-mapped (TRINITY_DATA_PATH), writable, owned by UID 1000.
+        templates_dir = Path(DEPLOYED_TEMPLATES_DIR_IN_BACKEND)
         try:
-            test_file = templates_dir / ".write_test"
-            test_file.touch()
-            test_file.unlink()
-        except (OSError, PermissionError):
-            # Fall back to local config path
-            templates_dir = Path("./config/agent-templates")
-
-        if not templates_dir.exists():
             templates_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": (
+                        f"Deployed-templates directory {templates_dir} is not writable: {e}. "
+                        f"Check that {DEPLOYED_TEMPLATES_DIR_IN_BACKEND}'s host bind "
+                        f"(TRINITY_DATA_PATH default './trinity-data') exists and is owned "
+                        f"by UID 1000 (see docs/migrations/NON_ROOT_CONTAINERS_2026-05.md)."
+                    ),
+                    "code": "DEPLOYED_TEMPLATES_DIR_UNWRITABLE",
+                }
+            )
 
         dest_path = templates_dir / version_name
         if dest_path.exists():
