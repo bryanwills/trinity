@@ -88,7 +88,25 @@ jobs:
             COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml"
 
             echo "=== Build ==="
-            sudo docker compose ${COMPOSE_FILES} build --no-cache backend frontend mcp-server scheduler
+            # Build-time provenance (#926 / #958). docker-compose.prod.yml
+            # backend.build.args reads these env vars; absent them, the
+            # Dockerfile defaults to "unknown" and Build Info in the UI
+            # shows a wall of unknown values. Mirrors scripts/deploy/start.sh.
+            # Inline VAR=val form bypasses sudo's default env_reset — `sudo -E`
+            # would depend on env_keep being permissive in sudoers, which it
+            # is not by default on Ubuntu.
+            GIT_COMMIT=$(git rev-parse HEAD)
+            GIT_COMMIT_SUBJECT=$(git log -1 --pretty=%s)
+            GIT_COMMIT_TIMESTAMP=$(git log -1 --pretty=%cI)
+            GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+            BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            sudo \
+              GIT_COMMIT="${GIT_COMMIT}" \
+              GIT_COMMIT_SUBJECT="${GIT_COMMIT_SUBJECT}" \
+              GIT_COMMIT_TIMESTAMP="${GIT_COMMIT_TIMESTAMP}" \
+              GIT_BRANCH="${GIT_BRANCH}" \
+              BUILD_DATE="${BUILD_DATE}" \
+              docker compose ${COMPOSE_FILES} build --no-cache backend frontend mcp-server scheduler
 
             echo "=== Restart ==="
             sudo docker compose ${COMPOSE_FILES} up -d backend frontend mcp-server scheduler
