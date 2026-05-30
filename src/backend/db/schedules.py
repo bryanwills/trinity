@@ -1137,6 +1137,44 @@ class ScheduleOperations:
             conn.commit()
             return cursor.rowcount
 
+    def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
+        """Bulk-FAIL all queued executions for an agent (#526, RELIABILITY-007).
+
+        Called when the per-agent dispatch circuit breaker trips: the queued
+        backlog is doomed (the agent is auth-dead), so fail it out immediately
+        instead of letting each row drain into its own failure after the detect
+        window.
+
+        Mirrors ``expire_stale_queued`` (status → FAILED) — intentionally NOT
+        ``cancel_queued_for_agent`` (which sets CANCELLED). The #526 acceptance
+        criteria require these rows close FAILED so they read as failures, not
+        as user cancellations.
+
+        Returns:
+            Count of rows moved from QUEUED to FAILED.
+        """
+        now = utc_now_iso()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    completed_at = ?,
+                    error = ?
+                WHERE agent_name = ? AND status = ?
+                """,
+                (
+                    TaskExecutionStatus.FAILED,
+                    now,
+                    reason,
+                    agent_name,
+                    TaskExecutionStatus.QUEUED,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount
+
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         """Mark queued executions older than max_age_hours as FAILED.
 

@@ -11,7 +11,7 @@ import logging
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
@@ -21,11 +21,13 @@ from services.activity_service import activity_service
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
 from services.capacity_manager import (
     CapacityFull,
+    CircuitOpen,
     PersistentTaskPayload,
     get_capacity_manager,
 )
 from services.task_execution_service import (
     _compute_context_used,
+    dispatch_breaker_active,
     get_task_execution_service,
     agent_post_with_retry,
 )
@@ -53,6 +55,33 @@ _websocket_manager = None
 # importable from tests without pulling in the full router/auth chain.
 # (Issue #498)
 from services.sync_waiter import signal_sync_waiter, wait_for_sync_terminal
+
+
+def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> NoReturn:
+    """Map a dispatch-breaker CircuitOpen to HTTP 503 (#526).
+
+    Closes the pre-created execution row FAILED(circuit_open) when one exists
+    (the /task paths create it before acquire; /chat acquires first so passes
+    None), then raises 503 with ``X-Circuit-Open`` + ``Retry-After``. No backlog
+    row was ever created — acquire raised before the overflow branch.
+    """
+    if execution_id:
+        try:
+            db.update_execution_status(
+                execution_id=execution_id,
+                status=TaskExecutionStatus.FAILED,
+                error="circuit_open: agent unhealthy (dispatch breaker open)",
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Chat] Failed to mark execution {execution_id} FAILED on circuit open: {e}"
+            )
+    retry_after = max(0, int(exc.retry_after_seconds))
+    raise HTTPException(
+        status_code=503,
+        detail={"error": "circuit_open", "retry_after_seconds": retry_after},
+        headers={"X-Circuit-Open": "true", "Retry-After": str(retry_after)},
+    )
 
 
 def set_websocket_manager(manager):
@@ -126,6 +155,21 @@ async def chat_with_agent(
     chat_execution_id = str(_uuid.uuid4())
     chat_timeout = db.get_execution_timeout(name)
     max_parallel_tasks = db.get_max_parallel_tasks(name)
+    # #526 F1: /chat does NOT record dispatch outcomes (only
+    # task_execution_service does), so it must NOT consume a half-open probe
+    # permit — doing so stalls the breaker's backoff and leaks chat requests to
+    # an auth-dead agent. Gate /chat with a PURE STATE READ instead: fast-fail
+    # 503 whenever the breaker is open (incl. the half-open window) and let the
+    # /task path drive recovery. acquire() below runs WITHOUT breaker_enabled so
+    # /chat never touches the probe machinery.
+    if dispatch_breaker_active(name):
+        from services.dispatch_breaker import DispatchBreaker
+        _disp = DispatchBreaker(name).to_dict()
+        if _disp.get("state") == "open":
+            logger.warning(f"[Chat] Agent '{name}' dispatch circuit open, rejecting request")
+            _raise_circuit_open_503(
+                name, None, CircuitOpen(name, int(_disp.get("retry_after_seconds") or 0))
+            )
     try:
         capacity_result = await capacity.acquire(
             agent_name=name,
@@ -708,6 +752,7 @@ async def _run_async_task_with_persistence(
     is_self_task: bool = False,
     self_task_activity_id: Optional[str] = None,
     images: Optional[list] = None,
+    dispatch_gate_checked: bool = False,
 ):
     """
     Async /task background wrapper (issue #95).
@@ -759,6 +804,7 @@ async def _run_async_task_with_persistence(
             },
             slot_already_held=True,  # Router pre-acquired to preserve 429-upfront contract
             images=images or [],
+            dispatch_gate_checked=dispatch_gate_checked,  # #526: True when router gated at acquire()
         )
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -1080,6 +1126,7 @@ async def execute_parallel_task(
     if request.async_mode:
         capacity = get_capacity_manager()
         max_parallel_tasks = db.get_max_parallel_tasks(name)
+        cb_enabled = dispatch_breaker_active(name)  # #526: combined global + per-agent gate
         effective_timeout = request.timeout_seconds
         if effective_timeout is None:
             effective_timeout = db.get_execution_timeout(name)
@@ -1092,6 +1139,7 @@ async def execute_parallel_task(
                 message_preview=request.message[:100] if request.message else "",
                 timeout_seconds=effective_timeout,
                 overflow_policy="queue_persistent",
+                breaker_enabled=cb_enabled,
                 overflow_payload=PersistentTaskPayload(
                     request=request,
                     effective_timeout=effective_timeout,
@@ -1127,6 +1175,12 @@ async def execute_parallel_task(
                     f"and its backlog is full. Try again later."
                 ),
             ) from e
+        except CircuitOpen as e:
+            # #526: dispatch breaker open — raised before the queue_persistent
+            # enqueue, so nothing was backlogged. Close the pre-created row
+            # FAILED(circuit_open) and return 503.
+            logger.warning(f"[Task Async] Agent '{name}' dispatch circuit open, rejecting")
+            _raise_circuit_open_503(name, execution_id, e)
 
         if cap_result.state == "queued_persistent":
             logger.info(
@@ -1164,6 +1218,7 @@ async def execute_parallel_task(
                 is_self_task=is_self_task,
                 self_task_activity_id=self_task_activity_id,
                 images=_image_data,
+                dispatch_gate_checked=True,  # #526: router already gated at acquire()
             )
         )
         bg_task.add_done_callback(_on_task_done)
@@ -1185,6 +1240,7 @@ async def execute_parallel_task(
     # CAPACITY-CONSOLIDATE (#428): single CapacityManager.acquire call.
     capacity = get_capacity_manager()
     sync_max_parallel_tasks = db.get_max_parallel_tasks(name)
+    sync_cb_enabled = dispatch_breaker_active(name)  # #526: combined global + per-agent gate
     sync_effective_timeout = request.timeout_seconds
     if sync_effective_timeout is None:
         sync_effective_timeout = db.get_execution_timeout(name)
@@ -1197,6 +1253,7 @@ async def execute_parallel_task(
             message_preview=request.message[:100] if request.message else "",
             timeout_seconds=sync_effective_timeout,
             overflow_policy="queue_persistent",
+            breaker_enabled=sync_cb_enabled,
             overflow_payload=PersistentTaskPayload(
                 request=request,
                 effective_timeout=sync_effective_timeout,
@@ -1230,6 +1287,11 @@ async def execute_parallel_task(
                 f"and its backlog is full. Try again later."
             ),
         ) from e
+    except CircuitOpen as e:
+        # #526: dispatch breaker open — raised before the queue_persistent
+        # enqueue. Close the pre-created row FAILED(circuit_open) and 503.
+        logger.warning(f"[Task Sync] Agent '{name}' dispatch circuit open, rejecting")
+        _raise_circuit_open_503(name, execution_id, e)
 
     sync_slot_acquired = sync_cap_result.state == "admitted"
 
@@ -1336,6 +1398,7 @@ async def execute_parallel_task(
         execution_id=execution_id,
         slot_already_held=True,  # Issue #498: router pre-acquired
         images=_image_data,
+        dispatch_gate_checked=True,  # #526: router already gated at acquire()
     )
 
     # Complete collaboration activity based on result

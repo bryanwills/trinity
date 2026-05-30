@@ -484,6 +484,15 @@ class AgentDefaultResourcesUpdate(BaseModel):
     memory: Optional[str] = None
 
 
+class CircuitBreakerConfigUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/circuit-breaker (RELIABILITY-007, #526).
+
+    Per-agent opt-in for the dispatch breaker. Gated again by the global
+    DISPATCH_BREAKER_ENABLED master switch — both must be on to engage.
+    """
+    enabled: bool
+
+
 # =============================================================================
 # Soft-Delete Admin Recovery (#834 Phase 1c)
 # =============================================================================

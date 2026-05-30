@@ -558,6 +558,19 @@ class DatabaseManager:
         return self._agent_ops.get_all_agents_parallel_capacity()
 
     # =========================================================================
+    # Dispatch Circuit Breaker opt-in (delegated to db/agents.py) - #526
+    # =========================================================================
+
+    def get_circuit_breaker_enabled(self, agent_name: str) -> bool:
+        return self._agent_ops.get_circuit_breaker_enabled(agent_name)
+
+    def set_circuit_breaker_enabled(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_circuit_breaker_enabled(agent_name, enabled)
+
+    def get_all_circuit_breaker_enabled(self):
+        return self._agent_ops.get_all_circuit_breaker_enabled()
+
+    # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
 
@@ -601,6 +614,9 @@ class DatabaseManager:
 
     def cancel_queued_for_agent(self, agent_name: str, reason: str = "agent_deleted") -> int:
         return self._schedule_ops.cancel_queued_for_agent(agent_name, reason)
+
+    def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
+        return self._schedule_ops.fail_queued_for_agent(agent_name, reason)
 
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         return self._schedule_ops.expire_stale_queued(max_age_hours)

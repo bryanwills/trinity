@@ -899,6 +899,22 @@ def _migrate_agent_ownership_guardrails(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_circuit_breaker(cursor, conn):
+    """Add circuit_breaker_enabled column to agent_ownership (RELIABILITY-007, #526).
+
+    Per-agent opt-in for the dispatch circuit breaker. Default 0 (OFF) — a true
+    opt-in canary; the global DISPATCH_BREAKER_ENABLED master switch must ALSO
+    be on for the breaker to engage (D7/D11).
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "circuit_breaker_enabled",
+        "ALTER TABLE agent_ownership ADD COLUMN circuit_breaker_enabled INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_voice_prompt(cursor, conn):
     """Add voice_system_prompt column to agent_ownership (VOICE-005).
 
@@ -2250,4 +2266,5 @@ MIGRATIONS = [
     # #913 — must come AFTER default_execution_timeout_to_3600 so we null out
     # both 900 (legacy) and 3600 (post-#665 rewrite) in one pass.
     ("null_legacy_schedule_timeouts", _migrate_null_legacy_schedule_timeouts),
+    ("agent_ownership_circuit_breaker", _migrate_agent_ownership_circuit_breaker),
 ]

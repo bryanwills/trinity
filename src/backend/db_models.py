@@ -861,6 +861,9 @@ class AgentHealthDetail(BaseModel):
     recent_alerts: List[dict] = []
     uptime_percent_24h: Optional[float] = None
     avg_latency_24h_ms: Optional[float] = None
+    # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
+    # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
+    circuit_breaker: Optional[dict] = None
 
 
 class AgentHealthSummary(BaseModel):
@@ -1064,6 +1067,10 @@ class BulkSlotState(BaseModel):
     """Response model for bulk slot state query (Dashboard)."""
     agents: dict  # {agent_name: {"max": N, "active": M}}
     timestamp: str
+    # #526: per-agent dispatch-breaker state, ONLY for agents whose breaker is
+    # non-closed (open). Empty when the global breaker is off or all closed.
+    # {agent_name: {"state","failure_count","retry_after_seconds"}}
+    circuit_breakers: dict = {}
 
 
 # =========================================================================
