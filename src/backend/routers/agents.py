@@ -63,6 +63,7 @@ from services.agent_service import (
     get_agents_context_stats_logic,
     get_agent_stats_logic,
     invalidate_context_stats_cache,
+    invalidate_agent_stats_cache,
     # Autonomy (global view)
     get_all_autonomy_status_logic,
 )
@@ -256,14 +257,15 @@ async def get_all_sync_health(
     accessible = {a["name"] for a in get_accessible_agents(current_user)}
     rows = db.list_sync_states()
     by_name = {r["agent_name"]: r for r in rows if r["agent_name"] in accessible}
+    # #73: one scoped query instead of an N+1 per-agent lookup.
+    auto_sync_map = db.get_all_git_auto_sync_enabled(accessible)
 
     entries = []
     for name in sorted(accessible):
         row = by_name.get(name)
-        auto_sync = db.get_git_auto_sync_enabled(name)
         entries.append({
             "agent_name": name,
-            "auto_sync_enabled": bool(auto_sync),
+            "auto_sync_enabled": auto_sync_map.get(name, False),
             "last_sync_at": (row or {}).get("last_sync_at"),
             "last_sync_status": (row or {}).get("last_sync_status") or "never",
             "consecutive_failures": (row or {}).get("consecutive_failures") or 0,
@@ -479,6 +481,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     # sweep; the unique constraint on agent_name naturally blocks reuse
     # during the retention window.
     db.delete_agent_ownership(agent_name)
+    invalidate_agent_stats_cache(agent_name)  # #73
 
     # SEC-001: audit delete after all cleanup and ownership removal committed.
     await platform_audit_service.log(
@@ -511,6 +514,7 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
     try:
         result = await start_agent_internal(agent_name)
         invalidate_context_stats_cache()  # PERF-269
+        invalidate_agent_stats_cache(agent_name)  # #73
         credentials_status = result.get("credentials_injection", "unknown")
         credentials_result = result.get("credentials_result", {})
 
@@ -560,6 +564,7 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
     try:
         await container_stop(container)
         invalidate_context_stats_cache()  # PERF-269
+        invalidate_agent_stats_cache(agent_name)  # #73
 
         # SEC-001: audit after container_stop returns cleanly.
         await platform_audit_service.log(
