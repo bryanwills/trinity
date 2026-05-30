@@ -19,6 +19,7 @@ Issue: https://github.com/Abilityai/trinity/issues/73
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 from fastapi import HTTPException
@@ -53,15 +54,20 @@ class _FakeContainer:
 
 @pytest.fixture(autouse=True)
 def _reset_stats_state():
-    """Clear the module-level per-agent cache/locks/gen before AND after each
-    test so cases don't leak cache entries into one another."""
-    stats_mod._agent_stats_cache.clear()
-    stats_mod._agent_stats_locks.clear()
-    stats_mod._agent_stats_gen.clear()
+    """Clear the consolidated per-agent cache (data/lock/gen live in one entry
+    now) before AND after each test so cases don't leak entries into one
+    another."""
+    stats_mod._agent_stats.clear()
     yield
-    stats_mod._agent_stats_cache.clear()
-    stats_mod._agent_stats_locks.clear()
-    stats_mod._agent_stats_gen.clear()
+    stats_mod._agent_stats.clear()
+
+
+def _is_cached(agent_name: str) -> bool:
+    """True when the agent has a live (non-stale) cached payload. After the
+    #73 consolidation an entry is kept (not popped) on invalidation/miss/error
+    with data=None, so 'not cached' means 'no entry OR entry.data is None'."""
+    entry = stats_mod._agent_stats.get(agent_name)
+    return entry is not None and entry.data is not None
 
 
 def _install_fast_docker(monkeypatch, *, running: bool = True, container=None):
@@ -196,7 +202,7 @@ async def test_invalidation_recomputes(monkeypatch):
     assert calls["n"] == 1
 
     stats_mod.invalidate_agent_stats_cache("agent-a")
-    assert "agent-a" not in stats_mod._agent_stats_cache
+    assert not _is_cached("agent-a")
 
     await stats_mod.get_agent_stats_logic("agent-a", None)
     assert calls["n"] == 2
@@ -236,7 +242,7 @@ async def test_invalidation_during_inflight_discards_stale_write(monkeypatch):
     result = await leader  # leader still returns its computed payload
 
     assert result["status"] == "running"
-    assert "agent-a" not in stats_mod._agent_stats_cache, (
+    assert not _is_cached("agent-a"), (
         "stale in-flight write must be discarded after invalidation"
     )
 
@@ -256,7 +262,7 @@ async def test_missing_container_404_not_cached(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await stats_mod.get_agent_stats_logic("agent-a", None)
     assert exc.value.status_code == 404
-    assert "agent-a" not in stats_mod._agent_stats_cache
+    assert not _is_cached("agent-a")
 
 
 @pytest.mark.unit
@@ -267,7 +273,7 @@ async def test_not_running_400_not_cached(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await stats_mod.get_agent_stats_logic("agent-a", None)
     assert exc.value.status_code == 400
-    assert "agent-a" not in stats_mod._agent_stats_cache
+    assert not _is_cached("agent-a")
 
 
 @pytest.mark.unit
@@ -293,7 +299,7 @@ async def test_compute_failure_500_not_cached(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await stats_mod.get_agent_stats_logic("agent-a", None)
     assert exc.value.status_code == 500
-    assert "agent-a" not in stats_mod._agent_stats_cache
+    assert not _is_cached("agent-a")
 
     # Not pinned: the failing agent recomputes on the next call (no stale cache).
     with pytest.raises(HTTPException):
@@ -329,7 +335,7 @@ async def test_ttl_zero_disables_cache(monkeypatch):
     await stats_mod.get_agent_stats_logic("agent-a", None)
 
     assert calls["n"] == 2
-    assert "agent-a" not in stats_mod._agent_stats_cache
+    assert not _is_cached("agent-a")
 
 
 # --- payload parity (frontend contract) -------------------------------------
@@ -395,7 +401,11 @@ class _FakeLifecycleContainer:
 
 
 def _seed_cache(agent_name: str):
-    stats_mod._agent_stats_cache[agent_name] = {"data": {}, "timestamp": 0.0}
+    # Seed a live (non-stale) slot: data is a non-None payload so _is_cached()
+    # is True until something invalidates it.
+    stats_mod._agent_stats[agent_name] = stats_mod._AgentStatsEntry(
+        data={}, timestamp=0.0
+    )
 
 
 @pytest.mark.unit
@@ -405,7 +415,7 @@ async def test_container_stop_invalidates_stats_cache():
 
     _seed_cache("agent-x")
     await docker_utils.container_stop(_FakeLifecycleContainer("agent-x"))
-    assert "agent-x" not in stats_mod._agent_stats_cache
+    assert not _is_cached("agent-x")
 
 
 @pytest.mark.unit
@@ -415,7 +425,7 @@ async def test_container_start_invalidates_stats_cache():
 
     _seed_cache("agent-x")
     await docker_utils.container_start(_FakeLifecycleContainer("agent-x"))
-    assert "agent-x" not in stats_mod._agent_stats_cache
+    assert not _is_cached("agent-x")
 
 
 @pytest.mark.unit
@@ -425,7 +435,7 @@ async def test_container_remove_invalidates_stats_cache():
 
     _seed_cache("agent-x")
     await docker_utils.container_remove(_FakeLifecycleContainer("agent-x"))
-    assert "agent-x" not in stats_mod._agent_stats_cache
+    assert not _is_cached("agent-x")
 
 
 @pytest.mark.unit
@@ -439,7 +449,7 @@ async def test_container_rename_invalidates_old_name():
     await docker_utils.container_rename(
         _FakeLifecycleContainer("old-agent"), "agent-new-agent"
     )
-    assert "old-agent" not in stats_mod._agent_stats_cache
+    assert not _is_cached("old-agent")
 
 
 @pytest.mark.unit
@@ -453,7 +463,7 @@ async def test_invalidation_falls_back_to_container_name():
     await docker_utils.container_stop(
         _FakeLifecycleContainer("labelless", by_label=False)
     )
-    assert "labelless" not in stats_mod._agent_stats_cache
+    assert not _is_cached("labelless")
 
 
 @pytest.mark.unit
@@ -472,4 +482,32 @@ async def test_non_agent_container_invalidation_is_noop():
 
     _seed_cache("agent-x")
     await docker_utils.container_stop(_Plain())  # must not raise
-    assert "agent-x" in stats_mod._agent_stats_cache  # untouched
+    assert _is_cached("agent-x")  # untouched
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_invalidation_failure_logs_warning(monkeypatch, caplog):
+    """#73 (2A): a SYSTEMATIC invalidation failure must surface at WARNING, not
+    be swallowed at debug. Otherwise a regression (e.g. the lazy import
+    breaking) would silently no-op every invalidation fleet-wide, visible only
+    as <=TTL stale stats. The per-call swallow itself is preserved — the
+    lifecycle op must not break."""
+    from services import docker_utils
+
+    def _boom(_name):
+        raise RuntimeError("invalidate boom")
+
+    # The lazy `from ...stats import invalidate_agent_stats_cache` reads this
+    # attribute at call time, so patching it on the module makes the inner call
+    # raise.
+    monkeypatch.setattr(stats_mod, "invalidate_agent_stats_cache", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        # Must not raise even though invalidation blows up.
+        await docker_utils.container_stop(_FakeLifecycleContainer("agent-x"))
+
+    assert any(
+        r.levelno == logging.WARNING and "stats-cache invalidation skipped" in r.message
+        for r in caplog.records
+    ), "a systematic invalidation failure must be logged at WARNING"
