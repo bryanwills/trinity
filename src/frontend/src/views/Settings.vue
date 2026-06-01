@@ -1237,19 +1237,19 @@ Example:
                 </form>
               </div>
 
-              <!-- Users Table — overflow-x-auto so the (wider, when entitled)
-                   table scrolls within the card instead of clipping the
-                   Management actions (#995). -->
-              <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-x-auto">
+              <!-- Users Table — padding trimmed + compact actions so the
+                   entitlement-gated Management column fits the max-w-4xl
+                   card without a horizontal scrollbar (#995). -->
+              <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                   <thead class="bg-gray-50 dark:bg-gray-700">
                     <tr>
-                      <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">User</th>
-                      <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Email</th>
-                      <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Role</th>
-                      <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Login</th>
+                      <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">User</th>
+                      <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Email</th>
+                      <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Role</th>
+                      <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Login</th>
                       <!-- #995 — enterprise user management actions; column only when entitled -->
-                      <th v-if="umEntitled" scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                      <th v-if="umEntitled" scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                         Management
                         <span class="ml-1 px-1.5 py-0.5 text-[9px] font-bold rounded bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-200 align-middle">PRO</span>
                       </th>
@@ -1265,13 +1265,13 @@ Example:
                       <td :colspan="umEntitled ? 5 : 4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">No users found.</td>
                     </tr>
                     <tr v-else v-for="u in usersList" :key="u.username" class="hover:bg-gray-50 dark:hover:bg-gray-700">
-                      <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                      <td class="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                         {{ u.name || u.username }}
                       </td>
-                      <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                      <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                         {{ u.email || u.username }}
                       </td>
-                      <td class="px-6 py-4 whitespace-nowrap text-sm">
+                      <td class="px-4 py-4 whitespace-nowrap text-sm">
                         <select
                           v-if="u.username !== currentUsername"
                           :value="u.role"
@@ -1287,12 +1287,12 @@ Example:
                           {{ u.role }} (you)
                         </span>
                       </td>
-                      <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                      <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                         {{ u.last_login ? formatDate(u.last_login) : 'Never' }}
                       </td>
-                      <td v-if="umEntitled" class="px-6 py-4 whitespace-nowrap text-sm">
-                        <div class="flex items-center gap-3">
-                          <span v-if="u.suspended_at" class="px-2 py-0.5 text-xs font-medium rounded-full bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300">
+                      <td v-if="umEntitled" class="px-4 py-4 text-sm">
+                        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                          <span v-if="u.suspended_at" class="px-2 py-0.5 font-medium rounded-full bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300">
                             Deactivated
                           </span>
                           <button @click="openActivity(u)" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Activity</button>
