@@ -97,6 +97,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `agents.py` - Core CRUD, start/stop, logs, stats, queue, activities, terminal (642 lines)
 - `agent_config.py` - Per-agent settings: autonomy, read-only, resources, capabilities, capacity, timeout, api-key
 - `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders, file-sharing toggle + list/revoke (FILES-001)
+- `loops.py` - Sequential agent loops: start/get/stop + agent-scoped list (#740)
 - `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
 - `agent_ssh.py` - SSH access endpoint
@@ -202,6 +203,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `nevermined_payment_service.py` - x402 payment verification and settlement (NVM-001)
 - `proactive_message_service.py` - Agent-to-user proactive messaging with rate limiting and audit (#321)
 - `agent_shared_files_service.py` - Outbound file sharing: path validation, MIME blocklist, quota, Docker `get_archive` extraction, URL building (FILES-001)
+- `loop_service.py` - Sequential agent loops: in-process `asyncio.Task` runner, cooperative stop, template substitution, WS events (`loop_run_completed`, `loop_completed`) (#740)
 
 **Channel Adapters (`adapters/`)** — Pluggable external messaging (SLACK-002):
 
@@ -326,6 +328,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 | `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging (#349) |
 | `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
 | `files.ts` (1) | `share_file` | Outbound file sharing — publish file from `/home/developer/public/` and return download URL (FILES-001) |
+| `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
 | `memory.ts` (1) | `write_user_memory` | Write per-user memory blob in isolated store; resolves user email server-side from execution_id (MEM-001, #888) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
@@ -362,7 +365,7 @@ docker exec trinity-vector sh -c "tail -50 /data/logs/agents.json" | jq .
 **Internal Server:** `agent-server.py`
 - FastAPI app on port 8000
 - `/api/chat` - Claude Code execution (messages persisted to database)
-- `/health` - Health check
+- `/health` - Health check. Beyond `{status}`, returns a richer signal (#1020): `active_tasks` (concurrent executions across `/api/chat` + `/api/task`), `last_task_at` (ISO), `consecutive_failures` (reset on success, incremented on failure — consumed by the dispatch circuit breaker #526 and fleet-health #307), plus the #333 `diagnostics` gauges. `mailbox_depth` is intentionally NOT emitted — there is no agent-side mailbox until the actor model (#945); the backend derives queue depth from `CapacityManager`. Counters live in `agent_server/state.py` (`record_task_start`/`record_task_finish`); the backend reads `consecutive_failures`/`last_task_at` in `monitoring_service.py` (graceful default for pre-#1020 agent images).
 - `/api/credentials/update` - Hot-reload credentials
 - `/api/chat/session` - Context window stats
 - `/api/files` - List workspace files (recursive tree structure)
@@ -399,7 +402,7 @@ Services that run continuously in the backend process:
 
 | Service | Module | Description |
 |---------|--------|-------------|
-| **Cleanup Service** | `cleanup_service.py` | Active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery. Runs every 5 min. Also runs the #772 retention sweeps: nulls `schedule_executions.execution_log` past `execution_log_retention_days` (default 30), DELETEs terminal `schedule_executions` rows past `execution_row_retention_days` (default 90), and DELETEs `agent_health_checks` rows past `health_check_retention_days` (default 7). Also runs the #834 Phase 1a soft-deleted-agent purge: hard-deletes `agent_ownership` rows whose `deleted_at` is older than `agent_soft_delete_retention_days` (default 180, `0` = disabled), cascading child tables via the #816 `purge_agent_ownership`/`cascade_delete` primitive. Also runs the #834 Phase 1b soft-deleted-schedule purge: hard-deletes `agent_schedules` rows whose `deleted_at` is older than `schedule_soft_delete_retention_days` (default 30, `0` = disabled) via `purge_schedule()`, which cascades the row's `schedule_executions` (no #816 chain — schedules have no #816-registered children). Each sweep is capped at 5000 rows/cycle so the first post-deploy backfill spans hours, not minutes; `0` disables a sweep. Triggers `PRAGMA wal_checkpoint(TRUNCATE)` when any sweep reclaims rows. (CLEANUP-001, #129, #772, #834) |
+| **Cleanup Service** | `cleanup_service.py` | Active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery. Runs every 5 min. Also runs the #772 retention sweeps: nulls `schedule_executions.execution_log` past `execution_log_retention_days` (default 30), DELETEs terminal `schedule_executions` rows past `execution_row_retention_days` (default 90), and DELETEs `agent_health_checks` rows past `health_check_retention_days` (default 7). Also runs the #834 Phase 1a soft-deleted-agent purge: hard-deletes `agent_ownership` rows whose `deleted_at` is older than `agent_soft_delete_retention_days` (default 180, `0` = disabled), cascading child tables via the #816 `purge_agent_ownership`/`cascade_delete` primitive. Also runs the #834 Phase 1b soft-deleted-schedule purge: hard-deletes `agent_schedules` rows whose `deleted_at` is older than `schedule_soft_delete_retention_days` (default 30, `0` = disabled) via `purge_schedule()`, which cascades the row's `schedule_executions` (no #816 chain — schedules have no #816-registered children). Each sweep is capped at 5000 rows/cycle so the first post-deploy backfill spans hours, not minutes; `0` disables a sweep. Triggers `PRAGMA wal_checkpoint(TRUNCATE)` when any sweep reclaims rows. **Startup hook (#740):** one-shot `mark_orphan_loops_interrupted()` flips any `agent_loops` row left in `queued`/`running` after a restart to `interrupted` (`stop_reason="interrupted"`); loops do not auto-resume. (CLEANUP-001, #129, #772, #834, #740) |
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back. (OPS-001) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s, upserts `agent_sync_state`, emits `sync_failing` operator-queue entries when consecutive_failures ≥ 3. (#389 S1) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval. (MON-001) |
@@ -837,6 +840,17 @@ anywhere — the canary's value depends on determinism.
 
 Storage: `/data/agent-files/{file_id}` under the existing `trinity-data` volume (no compose changes). Agent writes to `/home/developer/public/` (Docker volume `agent-{name}-public`); backend uses Docker SDK `get_archive` to extract the named file on demand — never mounts the agent workspace.
 
+### Sequential Agent Loops (#740, NEW: 2026-05-20)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/agents/{name}/loops` | JWT/MCP | Start a loop; returns `{loop_id, status, agent_name, max_runs}` immediately (202). Body: `message` (template, supports `{{run}}` + `{{previous_response}}`), `max_runs` (1–100, required), `stop_signal`, `delay_seconds`, `timeout_per_run`, `model`, `allowed_tools`. |
+| GET | `/api/agents/{name}/loops` | JWT/MCP | List loops for the agent, optional `?status=`, `?limit=` (1–200, default 50). |
+| GET | `/api/loops/{loop_id}` | JWT/MCP | Status + per-run summaries + last full response. 404 if unknown; 403 if caller is neither initiator nor agent-accessor. |
+| POST | `/api/loops/{loop_id}/stop` | JWT/MCP | Graceful stop. Returns `{status: "stopping" \| "already_done"}`. |
+
+MCP tools: `run_agent_loop`, `get_loop_status`, `stop_loop` (`src/mcp-server/src/tools/loops.ts`). Loop runner lives in `services/loop_service.py`; each iteration dispatches through `task_execution_service.execute_task()` with `triggered_by="loop"` and the parent `loop_id` carried on the resulting `schedule_executions` row.
+
 ### Platform Settings (5 endpoints)
 
 | Method | Path | Description |
@@ -844,7 +858,7 @@ Storage: `/data/agent-files/{file_id}` under the existing `trinity-data` volume 
 | GET | `/api/settings/mcp-url` | Get configured MCP server URL (any auth user) |
 | PUT | `/api/settings/mcp-url` | Set MCP server URL (admin-only) |
 | DELETE | `/api/settings/mcp-url` | Reset to auto-detect (admin-only) |
-| GET | `/api/settings/feature-flags` | Public-safe feature flags for UI gating (any auth user). Exposes `session_tab_enabled` (SESSION_TAB Phase 3), `voice_available` (`VOICE_ENABLED && bool(GEMINI_API_KEY)`, #699), and `workspace_available` (`voice_available AND WORKSPACE_ENABLED`, #860 — opt-in, default False). |
+| GET | `/api/settings/feature-flags` | Public-safe feature flags for UI gating (any auth user). Exposes `session_tab_enabled` (SESSION_TAB Phase 3), `voice_available` (`VOICE_ENABLED && bool(GEMINI_API_KEY)`, #699), `workspace_available` (`voice_available AND WORKSPACE_ENABLED`, #860 — opt-in, default False), and `enterprise_features` — the list of registered enterprise modules (`EntitlementService.list_entitled_features()`; empty in OSS-only builds or under `TRINITY_OSS_ONLY=1`), which gates every enterprise UI surface in the OSS bundle (#847). |
 | GET | `/api/settings/agent-defaults/resources` | Get fleet-wide default CPU/memory for new containers (admin-only, RES-001) |
 | PUT | `/api/settings/agent-defaults/resources` | Set fleet-wide default CPU/memory; valid CPU: 1/2/4/8/16; valid memory: 1g–32g (admin-only, RES-001) |
 
@@ -863,6 +877,28 @@ Storage: `/data/agent-files/{file_id}` under the existing `trinity-data` volume 
 
 All endpoints return 404 when `is_session_tab_enabled()` is false. The flag at `system_settings.session_tab_enabled` (or `SESSION_TAB_ENABLED` env) is **default ON since GA 2026-05-04**; settable to false to disable platform-wide. All endpoints enforce per-user ownership and return 404 (not 403) on mismatch to avoid leaking session-id existence.
 
+### Enterprise Modules (#847 seam)
+
+Open-core: enterprise backend code lives in the private `trinity-enterprise`
+submodule mounted at `src/backend/enterprise/`. `main.py` conditionally
+`register_enterprise(app)` (no-op `ImportError` in OSS-only builds). Each
+module calls `entitlement_service.register_module("<id>")`; the registry
+drives `GET /api/settings/feature-flags` → `enterprise_features`, which the
+OSS Vue bundle reads to show/hide every enterprise surface. `requires_entitlement("<id>")`
+(in `dependencies.py`) gates each enterprise endpoint (403 when unentitled;
+404 when the submodule is absent and the router was never mounted).
+`TRINITY_OSS_ONLY=1` hard-empties the registry.
+
+| Feature id | Module | Surface |
+|------------|--------|---------|
+| `audit` | (#941) | Entitlement only — flips the OSS audit-log dashboard route visible; `/api/audit-log/*` stay OSS. |
+| `user_management` | `enterprise/backend/user_management/` (#995) | Org lifecycle: **invite** (whitelists the email + sends an `EmailService` invite), **deactivate/reactivate** (over the OSS `users.suspended_at` primitive), per-user **activity** view (reads OSS `audit_log`). Endpoints under `/api/enterprise/user-management/*`; UI integrated into Settings → User Management (gated). |
+| `siem` | `enterprise/backend/siem/` (#997) | **SIEM log export** — ships OSS `audit_log` to a customer SIEM over an HTTP/JSON webhook. Private `enterprise_siem_config` (destination + AES-encrypted token + export cursor); background daemon pusher (Redis-lock-serialised across workers); at-least-once (cursor advances only on a successful POST). Endpoints under `/api/enterprise/siem/*`. No OSS/UI surface. |
+
+Enterprise tables migrate via the two-track runner (Invariant #3): one file
+per migration in each module's `migrations/` package, tracked in
+`enterprise_schema_migrations`.
+
 ---
 
 ## Architectural Invariants
@@ -873,7 +909,7 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 2. **DB Layer: Class-per-domain with Mixin Composition** — Each `db/` file defines an `XOperations` class. Agent-specific settings use mixins (`db/agent_settings/`) composed into `AgentOperations`. New agent settings → new mixin, not a bigger class.
 
-3. **Schema in `db/schema.py`, Migrations in `db/migrations.py`** — All table DDL lives in `schema.py`. Schema changes require a versioned migration in `migrations.py`. Never create tables ad-hoc in service code.
+3. **Schema in `db/schema.py`, Migrations in `db/migrations.py`** — All OSS table DDL lives in `schema.py`. Schema changes require a versioned migration in `migrations.py` (tracked in the `schema_migrations` table). Never create tables ad-hoc in service code. **Two-track migrations (open-core):** enterprise modules own only `enterprise_*` tables and migrate them through a **separate** runner (`enterprise/backend/_migrations.py`) tracked in `enterprise_schema_migrations` — never the OSS `schema_migrations`, so the two version-lines can't collide. Enterprise authors one file per migration in the module's `migrations/` package (`NNNN_slug.py` with `NAME` + `upgrade(cursor, conn)`, auto-discovered in filename order). Enterprise migrations may FK-into OSS tables but must **never ALTER** an OSS table — anything OSS must enforce goes through an OSS migration as an edition-agnostic primitive (e.g. `users.suspended_at`, #995). The enterprise runner is invoked from `register_enterprise` *after* OSS `init_database`, so OSS tables already exist.
 
 4. **Router Registration Order Matters** — In `main.py`, static routes like `/api/agents/context-stats` must come before `/{name}` catch-all. New collection-level agent endpoints must be registered before parameterized routes.
 
@@ -924,9 +960,19 @@ CREATE TABLE users (
     email TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    last_login TEXT
+    last_login TEXT,
+    suspended_at TEXT                   -- #995: NULL = active; set = deactivated
 );
 ```
+
+**User deactivation primitive (#995):** `suspended_at` is an
+edition-agnostic primitive. OSS owns the column **and** its enforcement —
+`dependencies.get_current_user` rejects any user with `suspended_at` set
+on both the JWT and MCP-key paths, so setting it blocks new logins **and**
+invalidates live tokens on the next request. `/api/users` exposes it
+(read-only). Only the **enterprise** `user_management` module exposes a
+way to set/clear it (core-primitive + enterprise-knob, same shape as
+#834). OSS-only builds ship the column + enforcement but no setter.
 
 **agent_ownership:**
 ```sql
@@ -1103,13 +1149,84 @@ CREATE TABLE schedule_executions (
     queued_at TEXT,                              -- BACKLOG-001: When task entered backlog
     backlog_metadata TEXT,                       -- BACKLOG-001: JSON identity/request for drain replay
     retry_count INTEGER DEFAULT 0,               -- #678: in-line auto-retry count for reader-race recovery
+    fan_out_id TEXT,                             -- FANOUT-001: Parent fan-out operation ID
+    loop_id TEXT,                                -- #740: Parent agent_loops.id for sequential-loop iterations
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 
 -- BACKLOG-001: Partial index for cheap atomic FIFO claim
 CREATE INDEX idx_executions_queued ON schedule_executions(agent_name, queued_at)
     WHERE status = 'queued';
+-- #740: Partial index for joining executions back to their parent loop
+CREATE INDEX idx_executions_loop ON schedule_executions(loop_id)
+    WHERE loop_id IS NOT NULL;
 ```
+
+**agent_loops + agent_loop_runs:** (#740 — Sequential agent loops)
+```sql
+CREATE TABLE agent_loops (
+    id TEXT PRIMARY KEY,                         -- 'loop_<urlsafe>'
+    agent_name TEXT NOT NULL,
+    message_template TEXT NOT NULL,              -- Supports {{run}} and {{previous_response}}
+    max_runs INTEGER NOT NULL,                   -- 1–100 hard cap
+    stop_signal TEXT,                            -- NULL = fixed mode; set = until mode
+    delay_seconds INTEGER NOT NULL DEFAULT 0,
+    timeout_per_run INTEGER,                     -- NULL = agent's execution_timeout_seconds
+    model TEXT,
+    allowed_tools TEXT,                          -- JSON array
+    status TEXT NOT NULL,                        -- queued | running | completed | stopped | failed | interrupted
+    runs_completed INTEGER NOT NULL DEFAULT 0,
+    stop_reason TEXT,                            -- max_runs_reached | stop_signal_matched | user_stopped | error | interrupted
+    last_response TEXT,
+    error TEXT,
+    started_by_user_id INTEGER,
+    started_by_user_email TEXT,
+    source_agent_name TEXT,
+    source_mcp_key_id TEXT,
+    source_mcp_key_name TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX idx_loops_agent ON agent_loops(agent_name);
+CREATE INDEX idx_loops_status ON agent_loops(status);
+CREATE INDEX idx_loops_user ON agent_loops(started_by_user_id);
+
+CREATE TABLE agent_loop_runs (
+    id TEXT PRIMARY KEY,                         -- 'lr_<urlsafe>'
+    loop_id TEXT NOT NULL,
+    run_number INTEGER NOT NULL,                 -- 1-indexed
+    execution_id TEXT,                           -- joins back to schedule_executions
+    status TEXT NOT NULL,                        -- running | completed | failed
+    response TEXT,                               -- Full response for this iteration
+    error TEXT,
+    cost REAL,
+    duration_ms INTEGER,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY (loop_id) REFERENCES agent_loops(id)
+);
+CREATE INDEX idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number);
+```
+
+**Sequential Agent Loops Features:**
+- Loop runner lives in-process as an `asyncio.Task` spawned by
+  `services/loop_service.py`. Each iteration calls
+  `task_execution_service.execute_task()` with
+  `triggered_by="loop"` and the parent `loop_id`; the iteration goes
+  through the standard `capacity_manager` admit/slot path so loops
+  share the agent's `max_parallel_tasks` budget with other traffic.
+- Stop semantics: cooperative. `POST /api/loops/{id}/stop` flips an
+  in-process `should_stop` flag; the current iteration finishes
+  (sequential, fire-and-disconnect) and the runner exits with
+  `stop_reason="user_stopped"`.
+- Restart recovery: `cleanup_service` runs `mark_orphan_loops_interrupted()`
+  on startup — any leftover `queued`/`running` rows flip to
+  `interrupted` with `stop_reason="interrupted"`. Loops do not
+  auto-resume.
+- Timeline integration: iterations appear as normal `schedule_executions`
+  rows tagged with `loop_id` — no dedicated dashboard surface in
+  Phase 1.
 
 **agent_activities:** (Phase 9.7 - Unified Activity Stream)
 ```sql
