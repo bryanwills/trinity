@@ -59,14 +59,16 @@ _RL_PY = _BACKEND / "services" / "rate_limiter.py"
 
 
 @pytest.fixture
-def rl():
+def rl(monkeypatch):
     """Load services/rate_limiter.py standalone (no heavy services/__init__)."""
     backend_str = str(_BACKEND)
     if backend_str not in sys.path:
         sys.path.insert(0, backend_str)
     spec = importlib.util.spec_from_file_location("_rate_limiter_under_test", str(_RL_PY))
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    # monkeypatch.setitem auto-restores (deletes) the entry at teardown so the
+    # standalone module doesn't leak into sys.modules (sys.modules pollution lint).
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     module.clear_inprocess()
     return module
