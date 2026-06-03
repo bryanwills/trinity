@@ -67,8 +67,12 @@ def _make_message(is_group: bool = False) -> NormalizedMessage:
 
 
 @contextmanager
-def _env(policy: dict):
-    """Patch every collaborator the pipeline touches; yield the db + service mocks."""
+def _env(policy: dict, rate_ok: bool = True, container_status: str = "running"):
+    """Patch every collaborator the pipeline touches; yield the db + service mocks.
+
+    `rate_ok=False` simulates a rate-limited caller; `container_status` overrides
+    the agent container state (e.g. "stopped" for the availability gate).
+    """
     db = MagicMock()
     db.get_access_policy.return_value = policy
     db.email_has_agent_access.return_value = False
@@ -78,7 +82,7 @@ def _env(policy: dict):
     db.increment_public_user_memory_count.return_value = 0
 
     container = MagicMock()
-    container.status = "running"
+    container.status = container_status
 
     result = MagicMock()
     result.status = "success"
@@ -92,7 +96,7 @@ def _env(policy: dict):
     with patch.object(_MR, "db", db), \
          patch.object(_MR, "get_agent_container", return_value=container), \
          patch.object(_MR, "get_task_execution_service", return_value=service), \
-         patch.object(_MR, "_check_rate_limit", return_value=True), \
+         patch.object(_MR, "_check_rate_limit", return_value=rate_ok), \
          patch.object(_MR, "process_voice", new=AsyncMock(return_value="")), \
          patch.object(_MR, "format_user_memory_block", return_value=None), \
          patch.object(_MR, "summarize_user_memory_background", new=AsyncMock()):
@@ -178,3 +182,86 @@ def test_group_none_executes():
     with _env({"require_email": False, "open_access": False, "group_auth_mode": "none"}) as (db, service):
         _run(router, adapter, message)
     service.execute_task.assert_awaited_once()
+
+
+# --------------------------------------------------------------- entry gates (#1026)
+
+_OPEN = {"require_email": False, "open_access": True, "group_auth_mode": "none"}
+
+
+def test_no_agent_resolved_aborts():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    adapter.get_agent_name = AsyncMock(return_value=None)
+    with _env(_OPEN) as (db, service):
+        _run(router, adapter, message)
+    service.execute_task.assert_not_awaited()
+    adapter.send_response.assert_not_awaited()  # step 1 returns silently
+
+
+def test_no_bot_token_aborts():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    adapter.get_bot_token = MagicMock(return_value=None)
+    with _env(_OPEN) as (db, service):
+        _run(router, adapter, message)
+    service.execute_task.assert_not_awaited()
+    adapter.send_response.assert_not_awaited()  # step 2 returns silently
+
+
+def test_rate_limited_dm_replies_and_aborts():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    with _env(_OPEN, rate_ok=False) as (db, service):
+        _run(router, adapter, message)
+    service.execute_task.assert_not_awaited()
+    adapter.send_response.assert_awaited_once()  # "too quickly" notice
+
+
+def test_rate_limited_group_silent_drop():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message(is_group=True)
+    with _env({"require_email": False, "open_access": False, "group_auth_mode": "none"},
+              rate_ok=False) as (db, service):
+        _run(router, adapter, message)
+    service.execute_task.assert_not_awaited()
+    adapter.send_response.assert_not_awaited()  # groups drop silently
+
+
+def test_container_not_running_aborts():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    with _env(_OPEN, container_status="exited") as (db, service):
+        _run(router, adapter, message)
+    service.execute_task.assert_not_awaited()
+    adapter.send_response.assert_awaited_once()  # "not available" notice
+
+
+def test_not_verified_aborts():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    adapter.handle_verification = AsyncMock(return_value=False)
+    with _env(_OPEN) as (db, service):
+        _run(router, adapter, message)
+    service.execute_task.assert_not_awaited()
+
+
+def test_happy_path_persists_and_sends():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    with _env(_OPEN) as (db, service):
+        _run(router, adapter, message)
+    service.execute_task.assert_awaited_once()
+    adapter.send_response.assert_awaited_once()      # agent reply delivered
+    adapter.on_response_sent.assert_awaited_once()   # post-response hook
+    assert db.add_public_chat_message.call_count == 2  # user + assistant persisted
+
+
+def test_execution_failed_replies_error_and_skips_finalize():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    with _env(_OPEN) as (db, service):
+        failed = MagicMock()
+        failed.status = "failed"
+        failed.error = "boom"
+        failed.response = None
+        failed.cost = 0.0
+        failed.execution_id = "e1"
+        service.execute_task = AsyncMock(return_value=failed)
+        _run(router, adapter, message)
+    service.execute_task.assert_awaited_once()
+    adapter.send_response.assert_awaited_once()        # error reply sent
+    adapter.on_response_sent.assert_not_awaited()      # finalize NOT reached
+    db.add_public_chat_message.assert_not_called()     # nothing persisted on failure
