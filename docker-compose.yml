@@ -32,6 +32,15 @@ services:
       - VOICE_MODEL=${VOICE_MODEL:-}  # Gemini Live model override (default: gemini-2.5-flash-native-audio-preview-12-2025)
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
       - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
+      # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Master switch must
+      # reach the container or voip_available stays false (read by config.py).
+      - VOIP_ENABLED=${VOIP_ENABLED:-false}
+      - VOIP_MAX_CALL_DURATION=${VOIP_MAX_CALL_DURATION:-600}      # per-call cap (s)
+      - VOIP_DEFAULT_DAILY_CALL_CAP=${VOIP_DEFAULT_DAILY_CALL_CAP:-50}  # per-agent/day spend bound
+      - VOIP_CALL_RATE_LIMIT=${VOIP_CALL_RATE_LIMIT:-5}           # calls per owner+destination window
+      - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
+      - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
+      - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
       # OpenTelemetry Configuration (Optional)

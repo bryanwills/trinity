@@ -149,7 +149,39 @@ agent-server mirror — the bridge is backend-only.
 `VOIP_ENABLED` (default `false`), `VOIP_MAX_CALL_DURATION` (600s),
 `VOIP_DEFAULT_DAILY_CALL_CAP` (50), `VOIP_TICKET_TTL_SECONDS` (180),
 `VOIP_INTENT_TTL_SECONDS` (180), `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW`.
-`audioop-lts` pinned for `python_version >= "3.13"` (stdlib `audioop` removed in 3.13).
+All read via `os.getenv` in `src/backend/config.py`. `audioop-lts` pinned for
+`python_version >= "3.13"` (stdlib `audioop` removed in 3.13).
+
+### Deployment / packaging (env vars must reach the container)
+
+Because `VOIP_ENABLED` defaults **OFF**, the master switch only takes effect if
+it is actually present in the backend container's environment — a code default of
+`false` means setting `VOIP_ENABLED=true` in `.env` is a no-op unless compose
+forwards it. The full `VOIP_*` set is wired into the `backend.environment:` block
+of **both** `docker-compose.yml` (dev) and `docker-compose.prod.yml` (prod, which
+launches standalone with no base-compose merge), plus the `VOICE_*` flags for
+parity, and is documented in `.env.example`. Omitting these from the prod compose
+was the original packaging gap (same class as #1039's `LOG_*` no-op) — the
+supported `.env` lever did nothing because it never reached the container. The
+enterprise prod overlay (`docker-compose.prod.enterprise.yml`) inherits this env
+block, so no separate wiring is needed there.
+
+### Operator enablement checklist (prod)
+
+1. **Code/packaging** (in-repo, ships via `/update`): `VOIP_*` lines present in the
+   prod compose `backend.environment:` — ✅ done.
+2. **`.env`**: set `VOIP_ENABLED=true` (and `GEMINI_API_KEY`); recreate the backend
+   container so the value is read.
+3. **Cloudflare Tunnel ingress**: the Media Streams socket is
+   `WS /api/voip/voice/{call_id}`. The frontend nginx `location /api/` block
+   already proxies with `Upgrade`/`Connection` headers, so a catch-all
+   `* → frontend:80` tunnel hostname needs nothing extra; a tunnel that routes
+   specific paths straight to `backend:8000` must add an `api/voip/.*` route. This
+   is Cloudflare-dashboard config (`cloudflared` runs `tunnel run` with a
+   `TUNNEL_TOKEN`), not repo state.
+4. **Per-agent binding**: configure Twilio voice creds via
+   `PUT /api/agents/{name}/voip` (owner-only). Without a `voip_bindings` row the
+   feature flag is on but calls 400.
 
 ## Testing
 
