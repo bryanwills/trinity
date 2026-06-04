@@ -75,6 +75,14 @@ services:
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
       - GITHUB_PAT=${GITHUB_PAT}
+      # Log Retention & Archival Configuration (#1039)
+      # These were MISSING from prod — prod launches standalone (no base-compose
+      # merge), so an operator-set LOG_RETENTION_DAYS never reached the
+      # container and retention silently fell back to the code default. Default
+      # is the 5-day community floor; enterprise `retention` unlocks longer.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-5}
+      - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
+      - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
       # OpenTelemetry Configuration (Optional)
