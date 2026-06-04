@@ -65,6 +65,45 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 
+# Modules this test stubs into sys.modules during the import-time module load
+# below — restored synchronously inside `_load_media_stream_module()` and, as a
+# belt-and-suspenders guard, snapshot/restored around every test by the autouse
+# fixture. This named-helper pair is the sanctioned exemption from the
+# tests/lint_sys_modules.py ban on bare sys.modules mutation (Issue #762),
+# matching the precedent in tests/unit/test_telegram_webhook_backfill.py.
+_STUBBED_MODULE_NAMES = [
+    "adapters",
+    "adapters.transports",
+    "adapters.transports.voip_audio",
+    "adapters.transports.twilio_media_stream",
+    "config",
+    "database",
+    "services",
+    "services.gemini_voice",
+    "services.voip_service",
+    "services.ws_ticket_service",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot sys.modules before each test and restore after.
+
+    The heavy-leaf stubs are installed and removed inside
+    `_load_media_stream_module()` at import time; this fixture guards against
+    any per-test re-stub leaking into sibling test files in the same session.
+    """
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 def _load_media_stream_module() -> types.ModuleType:
     """Exec twilio_media_stream.py with its heavy leaf imports stubbed.
 
