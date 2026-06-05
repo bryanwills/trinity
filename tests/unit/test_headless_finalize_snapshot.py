@@ -92,6 +92,27 @@ def test_snapshot_falls_back_to_live_ctx_when_every_retry_loses():
     assert fake_metadata.model_copy.call_count == 3  # _SNAPSHOT_RETRY_ATTEMPTS
 
 
-def test_drain_budget_exceeded_defaults_false():
+def test_reader_may_be_live_defaults_false():
     """Clean runs must keep the zero-copy fast path (flag off by default)."""
-    assert _make_ctx().drain_budget_exceeded is False
+    assert _make_ctx().reader_may_be_live is False
+
+
+def test_snapshot_freezes_auth_abort_signal():
+    """A leaked stderr reader that sets auth-abort AFTER the snapshot must not
+    flip finalize's view — auth_abort_event/reason are frozen at snapshot time
+    (regression guard for the review finding on spurious 503s)."""
+    ctx = _make_ctx()
+    snap = _snapshot_for_finalize(ctx)
+
+    # Snapshot copies must be distinct objects, frozen at the not-set state.
+    assert snap.auth_abort_event is not ctx.auth_abort_event
+    assert snap.auth_abort_reason is not ctx.auth_abort_reason
+    assert snap.auth_abort_event.is_set() is False
+
+    # Leaked reader fires an auth abort on the live ctx after the snapshot.
+    ctx.auth_abort_reason.append("Not logged in")
+    ctx.auth_abort_event.set()
+
+    # Finalize's view (the snapshot) is unaffected.
+    assert snap.auth_abort_event.is_set() is False
+    assert snap.auth_abort_reason == []

@@ -198,3 +198,33 @@ def test_drain_bounded_returns_errored_and_logs_when_drain_raises(monkeypatch, c
     assert any("Drain raised" in r.message for r in caplog.records), (
         "errored drain must be logged, not swallowed"
     )
+
+
+def test_drain_bounded_returns_leaked_when_reader_survives(monkeypatch):
+    """A drain that returns within budget WITHOUT raising but leaves a reader
+    thread alive must report ``leaked`` — drain_reader_threads force-closes and
+    continues on the #586 leaked-reader case, so a within-budget return does not
+    by itself prove the readers are dead (review finding on the #1025 PR)."""
+
+    async def _fast_drain(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
+        _fast_drain,
+    )
+
+    # A real, still-alive reader thread (the leaked case).
+    stop = threading.Event()
+    leaked_reader = threading.Thread(target=stop.wait, daemon=True)
+    leaked_reader.start()
+    try:
+        outcome = _drain_bounded(_make_fake_process(), leaked_reader, grace=5, pgid=None)
+    finally:
+        stop.set()
+        leaked_reader.join(timeout=2)
+
+    assert outcome == "leaked", (
+        "a within-budget drain that leaves a reader alive must surface 'leaked' "
+        "so finalize snapshots instead of trusting the live buffers"
+    )
