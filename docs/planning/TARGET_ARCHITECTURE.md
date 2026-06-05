@@ -150,7 +150,7 @@ Redis owns state that is either transient or derivable from the primary store.
 
 ## Coordination Model (Pull / Work-Stealing)
 
-This is the central architectural shift. The full rationale is in `ORCHESTRATION_RELIABILITY_2026-04.md` and the 2026-06-05 design review — this document states the destination shape.
+This is the central architectural shift. The full rationale is in `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` and the 2026-06-05 design review — this document states the destination shape.
 
 **The one-line model:** the platform never pushes work at an agent. It writes every task as a durable row in one per-agent queue; the agent's own worker pool *pulls* the next task whenever it has a free worker, runs it, and reports the result back. A busy, overloaded, or dead agent simply stops pulling — so a task is never handed to an agent that isn't ready (the failure mode that caused most of today's instability).
 
@@ -512,7 +512,7 @@ All pull-coordination work lives under **Epic #1045 (Agent Infrastructure)**.
 | GuardAgent design + rule-based prototype | #947 |
 | Workflow-scoped capability tokens | #948 |
 
-See `ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint sequencing and gating constraints between these.
+See `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint sequencing and gating constraints between these.
 
 ---
 
