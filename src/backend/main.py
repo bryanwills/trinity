@@ -1108,7 +1108,14 @@ async def health_check():
     """Health check endpoint. Reports unhealthy if schema migrations are incomplete."""
     from db.migrations import MIGRATIONS
     from db.connection import get_db_connection
+    from db.engine import is_sqlite
     from fastapi.responses import JSONResponse
+
+    # PostgreSQL (#300) builds the schema fresh from schema.py at head and does
+    # not run the sqlite-only PRAGMA migrations, so there is no schema_migrations
+    # table to count. The migration-completeness gate is SQLite-only.
+    if not is_sqlite():
+        return {"status": "healthy", "timestamp": utc_now_iso()}
 
     expected = len(MIGRATIONS)
     try:
