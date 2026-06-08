@@ -412,7 +412,10 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-trinity}
       POSTGRES_USER: ${POSTGRES_USER:-trinity}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required when the postgres profile is enabled}
+      # Default keeps `docker compose` parseable when the postgres profile is
+      # OFF (the common case) and POSTGRES_PASSWORD is unset. Operators enabling
+      # the profile should set a real POSTGRES_PASSWORD in .env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trinity}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:

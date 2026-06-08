@@ -32,11 +32,16 @@ import pytest
 _THIS = Path(__file__).resolve()
 _BACKEND = _THIS.parent.parent.parent / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
-for _shadow in ("utils", "utils.api_client", "utils.assertions", "utils.cleanup"):
-    sys.modules.pop(_shadow, None)
 while _BACKEND_STR in sys.path:
     sys.path.remove(_BACKEND_STR)
 sys.path.insert(0, _BACKEND_STR)
+
+# tests-side `utils` package (api_client.py, …) shadows the backend's `utils`
+# (helpers.py); cleared per-test via monkeypatch.delitem so db.users' import of
+# `utils.helpers` resolves to the backend. Done in the fixture (not at module
+# import) so all sys.modules mutation goes through monkeypatch (sys.modules
+# pollution lint).
+_SHADOWS = ("utils", "utils.api_client", "utils.assertions", "utils.cleanup")
 
 pytestmark = pytest.mark.unit
 
@@ -53,18 +58,23 @@ DEFAULT_PG_URL = os.getenv(
 _PILOT_PKG = "db300pilot"
 
 
-def _load_pilot():
-    """(Re)load engine, tables, users under the synthetic pilot package."""
-    for key in [k for k in sys.modules if k == _PILOT_PKG or k.startswith(_PILOT_PKG + ".")]:
-        del sys.modules[key]
+def _load_pilot(monkeypatch):
+    """(Re)load engine, tables, users under the synthetic pilot package.
+
+    All sys.modules mutation goes through monkeypatch so it auto-restores at
+    test end (and satisfies the sys.modules pollution lint)."""
+    for _shadow in _SHADOWS:
+        monkeypatch.delitem(sys.modules, _shadow, raising=False)
+    for key in [k for k in list(sys.modules) if k == _PILOT_PKG or k.startswith(_PILOT_PKG + ".")]:
+        monkeypatch.delitem(sys.modules, key, raising=False)
     pkg = types.ModuleType(_PILOT_PKG)
     pkg.__path__ = [str(_BACKEND / "db")]
-    sys.modules[_PILOT_PKG] = pkg
+    monkeypatch.setitem(sys.modules, _PILOT_PKG, pkg)
 
     def _load(rel_path: str, name: str):
         spec = importlib.util.spec_from_file_location(name, _BACKEND / rel_path)
         mod = importlib.util.module_from_spec(spec)
-        sys.modules[name] = mod  # register before exec so relative imports resolve
+        monkeypatch.setitem(sys.modules, name, mod)  # register before exec so relative imports resolve
         spec.loader.exec_module(mod)
         return mod
 
@@ -116,7 +126,7 @@ def user_ops(request, tmp_path, monkeypatch):
     else:
         monkeypatch.setenv("DATABASE_URL", DEFAULT_PG_URL)
 
-    engine_mod, tables_mod, users_mod = _load_pilot()
+    engine_mod, tables_mod, users_mod = _load_pilot(monkeypatch)
     engine = engine_mod.get_engine()  # cached per-URL → fresh for this backend
 
     # Clean slate: drop+recreate the users table for this backend.
@@ -129,8 +139,7 @@ def user_ops(request, tmp_path, monkeypatch):
 
     tables_mod.metadata.drop_all(engine)
     engine_mod.dispose_engines()
-    for key in [k for k in sys.modules if k == _PILOT_PKG or k.startswith(_PILOT_PKG + ".")]:
-        del sys.modules[key]
+    # sys.modules entries auto-restored by monkeypatch.
 
 
 def _make_user(ops, username="alice@example.com", role="user", **kw):
