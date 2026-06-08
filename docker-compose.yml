@@ -319,6 +319,9 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
+      # #300: when set to a postgresql:// URL the scheduler reads/writes Postgres
+      # (the same DB the backend uses); unset → shared SQLite at DATABASE_PATH.
+      - DATABASE_URL=${DATABASE_URL:-}
       # Scheduler uses the same `backend` ACL user (identical access patterns).
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
