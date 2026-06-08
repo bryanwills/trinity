@@ -60,8 +60,14 @@ CREATE TABLE IF NOT EXISTS public_chat_messages (
 @pytest.fixture()
 def ops(tmp_path, monkeypatch):
     """
-    Provision a fresh SQLite file DB, point TRINITY_DB_PATH at it, and
-    return a PublicChatOperations instance ready to use.
+    Provision a fresh SQLite file DB, point the SQLAlchemy engine seam (#300)
+    at it, and return a PublicChatOperations instance ready to use.
+
+    PublicChatOperations is now SQLAlchemy-Core based (#300): it routes every
+    query through ``db/engine.py:get_engine()`` which resolves ``DATABASE_URL``.
+    So routing the ops at the temp DB means setting ``DATABASE_URL`` (not just
+    the legacy ``TRINITY_DB_PATH``) and disposing the engine cache — which is
+    keyed by URL — so the temp file's engine is the one created.
     """
     db_path = tmp_path / "trinity_test.db"
     monkeypatch.setenv("TRINITY_DB_PATH", str(db_path))
@@ -79,8 +85,16 @@ def ops(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
+    # Route the SQLAlchemy engine (#300) at the exact temp file. The engine
+    # cache is keyed by resolved URL, so dispose after setting DATABASE_URL so
+    # the temp file's engine is the one created (and dispose at teardown).
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
+
     from db.public_chat import PublicChatOperations
-    return PublicChatOperations()
+    yield PublicChatOperations()
+    engine_mod.dispose_engines()
 
 
 # ---------------------------------------------------------------------------

@@ -60,9 +60,13 @@ def slack_ops_with_temp_db(tmp_path, monkeypatch):
     """Build a SlackOperations bound to a temp SQLite DB with the
     minimum schema needed for the connection tests.
 
-    We don't go through the full `db.connection.get_db_connection` machinery
-    — we create the tables directly and patch `get_db_connection` to yield
-    our temp connection. Keeps the tests self-contained.
+    `db/slack.py` is converted to the SQLAlchemy engine seam (#300): it
+    routes through `get_engine()`, which reads DATABASE_URL. We build the
+    schema on a temp FILE, point DATABASE_URL at that exact file, and
+    dispose the URL-keyed engine cache so the temp file's engine is the
+    one created. The returned raw `conn` (a second connection to the same
+    file) is used by tests to read on-disk envelopes and insert legacy
+    rows directly.
     """
     from db import slack as slack_db
 
@@ -82,18 +86,17 @@ def slack_ops_with_temp_db(tmp_path, monkeypatch):
     """)
     conn.commit()
 
-    # Each call to get_db_connection() needs its own context manager
-    class _ConnCtx:
-        def __enter__(self):
-            return conn
-        def __exit__(self, *args):
-            return False
-
-    monkeypatch.setattr(slack_db, "get_db_connection", lambda: _ConnCtx())
+    # Route the SQLAlchemy engine (#300) at the temp file. The engine cache
+    # is keyed by URL, so dispose after setting DATABASE_URL so the temp
+    # file's engine is the one created — and again at teardown.
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
 
     ops = slack_db.SlackOperations()
     yield ops, conn, db_path
     conn.close()
+    engine_mod.dispose_engines()
 
 
 # ---------------------------------------------------------------------------

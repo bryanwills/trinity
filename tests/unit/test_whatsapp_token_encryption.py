@@ -73,17 +73,19 @@ def whatsapp_ops_with_temp_db(tmp_path, monkeypatch):
     """)
     conn.commit()
 
-    class _ConnCtx:
-        def __enter__(self):
-            return conn
-        def __exit__(self, *args):
-            return False
-
-    monkeypatch.setattr(wa_db, "get_db_connection", lambda: _ConnCtx())
+    # Route the SQLAlchemy engine (#300) at the SAME temp file the schema was
+    # built on. whatsapp_channels is fully converted to get_engine(), so the
+    # ops resolve their connection from DATABASE_URL. The engine cache is keyed
+    # by URL, so dispose after setting DATABASE_URL so the temp file's engine is
+    # the one created.
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
 
     ops = wa_db.WhatsAppChannelOperations()
     yield ops, conn, db_path
     conn.close()
+    engine_mod.dispose_engines()
 
 
 # ---------------------------------------------------------------------------

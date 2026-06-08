@@ -73,22 +73,30 @@ def encryption_key(monkeypatch):
 
 @pytest.fixture
 def voip_ops(tmp_path, monkeypatch):
-    """VoipOperations bound to a temp SQLite DB with the voip schema."""
+    """VoipOperations bound to a temp SQLite DB with the voip schema.
+
+    `db/voip.py` was converted to SQLAlchemy Core (#300), so it routes through
+    `get_engine()` (which reads DATABASE_URL) instead of the legacy
+    `get_db_connection` seam. The schema is built on a temp FILE and
+    DATABASE_URL is pointed at that exact file; the engine cache is keyed by
+    URL, so `dispose_engines()` runs before ops (so the temp file's engine is
+    the one created) and at teardown (to drop it). The `conn` yielded for the
+    test's direct verification reads opens the same file with autocommit so it
+    always sees the ops' committed writes.
+    """
     from db import voip as voip_db
 
-    conn = sqlite3.connect(str(tmp_path / "voip.db"))
+    db_path = tmp_path / "voip.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
     conn.execute(_VOIP_BINDINGS_DDL)
     conn.execute(_VOIP_CALL_LOGS_DDL)
     conn.commit()
 
-    class _ConnCtx:
-        def __enter__(self):
-            return conn
-        def __exit__(self, *args):
-            return False
-
-    monkeypatch.setattr(voip_db, "get_db_connection", lambda: _ConnCtx())
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
     yield voip_db.VoipOperations(), conn
+    engine_mod.dispose_engines()
     conn.close()
 
 

@@ -179,7 +179,16 @@ def tmp_schedule_db(tmp_path, monkeypatch):
         pytest.skip("backend venv required")
 
     monkeypatch.setattr(connection_mod, "DB_PATH", str(db_path))
-    return str(db_path)
+
+    # #300: converted db modules use get_engine() (reads DATABASE_URL),
+    # not the legacy get_db_connection seam. Point the SQLAlchemy engine
+    # at the SAME temp file and dispose the URL-keyed engine cache so the
+    # temp file's engine is the one created (before ops run AND on teardown).
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
+    yield str(db_path)
+    engine_mod.dispose_engines()
 
 
 @pytest.fixture

@@ -839,6 +839,7 @@ operator_queue = Table(
     Column("responded_by_email", Text),
     Column("responded_at", Text),
     Column("acknowledged_at", Text),
+    Column("cleared_at", Text),  # #1017 — Clear All hide flag
 )
 
 nevermined_agent_config = Table(

@@ -83,17 +83,17 @@ def slack_channels_ops_with_temp_db(tmp_path, monkeypatch):
     """)
     conn.commit()
 
-    class _ConnCtx:
-        def __enter__(self):
-            return conn
-        def __exit__(self, *args):
-            return False
-
-    monkeypatch.setattr(sc_db, "get_db_connection", lambda: _ConnCtx())
+    # Route the SQLAlchemy engine seam (#300) at the SAME temp file. Converted
+    # modules (slack_channels.py) use get_engine(), whose cache is keyed by URL,
+    # so dispose after setting DATABASE_URL to force the temp file's engine.
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
 
     ops = sc_db.SlackChannelOperations()
     yield ops, conn, db_path
     conn.close()
+    engine_mod.dispose_engines()
 
 
 # ---------------------------------------------------------------------------

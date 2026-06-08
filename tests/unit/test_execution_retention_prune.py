@@ -109,6 +109,10 @@ def db_setup(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "trinity.db"
     monkeypatch.setenv("TRINITY_DB_PATH", str(db_path))
+    # Route the SQLAlchemy engine seam (#300) at this temp file. Converted db
+    # modules use get_engine() (reads DATABASE_URL); its cache is keyed by URL,
+    # so dispose after setting DATABASE_URL so the temp file's engine is created.
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
 
     conn = sqlite3.connect(str(db_path))
     conn.executescript(_SCHEDULE_EXECUTIONS_DDL)
@@ -147,11 +151,19 @@ def db_setup(tmp_path, monkeypatch):
     sys.modules["db.monitoring"] = mon_mod
     mon_spec.loader.exec_module(mon_mod)
 
+    # Loading db.schedules / db.monitoring above pulled in db.engine via their
+    # `from .engine import get_engine`. Dispose its URL-keyed cache so the
+    # temp file's engine (DATABASE_URL set above) is the one created on first
+    # use — and dispose again at teardown to drop it.
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
+
     # ScheduleOperations needs user_ops + agent_ops in __init__, but the
     # prune methods don't touch them. Pass None placeholders.
     schedule_ops = sched_mod.ScheduleOperations(None, None)
     monitoring_ops = mon_mod.MonitoringOperations()
-    return db_path, schedule_ops, monitoring_ops
+    yield db_path, schedule_ops, monitoring_ops
+    engine_mod.dispose_engines()
 
 
 def _iso(days_ago: float) -> str:

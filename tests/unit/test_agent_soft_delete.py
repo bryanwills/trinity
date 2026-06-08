@@ -95,11 +95,16 @@ def tmp_agent_db(tmp_path, monkeypatch):
     _make_db_schema(conn)
     conn.close()
 
-    # Patch the module attribute — `get_db_connection()` reads
-    # `DB_PATH` on every call (sqlite3.connect happens per
-    # context-manager entry), so the override sticks.
+    # Patch the legacy raw-sqlite seam (still used by not-yet-converted modules)
+    # AND route the SQLAlchemy engine (#300) at the same file. Converted modules
+    # use get_engine(); its cache is keyed by URL, so dispose after setting
+    # DATABASE_URL so the temp file's engine is the one created.
     monkeypatch.setattr(connection_mod, "DB_PATH", str(db_path))
-    return str(db_path)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
+    yield str(db_path)
+    engine_mod.dispose_engines()
 
 
 @pytest.fixture

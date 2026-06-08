@@ -56,10 +56,15 @@ def telegram_ops_with_temp_db(tmp_path, monkeypatch):
     """Build a TelegramChannelOperations bound to a temp SQLite DB with
     just the schema needed for the binding tests.
 
-    Patches `get_db_connection` at the module level so every operation
-    in the test runs against this temp DB.
+    `db/telegram_channels.py` is converted to the SQLAlchemy engine seam
+    (#300): every op runs through `get_engine()`, which reads DATABASE_URL.
+    So we build the schema on a temp FILE, point DATABASE_URL at that exact
+    file, and dispose the engine cache (keyed by URL) so the temp file's
+    engine is the one created. A separate raw `conn` is returned for tests
+    that inspect the on-disk envelope directly.
     """
-    from db import telegram_channels as tg_db
+    from db import telegram_channels as tg_db  # noqa: F401 (ensures module import)
+    import db.engine as engine_mod
 
     db_path = tmp_path / "test.db"
     conn = sqlite3.connect(str(db_path))
@@ -80,17 +85,16 @@ def telegram_ops_with_temp_db(tmp_path, monkeypatch):
     """)
     conn.commit()
 
-    class _ConnCtx:
-        def __enter__(self):
-            return conn
-        def __exit__(self, *args):
-            return False
-
-    monkeypatch.setattr(tg_db, "get_db_connection", lambda: _ConnCtx())
+    # Route the SQLAlchemy engine (#300) at the same temp file. The engine
+    # cache is keyed by URL, so dispose AFTER setting DATABASE_URL so the
+    # temp file's engine is the one created.
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    engine_mod.dispose_engines()
 
     ops = tg_db.TelegramChannelOperations()
     yield ops, conn, db_path
     conn.close()
+    engine_mod.dispose_engines()
 
 
 # ---------------------------------------------------------------------------

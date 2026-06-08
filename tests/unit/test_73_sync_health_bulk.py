@@ -15,10 +15,11 @@ Issue: https://github.com/Abilityai/trinity/issues/73
 """
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from database import db
-from db.connection import get_db_connection
 
 _PREFIX = "t73sync-"
 _ON = f"{_PREFIX}on"
@@ -27,18 +28,67 @@ _NOCONFIG = f"{_PREFIX}noconfig"
 _INACCESSIBLE = f"{_PREFIX}inaccessible"
 
 
-def _cleanup():
-    with get_db_connection() as conn:
-        conn.execute(
-            "DELETE FROM agent_git_config WHERE agent_name LIKE ?", (f"{_PREFIX}%",)
+def _make_db_schema(conn: sqlite3.Connection) -> None:
+    """Build the subset of Trinity's schema these tests touch.
+
+    Only `agent_git_config` is exercised by the #73 bulk auto-sync lookup,
+    including its partial UNIQUE index on (github_repo, working_branch) — the
+    reason each fixture agent needs a distinct repo.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE agent_git_config (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT UNIQUE NOT NULL,
+            github_repo TEXT NOT NULL,
+            working_branch TEXT NOT NULL,
+            instance_id TEXT NOT NULL,
+            source_branch TEXT DEFAULT 'main',
+            source_mode INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            last_sync_at TEXT,
+            last_commit_sha TEXT,
+            sync_enabled INTEGER DEFAULT 1,
+            sync_paths TEXT,
+            github_pat_encrypted TEXT,
+            auto_sync_enabled INTEGER DEFAULT 0,
+            freeze_schedules_if_sync_failing INTEGER DEFAULT 0
         )
-        conn.commit()
+        """
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX idx_git_config_repo_branch_unique "
+        "ON agent_git_config(github_repo, working_branch) WHERE source_mode = 0"
+    )
+    conn.commit()
 
 
 @pytest.fixture
-def fixture_agents():
-    """Create git-config rows for the test agents, then tear them down."""
-    _cleanup()
+def fixture_agents(tmp_path, monkeypatch):
+    """Route the DB at an ephemeral temp file via the SQLAlchemy engine seam
+    (#300), seed git-config rows, then dispose the engine on teardown.
+
+    The converted `db/schedules.py` methods (`create_git_config`,
+    `get_all_git_auto_sync_enabled`, …) route through `get_engine()`, whose
+    URL is resolved from `DATABASE_URL`. The engine cache is keyed by URL, so
+    `dispose_engines()` must run after setenv (so the temp file's engine is the
+    one created) and again at teardown (so the next test's temp file gets a
+    fresh engine). `db.connection.DB_PATH` is patched too — harmless, but keeps
+    any not-yet-converted read path pointed at the same file.
+    """
+    import db.connection as connection_mod
+    import db.engine as engine_mod
+
+    db_path = tmp_path / "trinity.db"
+    conn = sqlite3.connect(str(db_path))
+    _make_db_schema(conn)
+    conn.close()
+
+    monkeypatch.setattr(connection_mod, "DB_PATH", str(db_path))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    engine_mod.dispose_engines()
+
     # _ON and _OFF and _INACCESSIBLE get config rows; _NOCONFIG deliberately
     # has none. Each agent gets a DISTINCT github_repo — agent_git_config has a
     # partial UNIQUE index on (github_repo, working_branch), so reusing one repo
@@ -55,7 +105,7 @@ def fixture_agents():
     db.set_git_auto_sync_enabled(_OFF, False)
     db.set_git_auto_sync_enabled(_INACCESSIBLE, True)
     yield
-    _cleanup()
+    engine_mod.dispose_engines()
 
 
 @pytest.mark.unit
