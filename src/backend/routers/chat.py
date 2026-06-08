@@ -56,6 +56,32 @@ _websocket_manager = None
 # importable from tests without pulling in the full router/auth chain.
 # (Issue #498)
 from services.sync_waiter import signal_sync_waiter, wait_for_sync_terminal
+from routers.auth import get_redis_client
+
+
+# #1068 (demotion PR 1): durable per-day usage counter for the deprecated
+# per-task timeout override. Survives log rotation, so the deletion soak gate
+# becomes a cheap `redis-cli HGETALL deprecation:task_timeout_seconds` ("any
+# hits in the last N days?") instead of a best-effort log scrape. Read it
+# before opening the field-deletion PR.
+_DEPRECATION_TIMEOUT_HKEY = "deprecation:task_timeout_seconds"
+_DEPRECATION_HKEY_TTL_S = 60 * 60 * 24 * 180  # self-clean ~6mo after traffic stops
+
+
+def _record_deprecated_task_timeout_use() -> None:
+    """Best-effort: bump the per-day usage counter. Never blocks the request."""
+    try:
+        r = get_redis_client()
+        if r is None:
+            return
+        now = datetime.utcnow()
+        pipe = r.pipeline()
+        pipe.hincrby(_DEPRECATION_TIMEOUT_HKEY, now.strftime("%Y-%m-%d"), 1)
+        pipe.hset(_DEPRECATION_TIMEOUT_HKEY, "last_seen", now.isoformat() + "Z")
+        pipe.expire(_DEPRECATION_TIMEOUT_HKEY, _DEPRECATION_HKEY_TTL_S)
+        pipe.execute()
+    except Exception as e:  # telemetry only — must not affect task dispatch
+        logger.debug("[#1068] usage counter update failed: %s", e)
 
 
 def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> NoReturn:
@@ -1093,6 +1119,17 @@ async def _run_async_task_with_persistence(
         signal_sync_waiter(execution_id, result, chat_session_id)
 
 
+def _resolve_deprecated_task_timeout(requested: Optional[int], agent_cap: int) -> tuple:
+    """#1068 (demotion PR 1): deprecated per-task timeout override — honor but clamp
+    to the agent cap (closing the pre-#1068 unclamped escape around the #929 invariant
+    schedules respect). Returns (resolved, warning_or_None); None → pass-through."""
+    if requested is None:
+        return None, None
+    if requested > agent_cap:
+        return agent_cap, f"timeout_seconds={requested}s exceeds agent cap {agent_cap}s; clamping (field deprecated, will be removed)."
+    return requested, f"timeout_seconds={requested}s deprecated; agent cap ({agent_cap}s) is authoritative."
+
+
 async def _persist_and_broadcast_chat_session(
     *, agent_name, request, result, execution_id, user_id, user_email,
     subscription_id, execution_time_ms,
@@ -1271,6 +1308,18 @@ async def execute_parallel_task(
 
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
+
+    # #1068 (demotion PR 1): normalize the deprecated per-task timeout override once
+    # here — in place, so every downstream site (acquire, execute_task, backlog
+    # payload) sees the clamped value and the warning fires once. No-override path skipped.
+    if request.timeout_seconds is not None:
+        _resolved_timeout, _timeout_warning = _resolve_deprecated_task_timeout(
+            request.timeout_seconds, db.get_execution_timeout(name)
+        )
+        if _timeout_warning:
+            logger.warning("[#1068] agent '%s': %s", name, _timeout_warning)
+            _record_deprecated_task_timeout_use()  # durable signal for the soak gate
+        request.timeout_seconds = _resolved_timeout
 
     # SELF-EXEC-001: Security validation - verify X-Source-Agent matches MCP key's agent scope
     # This prevents header spoofing where a caller claims to be a different agent
