@@ -253,3 +253,50 @@ def test_chat_session_and_messages(db):
 def test_sync_state_empty_read(db):
     assert db.list_sync_states() == [] or isinstance(db.list_sync_states(), list)
     assert db.get_sync_state("nope") is None
+
+
+# --------------------------------------------------------------------------- #
+# Regression guards for dialect bugs found by the live PG e2e (#300)
+# --------------------------------------------------------------------------- #
+
+def test_system_views_owner_join(db):
+    """system_views.owner_id (TEXT) JOIN users.id (INTEGER): SQLite coerces,
+    PostgreSQL needs a cast (was 'operator does not exist: text = integer')."""
+    from db_models import SystemViewCreate
+
+    u = _mk_user(db, "viewowner@example.com")
+    view = db.create_system_view(str(u["id"]), SystemViewCreate(name="v1", filter_tags=["x"]))
+    vid = view.id if hasattr(view, "id") else view["id"]
+    assert vid
+    rows = db.list_user_system_views(str(u["id"]))
+    assert any((r.id if hasattr(r, "id") else r["id"]) == vid for r in rows)
+    # owner_email comes from the JOIN that previously failed on PG
+    match = next(r for r in rows if (r.id if hasattr(r, "id") else r["id"]) == vid)
+    owner_email = match.owner_email if hasattr(match, "owner_email") else match["owner_email"]
+    assert owner_email == "viewowner@example.com"
+
+
+def test_email_whitelist_added_by_join(db):
+    """email_whitelist.added_by (TEXT) JOIN users.id (INTEGER) — same class."""
+    _mk_user(db, "wladmin@example.com", role="admin")
+    db.add_to_whitelist("invitee@example.com", "wladmin@example.com", "manual", default_role="user")
+    rows = db.list_whitelist()
+    row = next(r for r in rows if (r["email"] if isinstance(r, dict) else r.email) == "invitee@example.com")
+    uname = row["added_by_username"] if isinstance(row, dict) else row.added_by_username
+    assert uname == "wladmin@example.com"  # resolved via the cast JOIN
+
+
+def test_idempotency_claim_replay(db):
+    """claim() does INSERT then (on conflict) SELECT in one transaction. On PG
+    the conflict aborts the transaction unless the INSERT is in a SAVEPOINT
+    (was InFailedSqlTransaction → silent fail-open, no dedup)."""
+    scope, key = "agent:pgtest", "k-1"
+    first = db.idempotency_claim(scope, key)
+    assert first["state"] == "new"
+    db.idempotency_complete(scope, key, "exec-123", {"ok": True})
+    # Second claim must read the surviving completed row (the SELECT-after-conflict
+    # path that aborted the transaction before the savepoint fix).
+    second = db.idempotency_claim(scope, key)
+    assert second["state"] == "completed"
+    assert second["execution_id"] == "exec-123"
+    assert second["snapshot"] == {"ok": True}

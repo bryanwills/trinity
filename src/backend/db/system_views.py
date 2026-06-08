@@ -13,7 +13,7 @@ import json
 import secrets
 from typing import List, Optional
 
-from sqlalchemy import select, insert, update, delete, func, or_
+from sqlalchemy import select, insert, update, delete, func, or_, cast, Text
 
 from .engine import get_engine
 from .tables import system_views, users, agent_tags
@@ -36,8 +36,11 @@ _VIEW_COLUMNS = (
     users.c.email.label("owner_email"),
 )
 
+# system_views.owner_id is TEXT (holds a stringified user id) but users.id is
+# INTEGER. SQLite coerces across the JOIN; PostgreSQL rejects `text = integer`
+# (#300). Cast users.id to text so both sides match on either backend.
 _VIEW_JOIN = system_views.outerjoin(
-    users, system_views.c.owner_id == users.c.id
+    users, system_views.c.owner_id == cast(users.c.id, Text)
 )
 
 
@@ -70,7 +73,7 @@ class SystemViewOperations:
                     icon=data.icon,
                     color=data.color,
                     filter_tags=json.dumps(filter_tags),
-                    owner_id=owner_id,
+                    owner_id=str(owner_id),  # owner_id column is TEXT (#300)
                     is_shared=1 if data.is_shared else 0,
                     created_at=now,
                     updated_at=now,
@@ -108,7 +111,7 @@ class SystemViewOperations:
         stmt = (
             select(*_VIEW_COLUMNS)
             .select_from(_VIEW_JOIN)
-            .where(or_(system_views.c.owner_id == user_id, system_views.c.is_shared == 1))
+            .where(or_(system_views.c.owner_id == str(user_id), system_views.c.is_shared == 1))
             .order_by(system_views.c.name.asc())
         )
         with get_engine().connect() as conn:
@@ -199,13 +202,13 @@ class SystemViewOperations:
         if is_admin:
             return True
         owner_id = self.get_view_owner(view_id)
-        return owner_id == user_id
+        return owner_id is not None and str(owner_id) == str(user_id)
 
     def can_user_view(self, user_id: str, view_id: str) -> bool:
         """Check if a user can view a system view (owner or shared)."""
         stmt = select(system_views.c.id).where(
             system_views.c.id == view_id,
-            or_(system_views.c.owner_id == user_id, system_views.c.is_shared == 1),
+            or_(system_views.c.owner_id == str(user_id), system_views.c.is_shared == 1),
         )
         with get_engine().connect() as conn:
             return conn.execute(stmt).first() is not None

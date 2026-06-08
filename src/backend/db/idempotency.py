@@ -59,17 +59,22 @@ class IdempotencyOperations:
                 )
             )
             try:
-                conn.execute(
-                    insert(idempotency_keys).values(
-                        scope=scope,
-                        idempotency_key=key,
-                        execution_id=None,
-                        status=STATE_IN_FLIGHT,
-                        response_snapshot=None,
-                        created_at=now,
-                        updated_at=now,
+                # SAVEPOINT so a PK conflict rolls back ONLY this INSERT, not the
+                # whole transaction — PostgreSQL aborts the entire transaction on
+                # any error (InFailedSqlTransaction) and would reject the
+                # follow-up SELECT otherwise (#300). SQLite emulates savepoints.
+                with conn.begin_nested():
+                    conn.execute(
+                        insert(idempotency_keys).values(
+                            scope=scope,
+                            idempotency_key=key,
+                            execution_id=None,
+                            status=STATE_IN_FLIGHT,
+                            response_snapshot=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
                     )
-                )
                 return {"state": STATE_NEW, "execution_id": None, "snapshot": None}
             except IntegrityError:
                 # Lost the race / genuine duplicate — read the surviving row.

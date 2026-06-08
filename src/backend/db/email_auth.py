@@ -17,7 +17,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-from sqlalchemy import select, insert, update, delete, func, and_
+from sqlalchemy import select, insert, update, delete, func, and_, cast, Text
 
 from .engine import get_engine
 from .tables import email_whitelist, email_login_codes, users
@@ -136,8 +136,10 @@ class EmailAuthOperations:
                 email_whitelist.c.default_role,
             )
             .select_from(
+                # added_by is TEXT (stringified user id) but users.id is INTEGER;
+                # cast so the JOIN works on PostgreSQL too (#300, text=integer).
                 email_whitelist.outerjoin(
-                    users, email_whitelist.c.added_by == users.c.id
+                    users, email_whitelist.c.added_by == cast(users.c.id, Text)
                 )
             )
             .order_by(email_whitelist.c.added_at.desc())
