@@ -50,14 +50,15 @@ from db_harness import db_backend, run as _hrun  # noqa: E402
 
 
 @pytest.fixture
-def tmp_db(db_backend):
+def tmp_db(db_backend, monkeypatch):
     """Active backend with a fresh FULL production schema (db_harness, #300).
 
     Runs on SQLite and, when TEST_POSTGRES_URL is set, PostgreSQL. Returns the
-    backend marker (leading positional arg the helpers accept). Pops cached db
-    modules so production code re-resolves against the active engine."""
+    backend marker (leading positional arg the helpers accept). Evicts cached db
+    modules (via monkeypatch so the #762 sys.modules-pollution lint stays green)
+    so production code re-resolves against the active engine."""
     for mod in ("db.connection", "db.schedules", "database"):
-        sys.modules.pop(mod, None)
+        monkeypatch.delitem(sys.modules, mod, raising=False)
     return db_backend
 
 
