@@ -37,6 +37,7 @@ import pytest
 _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+from db_harness import db_backend, engine_conn  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -56,47 +57,14 @@ def encryption_key(monkeypatch):
 
 
 @pytest.fixture
-def slack_ops_with_temp_db(tmp_path, monkeypatch):
-    """Build a SlackOperations bound to a temp SQLite DB with the
-    minimum schema needed for the connection tests.
-
-    `db/slack.py` is converted to the SQLAlchemy engine seam (#300): it
-    routes through `get_engine()`, which reads DATABASE_URL. We build the
-    schema on a temp FILE, point DATABASE_URL at that exact file, and
-    dispose the URL-keyed engine cache so the temp file's engine is the
-    one created. The returned raw `conn` (a second connection to the same
-    file) is used by tests to read on-disk envelopes and insert legacy
-    rows directly.
-    """
+def slack_ops_with_temp_db(db_backend):
+    """Ops + an engine-backed conn shim on the active backend
+    (db_harness, #300). Runs on SQLite and, when TEST_POSTGRES_URL is
+    set, PostgreSQL. db_backend builds the full schema; the shim mimics
+    a sqlite3 connection for the tests' on-disk envelope reads + legacy
+    plaintext seeding."""
     from db import slack as slack_db
-
-    db_path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("""
-        CREATE TABLE slack_link_connections (
-            id TEXT PRIMARY KEY,
-            link_id TEXT NOT NULL UNIQUE,
-            slack_team_id TEXT NOT NULL UNIQUE,
-            slack_team_name TEXT,
-            slack_bot_token TEXT NOT NULL,
-            connected_by TEXT NOT NULL,
-            connected_at TEXT NOT NULL,
-            enabled INTEGER DEFAULT 1
-        )
-    """)
-    conn.commit()
-
-    # Route the SQLAlchemy engine (#300) at the temp file. The engine cache
-    # is keyed by URL, so dispose after setting DATABASE_URL so the temp
-    # file's engine is the one created — and again at teardown.
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
-    import db.engine as engine_mod
-    engine_mod.dispose_engines()
-
-    ops = slack_db.SlackOperations()
-    yield ops, conn, db_path
-    conn.close()
-    engine_mod.dispose_engines()
+    yield slack_db.SlackOperations(), engine_conn(), None
 
 
 # ---------------------------------------------------------------------------

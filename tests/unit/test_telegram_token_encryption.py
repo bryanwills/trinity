@@ -33,6 +33,7 @@ import pytest
 _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+from db_harness import db_backend, engine_conn  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -52,49 +53,14 @@ def encryption_key(monkeypatch):
 
 
 @pytest.fixture
-def telegram_ops_with_temp_db(tmp_path, monkeypatch):
-    """Build a TelegramChannelOperations bound to a temp SQLite DB with
-    just the schema needed for the binding tests.
-
-    `db/telegram_channels.py` is converted to the SQLAlchemy engine seam
-    (#300): every op runs through `get_engine()`, which reads DATABASE_URL.
-    So we build the schema on a temp FILE, point DATABASE_URL at that exact
-    file, and dispose the engine cache (keyed by URL) so the temp file's
-    engine is the one created. A separate raw `conn` is returned for tests
-    that inspect the on-disk envelope directly.
-    """
-    from db import telegram_channels as tg_db  # noqa: F401 (ensures module import)
-    import db.engine as engine_mod
-
-    db_path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("""
-        CREATE TABLE telegram_bindings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_name TEXT NOT NULL UNIQUE,
-            bot_token_encrypted TEXT NOT NULL,
-            bot_username TEXT,
-            bot_id TEXT UNIQUE,
-            webhook_secret TEXT NOT NULL,
-            webhook_url TEXT,
-            telegram_secret_token TEXT,
-            last_update_id INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT
-        )
-    """)
-    conn.commit()
-
-    # Route the SQLAlchemy engine (#300) at the same temp file. The engine
-    # cache is keyed by URL, so dispose AFTER setting DATABASE_URL so the
-    # temp file's engine is the one created.
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
-    engine_mod.dispose_engines()
-
-    ops = tg_db.TelegramChannelOperations()
-    yield ops, conn, db_path
-    conn.close()
-    engine_mod.dispose_engines()
+def telegram_ops_with_temp_db(db_backend):
+    """Ops + an engine-backed conn shim on the active backend
+    (db_harness, #300). Runs on SQLite and, when TEST_POSTGRES_URL is
+    set, PostgreSQL. db_backend builds the full schema; the shim mimics
+    a sqlite3 connection for the tests' on-disk envelope reads + legacy
+    plaintext seeding."""
+    from db import telegram_channels as tg_db  # noqa: F401
+    yield tg_db.TelegramChannelOperations(), engine_conn(), None
 
 
 # ---------------------------------------------------------------------------
