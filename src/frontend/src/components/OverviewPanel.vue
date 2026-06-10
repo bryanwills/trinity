@@ -374,7 +374,6 @@ onMounted(() => {
         <span v-if="health?.circuit_breaker?.open" class="px-2.5 py-1 text-xs rounded-full bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300">
           Circuit open — see header
         </span>
-        <span v-if="!health" class="text-xs text-gray-400">Health monitoring not available.</span>
       </div>
 
       <div v-if="hasHealthTrend" class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -387,6 +386,9 @@ onMounted(() => {
           <TrendLineChart :dates="healthTrend.dates" :series="latencySeries" :y-min="0" :height="120" :value-format="(v) => (v == null ? '—' : v + 'ms')" :axis-format="(v) => v + 'ms'" />
         </div>
       </div>
+      <p v-else class="text-xs text-gray-400 py-1">
+        No health data available — the monitoring service may be off.
+      </p>
     </div>
 
     <!-- 5. Recent activity -->
