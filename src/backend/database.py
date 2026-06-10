@@ -341,8 +341,8 @@ class DatabaseManager:
     # Agent Ownership Management (delegated to db/agents.py)
     # =========================================================================
 
-    def register_agent_owner(self, agent_name: str, owner_username: str, is_system: bool = False):
-        return self._agent_ops.register_agent_owner(agent_name, owner_username, is_system)
+    def register_agent_owner(self, agent_name: str, owner_username: str, is_system: bool = False, require_email: bool = False):
+        return self._agent_ops.register_agent_owner(agent_name, owner_username, is_system, require_email)
 
     def get_agent_owner(self, agent_name: str):
         return self._agent_ops.get_agent_owner(agent_name)

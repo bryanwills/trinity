@@ -30,7 +30,7 @@ from services.template_service import (
     generate_credential_files,
 )
 from services import git_service
-from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources
+from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email
 from services.github_service import GitHubService, GitHubError
 from utils.helpers import sanitize_agent_name, utc_now_iso
 from .helpers import validate_base_image
@@ -748,7 +748,13 @@ async def create_agent_internal(
                     }
                 }))
 
-            db.register_agent_owner(config.name, current_user.username)
+            # #1129: seed require_email from the fleet-wide default
+            # (secure-by-default ON) at creation; owners can override per agent.
+            db.register_agent_owner(
+                config.name,
+                current_user.username,
+                require_email=get_agent_default_require_email(),
+            )
 
             # Persist auto-assigned subscription (#74)
             if auto_assigned_subscription_id:

@@ -926,7 +926,7 @@ MCP tools: `run_agent_loop`, `get_loop_status`, `stop_loop` (`src/mcp-server/src
 
 **Web UI (#1106, Phase 2):** a **Loops** tab on the Agent Detail page (between Schedules and Playbooks) provides Start/List/Detail/Stop over the endpoints above. Domain store `stores/loops.js` (uses the shared `api.js` client per Invariant #7) + `components/LoopsPanel.vue`. The store is agent-scoped: `LoopsPanel` calls `setAgent(name)` on mount / `clear()` on unmount, and the global WS handler (`utils/websocket.js`) routes the fleet-wide `loop_run_completed`/`loop_completed` events (keyed by `data.type`) to `loopsStore.handleWebSocketEvent`, which filters by the mounted agent and targeted-refreshes only the affected loop. A 12s backstop poll runs while any loop is `queued`/`running` to recover a missed terminal event. Last full response rendered via `utils/markdown.js` (DOMPurify).
 
-### Platform Settings (5 endpoints)
+### Platform Settings (7 endpoints)
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -936,6 +936,8 @@ MCP tools: `run_agent_loop`, `get_loop_status`, `stop_loop` (`src/mcp-server/src
 | GET | `/api/settings/feature-flags` | Public-safe feature flags for UI gating (any auth user). Exposes `session_tab_enabled` (SESSION_TAB Phase 3), `voice_available` (`VOICE_ENABLED && bool(GEMINI_API_KEY)`, #699), `workspace_available` (`voice_available AND WORKSPACE_ENABLED`, #860 — opt-in, default False), `voip_available` (`VOIP_ENABLED && bool(GEMINI_API_KEY)`, #1056 — opt-in, default False; also requires a per-agent `voip_bindings` row to function), and `enterprise_features` — the list of registered enterprise modules (`EntitlementService.list_entitled_features()`; empty in OSS-only builds or under `TRINITY_OSS_ONLY=1`), which gates every enterprise UI surface in the OSS bundle (#847). |
 | GET | `/api/settings/agent-defaults/resources` | Get fleet-wide default CPU/memory for new containers (admin-only, RES-001) |
 | PUT | `/api/settings/agent-defaults/resources` | Set fleet-wide default CPU/memory; valid CPU: 1/2/4/8/16; valid memory: 1g–32g (admin-only, RES-001) |
+| GET | `/api/settings/agent-defaults/access-policy` | Get fleet-wide default access policy for new agents — `require_email` (admin-only, #1129). Resolved value (defaults ON even when unset). |
+| PUT | `/api/settings/agent-defaults/access-policy` | Set fleet-wide default `require_email` for new agents (admin-only, #1129). Stored in `system_settings`, **secure-by-default ON**; consumed at agent creation (`register_agent_owner`) — seeds `agent_ownership.require_email` for **new** agents only, never rewrites existing rows. Owners still override per agent via `PUT /api/agents/{name}/access-policy`. |
 
 ### Session Tab (SESSION_TAB_2026-04, NEW: 2026-05-01)
 
