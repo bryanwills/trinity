@@ -345,7 +345,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 | `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
 | `memory.ts` (1) | `write_user_memory` | Write per-user memory blob in isolated store; resolves user email server-side from execution_id (MEM-001, #888) |
 | `voip.ts` (1) | `call_user` | Place an outbound phone call to a user via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |
-| `operator_queue.ts` (2) | `list_operator_queue`, `get_operator_queue_item` | Read the Operating Room queue — broad or scoped by `agent_name` filter; read-only (write/respond deferred). Agent-scoped keys gated to `{self} ∪ permitted` in the MCP layer (OPS-001, #1101) |
+| `operator_queue.ts` (3) | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` | Read the Operating Room queue (broad or scoped by `agent_name`) and **resolve** a pending item — answer / approve / deny via `POST /{id}/respond`. The respond tool resolves the item's `agent_name`, then applies the same MCP-layer gate before writing (non-`pending` → structured error). Agent-scoped keys gated to `{self} ∪ permitted`. `cancel` deferred. (OPS-001, #1101 read / #1104 respond) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
 
