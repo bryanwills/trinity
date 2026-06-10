@@ -1,10 +1,16 @@
 version: 2
+# All entries set `target-branch: dev` — the SDLC merges everything through
+# dev → main at release cuts. Dependabot's default target (the repo default
+# branch, main) was creating main-side drift: dep bumps landed on main while
+# feature work landed on dev, guaranteeing package.json/source conflicts at
+# every release cut (surfaced by PR #1015, vue-router 5).
 updates:
   # GitHub Actions: catch new SHAs for already-pinned third-party actions and
   # flag CVEs in first-party actions. Weekly cadence — security PRs from
   # Dependabot are auto-grouped by ecosystem so review burden stays low.
   - package-ecosystem: github-actions
     directory: /
+    target-branch: dev
     schedule:
       interval: weekly
     labels:
@@ -14,6 +20,7 @@ updates:
   # Frontend (Vite + Vue): catches Vue / Vite / Chart.js / DOMPurify CVEs.
   - package-ecosystem: npm
     directory: /src/frontend
+    target-branch: dev
     schedule:
       interval: weekly
     labels:
@@ -30,6 +37,7 @@ updates:
   # this entry continues that cadence.
   - package-ecosystem: pip
     directory: /src/backend
+    target-branch: dev
     schedule:
       interval: weekly
     labels:
@@ -44,6 +52,7 @@ updates:
   # MCP server (TypeScript).
   - package-ecosystem: npm
     directory: /src/mcp-server
+    target-branch: dev
     schedule:
       interval: weekly
     labels:
@@ -65,6 +74,7 @@ updates:
       - /docker/backend
       - /docker/frontend
       - /docker/scheduler
+    target-branch: dev
     schedule:
       interval: weekly
     labels:
