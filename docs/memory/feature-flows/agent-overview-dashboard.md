@@ -118,7 +118,8 @@ Raw `triggered_by` → user-facing buckets, in Python (not a SQL `CASE`):
 | MCP | mcp |
 | Channels | telegram, slack, whatsapp |
 | Public | public, paid |
-| Scheduled | schedule, webhook, loop |
+| Scheduled | schedule, webhook |
+| Loops | loop (#1150 — distinct fuchsia accent so loop bursts don't read as cron load) |
 | Agent-to-agent | agent, fan_out, self_task |
 | Voice | voip, voice |
 | **Other** | anything unmapped (catch-all — a new trigger type never vanishes) |
