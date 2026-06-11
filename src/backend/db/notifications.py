@@ -274,23 +274,36 @@ class NotificationOperations:
 
     def count_pending_notifications(
         self,
-        agent_name: Optional[str] = None
+        agent_name: Optional[str] = None,
+        agent_names: Optional[List[str]] = None
     ) -> int:
         """
         Count pending notifications.
 
         Args:
-            agent_name: Optional filter by agent
+            agent_name: Optional filter by a single agent
+            agent_names: Optional filter by a set of agents (fleet-wide count
+                scoped to the caller's accessible agents). An empty list means
+                "no accessible agents" → 0 (not "all agents").
 
         Returns:
             Count of pending notifications
         """
+        # Empty accessible set → nothing to count (avoid invalid `IN ()` SQL).
+        if agent_names is not None and len(agent_names) == 0:
+            return 0
+
         query = "SELECT COUNT(*) FROM agent_notifications WHERE status = 'pending'"
-        params = []
+        params: List = []
 
         if agent_name:
             query += " AND agent_name = ?"
             params.append(agent_name)
+
+        if agent_names:
+            placeholders = ",".join("?" for _ in agent_names)
+            query += f" AND agent_name IN ({placeholders})"
+            params.extend(agent_names)
 
         with get_db_connection() as conn:
             cursor = conn.cursor()

@@ -1435,8 +1435,8 @@ class DatabaseManager:
     def delete_agent_notifications(self, agent_name: str):
         return self._notification_ops.delete_agent_notifications(agent_name)
 
-    def count_pending_notifications(self, agent_name=None):
-        return self._notification_ops.count_pending_notifications(agent_name)
+    def count_pending_notifications(self, agent_name=None, agent_names=None):
+        return self._notification_ops.count_pending_notifications(agent_name, agent_names)
 
     # =========================================================================
     # Subscription Credentials (delegated to db/subscriptions.py) - SUB-002
