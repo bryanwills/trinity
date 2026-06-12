@@ -155,3 +155,77 @@ class TestSuccessPathCasGate:
             c.kwargs.get("status") == ActivityState.COMPLETED
             for c in mock_activity.complete_activity.await_args_list
         ), "won SUCCESS turn must complete the activity as COMPLETED"
+
+
+class TestFailedPathCasGate:
+    """Non-success terminals route through `_write_terminal_and_gate`, which
+    completes the activity only on a won CAS (#671/H4). Exercised via the
+    circuit-breaker fast-fail terminal (Site 3)."""
+
+    pytestmark = pytest.mark.unit
+
+    def _run_cb_open(self, *, cas_won: bool):
+        from services.task_execution_service import TaskExecutionService
+
+        mock_db = MagicMock()
+        mock_db.get_max_parallel_tasks.return_value = 3
+        mock_db.get_execution.return_value = _make_execution("cancelled")
+        mock_db.update_execution_status.return_value = cas_won
+
+        mock_capacity = MagicMock()
+        admitted = MagicMock()
+        admitted.state = "admitted"
+        mock_capacity.acquire = AsyncMock(return_value=admitted)
+        mock_capacity.release = AsyncMock()
+
+        mock_circuit = MagicMock()
+        mock_circuit.allow_request.return_value = False  # transport CB OPEN → fast-fail
+
+        mock_activity = MagicMock(
+            track_activity=AsyncMock(return_value="act-001"),
+            complete_activity=AsyncMock(),
+        )
+
+        with (
+            patch("services.task_execution_service.db", mock_db),
+            patch("services.task_execution_service.get_capacity_manager", return_value=mock_capacity),
+            patch("services.task_execution_service.activity_service", mock_activity),
+            patch("services.task_execution_service.CircuitState", return_value=mock_circuit),
+            patch("services.task_execution_service.dispatch_breaker_active", return_value=False),
+        ):
+            svc = TaskExecutionService()
+            result = TestSuccessPathCasGate._await(
+                svc.execute_task(
+                    agent_name="test-agent",
+                    message="hello",
+                    triggered_by="schedule",
+                    execution_id="exec-test-001",
+                    timeout_seconds=300,
+                    model="sonnet",
+                )
+            )
+        return result, mock_activity
+
+    def test_failed_lost_cas_skips_activity_completion(self):
+        """A FAILED terminal that lost the CAS must NOT complete the activity."""
+        from services.task_execution_service import (
+            TaskExecutionErrorCode,
+            TaskExecutionStatus,
+        )
+
+        result, mock_activity = self._run_cb_open(cas_won=False)
+
+        mock_activity.complete_activity.assert_not_awaited()
+        # The FAILED result is still reported (the return is unconditional;
+        # only the won-only side effects gate).
+        assert result.status == TaskExecutionStatus.FAILED
+        assert result.error_code == TaskExecutionErrorCode.CIRCUIT_OPEN
+
+    def test_failed_won_cas_completes_activity(self):
+        """A FAILED terminal that won the CAS still completes the activity."""
+        from models import ActivityState
+
+        result, mock_activity = self._run_cb_open(cas_won=True)
+
+        mock_activity.complete_activity.assert_awaited_once()
+        assert mock_activity.complete_activity.await_args.kwargs["status"] == ActivityState.FAILED
