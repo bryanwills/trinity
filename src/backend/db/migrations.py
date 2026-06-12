@@ -2402,6 +2402,23 @@ def _migrate_operator_queue_cleared_at(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_loops_max_duration(cursor, conn):
+    """#1156 — loop-level wall-clock deadline.
+
+    Adds `max_duration_seconds INTEGER` (NULL = no deadline) to `agent_loops`.
+    The runner stops the loop at the next iteration boundary once the deadline
+    measured from `started_at` is exceeded (stop_reason='deadline_exceeded'),
+    bounding total loop duration alongside the existing `max_runs` cap.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "max_duration_seconds",
+        "ALTER TABLE agent_loops ADD COLUMN max_duration_seconds INTEGER",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2475,4 +2492,5 @@ MIGRATIONS = [
     ("agent_ownership_circuit_breaker", _migrate_agent_ownership_circuit_breaker),
     ("voip_tables", _migrate_voip_tables),
     ("operator_queue_cleared_at", _migrate_operator_queue_cleared_at),
+    ("agent_loops_max_duration", _migrate_agent_loops_max_duration),
 ]
