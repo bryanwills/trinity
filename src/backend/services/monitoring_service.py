@@ -405,6 +405,8 @@ async def check_business_health(
     active_execution_count = 0
     stuck_execution_count = 0
     recent_error_rate = 0.0
+    consecutive_failures = None  # #1020: None when agent image predates the field
+    last_task_at = None
 
     # Check /health endpoint for runtime status
     try:
@@ -414,6 +416,11 @@ async def check_business_health(
                 health_data = health_response.json()
                 runtime_available = health_data.get("runtime_available", True)
                 claude_available = health_data.get("claude_available", True)
+                # #1020: richer /health signal — graceful when keys are absent
+                # (older agent images). Used for fleet-health + the dispatch
+                # circuit breaker (#526).
+                consecutive_failures = health_data.get("consecutive_failures")
+                last_task_at = health_data.get("last_task_at")
     except Exception:
         pass  # Will be marked as degraded/unhealthy by aggregation
 
@@ -476,6 +483,8 @@ async def check_business_health(
         stuck_execution_count=stuck_execution_count,
         recent_error_rate=recent_error_rate,
         credential_status=None,
+        consecutive_failures=consecutive_failures,  # #1020
+        last_task_at=last_task_at,  # #1020
         checked_at=now
     )
 
@@ -873,8 +882,11 @@ class MonitoringService:
             except Exception as e:
                 print(f"Monitoring check cycle failed: {e}")
 
-            # Wait for next cycle
-            await asyncio.sleep(self.config.docker_check_interval)
+            # Wait for next cycle. #1121: clamp to >=1s as a belt-and-suspenders
+            # guard against a non-positive interval slipping past the
+            # MonitoringConfig validator (e.g. a directly-mutated config),
+            # which would otherwise spin the loop into a tight flood.
+            await asyncio.sleep(max(1, self.config.docker_check_interval))
 
     async def _run_check_cycle(self):
         """Run one cycle of health checks for every Trinity agent.

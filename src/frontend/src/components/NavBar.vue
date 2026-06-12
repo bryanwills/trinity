@@ -30,20 +30,16 @@
             >
               Templates
             </router-link>
+            <!-- #1109 — single Operations entry replaces the former
+                 Health / Ops / Executions links. One unified badge carries
+                 the actionable signal (pending operator-queue + notifications);
+                 running-execution count lives inside the Executions tab. -->
             <router-link
-              v-if="isAdmin"
-              to="/monitoring"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/monitoring' }"
-            >
-              Health
-            </router-link>
-            <router-link
-              to="/operating-room"
+              to="/operations"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium relative"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/operating-room' }"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/operations' }"
             >
-              Ops
+              Operations
               <span
                 v-if="combinedOpsCount > 0"
                 class="ml-1 inline-flex items-center justify-center px-1.5 py-0.5 text-xs font-bold leading-none text-white rounded-full"
@@ -100,7 +96,7 @@
             class="text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 font-mono"
             :title="`Click for build info — commit ${buildInfo.info.value.git_commit_short}`"
           >
-            v{{ buildInfo.info.value.version }}<span
+            v{{ buildInfo.displayVersion.value }}<span
               v-if="buildInfo.info.value.git_commit_short && buildInfo.info.value.git_commit_short !== 'unknown'"
               class="ml-1 opacity-70"
             >· {{ buildInfo.info.value.git_commit_short }}</span>
@@ -244,7 +240,7 @@
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between">
             <dt class="text-gray-500 dark:text-gray-400">Version</dt>
-            <dd class="font-mono text-gray-900 dark:text-white">{{ buildInfo.info.value.version }}</dd>
+            <dd class="font-mono text-gray-900 dark:text-white">{{ buildInfo.displayVersion.value }}</dd>
           </div>
           <div class="flex justify-between">
             <dt class="text-gray-500 dark:text-gray-400">Branch</dt>

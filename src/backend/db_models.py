@@ -195,6 +195,8 @@ class ScheduleExecution(BaseModel):
     model_used: Optional[str] = None           # Model used for this execution
     # Fan-out linkage (FANOUT-001)
     fan_out_id: Optional[str] = None           # Parent fan-out operation ID
+    # Loop linkage (#740)
+    loop_id: Optional[str] = None              # Parent agent_loops.id for sequential-loop iterations
     # Subscription usage tracking (SUB-004)
     subscription_id: Optional[str] = None      # Subscription active at record time
     # Persistent backlog (BACKLOG-001)
@@ -334,6 +336,31 @@ class AgentSessionMessage(BaseModel):
     execution_time_ms: Optional[int] = None
     claude_session_id: Optional[str] = None  # actual Claude UUID this turn ran under
     compact_metadata: Optional[str] = None   # JSON list of compact events fired during this turn
+
+
+class SessionMessageInsert(BaseModel):
+    """Request object for inserting an agent-session message (#1027).
+
+    Replaces the 16-positional-arg signature of
+    ``SessionOperations.add_session_message`` so call sites name every field and
+    can't transpose positional args. The 6 identity/content fields are required;
+    the rest are per-turn observability/compaction metadata with safe defaults.
+    """
+    session_id: str
+    agent_name: str
+    user_id: int
+    user_email: str
+    role: str  # "user" or "assistant"
+    content: str
+    cost: Optional[float] = None
+    context_used: Optional[int] = None
+    context_max: Optional[int] = None
+    cache_read_tokens: Optional[int] = None
+    tool_calls: Optional[str] = None  # JSON array
+    execution_time_ms: Optional[int] = None
+    claude_session_id: Optional[str] = None
+    compact_metadata: Optional[str] = None  # JSON list of compact events
+    compact_event_count: int = 0
 
 
 # =========================================================================
@@ -846,6 +873,11 @@ class BusinessHealthCheck(BaseModel):
     stuck_execution_count: int = 0
     recent_error_rate: float = 0.0  # 0.0 - 1.0
     credential_status: Optional[str] = None  # null, "ok", "missing" (SUB-001/MON-001)
+    # #1020: richer /health signal. None when the agent image predates #1020
+    # (older agents omit these keys). `consecutive_failures` is the signal the
+    # dispatch circuit breaker (#526) consumes; `last_task_at` powers liveness.
+    consecutive_failures: Optional[int] = None
+    last_task_at: Optional[str] = None
     checked_at: str
 
 
@@ -861,6 +893,9 @@ class AgentHealthDetail(BaseModel):
     recent_alerts: List[dict] = []
     uptime_percent_24h: Optional[float] = None
     avg_latency_24h_ms: Optional[float] = None
+    # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
+    # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
+    circuit_breaker: Optional[dict] = None
 
 
 class AgentHealthSummary(BaseModel):
@@ -872,6 +907,15 @@ class AgentHealthSummary(BaseModel):
     runtime_available: Optional[bool] = None
     last_check_at: Optional[str] = None
     issues: List[str] = []
+    # RELIABILITY-004 / #307: heartbeat liveness layer (additive — all default
+    # None so old payloads and old-image agents stay non-breaking).
+    # heartbeat_state ∈ {"alive","stale","unsupported"}; heartbeat_alive is
+    # None for `unsupported` (an agent that never beat — never marked dead).
+    heartbeat_alive: Optional[bool] = None
+    last_heartbeat_age_s: Optional[float] = None
+    heartbeat_active_executions: Optional[int] = None
+    heartbeat_memory_mb: Optional[float] = None
+    heartbeat_state: Optional[str] = None
 
 
 class FleetHealthSummary(BaseModel):
@@ -894,13 +938,36 @@ class FleetHealthStatus(BaseModel):
 
 
 class MonitoringConfig(BaseModel):
-    """Monitoring service configuration."""
-    enabled: bool = True
+    """Monitoring service configuration.
+
+    #1121: ``enabled`` is the single source of truth for whether the
+    fleet-monitoring loop runs, and it defaults to **OFF**. The backend
+    lifespan reads the persisted ``monitoring_config`` on boot and only
+    starts the loop when this flag is set, so the choice survives
+    restarts (previously the loop was never wired to lifespan and died
+    on every restart). ``enable``/``disable`` endpoints persist this flag.
+    """
+    enabled: bool = False
 
     # Check intervals (seconds)
     docker_check_interval: int = 30
     network_check_interval: int = 30
     business_check_interval: int = 60
+
+    @field_validator(
+        "docker_check_interval",
+        "network_check_interval",
+        "business_check_interval",
+    )
+    @classmethod
+    def _intervals_must_be_positive(cls, v: int, info) -> int:
+        # #1121: a non-positive interval makes ``asyncio.sleep`` return
+        # immediately, turning the loop into a tight health-check flood.
+        # Reject at construction (request body → 422; persisted bad config
+        # → falls back to DEFAULT_CONFIG in the loader).
+        if v < 1:
+            raise ValueError(f"{info.field_name} must be >= 1 second")
+        return v
 
     # Timeouts
     http_timeout: float = 10.0
@@ -1064,6 +1131,10 @@ class BulkSlotState(BaseModel):
     """Response model for bulk slot state query (Dashboard)."""
     agents: dict  # {agent_name: {"max": N, "active": M}}
     timestamp: str
+    # #526: per-agent dispatch-breaker state, ONLY for agents whose breaker is
+    # non-closed (open). Empty when the global breaker is off or all closed.
+    # {agent_name: {"state","failure_count","retry_after_seconds"}}
+    circuit_breakers: dict = {}
 
 
 # =========================================================================

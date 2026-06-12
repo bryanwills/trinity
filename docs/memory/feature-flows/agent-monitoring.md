@@ -59,12 +59,77 @@ HEALTHY: All checks passing
 
 ---
 
+## Richer Agent `/health` Signal (#1020)
+
+> **#1020 (2026-06-02):** The agent-server `/health` endpoint was promoted from `{status}` + ad-hoc #333 diagnostics to a **named, contractual signal** the platform acts on — an incremental step toward `TARGET_ARCHITECTURE.md` §Agent Runtime. This is orthogonal to the #474/#798 circuit-breaker classification above: that work is about *whether the probe reached the agent*; this work is about *what the agent reports once reached*.
+
+### New `/health` fields
+
+The agent-server `/health` handler (`docker/base-image/agent_server/routers/info.py:98-123`, `health_check()`) now returns these named fields beyond the pre-existing `status` / `runtime_available` / `claude_available` / `message_count`:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `active_tasks` | int | Concurrent executions across `/api/chat` **and** `/api/task` |
+| `last_task_at` | ISO string \| null | Timestamp of the most recent task start/finish |
+| `consecutive_failures` | int | Reset to 0 on success, incremented on failure |
+| `diagnostics` | object | Pre-existing #333 runtime gauges (`thread_count`, `asyncio_task_count`, `running_executions`, `conversation_history_size`, `conversation_history_limit`) |
+
+**`mailbox_depth` is intentionally NOT emitted.** There is no agent-side mailbox until the actor model lands (#945); the backend derives queue depth from `CapacityManager`. (Documented inline at `info.py:114-118` and `state.py:64-67`.)
+
+Back-compat: existing `/health` keys are unchanged and the new keys are purely additive.
+
+### Counters in `agent_state` (`docker/base-image/agent_server/state.py`)
+
+The three new fields are backed by counters on the global `AgentState` instance, initialized at `state.py:68-71` under a `threading.Lock` (`_health_lock`) because `/api/task` runs concurrently:
+
+```python
+self._health_lock = threading.Lock()
+self.active_task_count: int = 0
+self.last_task_at: Optional[str] = None
+self.consecutive_failures: int = 0
+```
+
+| Method | Line | Behavior |
+|--------|------|----------|
+| `record_task_start()` | `state.py:73-77` | `active_task_count += 1`, refresh `last_task_at` |
+| `record_task_finish(success)` | `state.py:79-90` | `active_task_count -= 1` (floored at 0), refresh `last_task_at`; on `success` reset `consecutive_failures = 0`, else `consecutive_failures += 1` |
+
+### Wiring at the execution chokepoints (`docker/base-image/agent_server/routers/chat.py`)
+
+Both execution paths bracket the runtime call with start/finish, using `except BaseException` so a cancelled/failed run still records a failure:
+
+- `/api/chat` (`chat.py:24-25`, `chat()`): `record_task_start()` at `chat.py:47`; `record_task_finish(success=False)` in the `except` at `chat.py:58`; `record_task_finish(success=True)` at `chat.py:60`.
+- `/api/task` (`chat.py:106-107`, `execute_task()`): `record_task_start()` at `chat.py:133`; `record_task_finish(success=False)` at `chat.py:148`; `record_task_finish(success=True)` at `chat.py:150`.
+
+### Backend consumption (`src/backend/services/monitoring_service.py`)
+
+`check_business_health()` (`monitoring_service.py:386`) reads the two persisted signals off the `/health` JSON and threads them into the business-layer model:
+
+- Locals default to `None` (`monitoring_service.py:408-409`) — this is the **graceful default for pre-#1020 agent images** that don't emit the keys, so older agents never break fleet health.
+- `consecutive_failures = health_data.get("consecutive_failures")` and `last_task_at = health_data.get("last_task_at")` (`monitoring_service.py:422-423`).
+- Passed to `BusinessHealthCheck(...)` at `monitoring_service.py:486-487`.
+
+`consecutive_failures` is the signal the **dispatch circuit breaker (#526)** consumes; both fields feed **fleet-health scoring / heartbeat push (#307)**. `active_tasks` is reported on `/health` but is not currently persisted into `BusinessHealthCheck` (the backend tracks active executions via `/api/executions/running`, see `active_execution_count` below).
+
+### Model field (`src/backend/db_models.py`)
+
+`BusinessHealthCheck` carries the two persisted fields (`db_models.py:840-856`), both `Optional` with a `None` default for the pre-#1020 case:
+
+```python
+consecutive_failures: Optional[int] = None   # db_models.py:854
+last_task_at: Optional[str] = None            # db_models.py:855
+```
+
+---
+
 ## Entry Points
+
+> **UI surface moved 2026-06-09 (#1109):** the fleet-monitoring UI is no longer a standalone `/monitoring` page. Its content was extracted into `src/frontend/src/components/MonitoringPanel.vue` and is now the **admin-gated "Health" tab** of the consolidated **Operations** view (`/operations?tab=health`); `/monitoring` redirects there. The tab is gated on `authStore.role === 'admin'` (button `v-if` + panel `v-if`), and non-admin `?tab=health` deep links are coerced to the default tab. `views/Monitoring.vue` was deleted. The **backend monitoring service, endpoints, and models below are unchanged.** See [operating-room.md](operating-room.md) (now "Operations").
 
 | UI Location | API Endpoint | Purpose |
 |-------------|--------------|---------|
-| **NavBar "Health" link** | - | Navigate to `/monitoring` |
-| **Monitoring Page** | `GET /api/monitoring/status` | View fleet-wide health |
+| **NavBar "Operations" link** | - | Navigate to `/operations`; the **Health** tab (admin-only) shows fleet monitoring |
+| **Operations → Health tab** (`MonitoringPanel.vue`) | `GET /api/monitoring/status` | View fleet-wide health |
 | **Agent Row Click** | - | Navigate to agent detail |
 | **"Check All" button** | `POST /api/monitoring/check-all` | Trigger fleet-wide check (admin) |
 | **Agent refresh button** | `POST /api/monitoring/agents/{name}/check` | Trigger single agent check (admin) |
@@ -214,57 +279,51 @@ class MonitoringConfig(BaseModel):
 
 ---
 
-## Frontend Layer
+## Frontend Layer (#1109: Health tab of Operations)
 
-### Route Definition (`src/frontend/src/router/index.js:36-40`)
+### Route (`src/frontend/src/router/index.js:39-41`)
+
+The standalone page is gone — `/monitoring` is now a query-preserving redirect:
 
 ```javascript
 {
   path: '/monitoring',
-  name: 'Monitoring',
-  component: () => import('../views/Monitoring.vue'),
-  meta: { requiresAuth: true, requiresAdmin: true }
+  redirect: { path: '/operations', query: { tab: 'health' } }
 }
 ```
 
-### Navigation (`src/frontend/src/components/NavBar.vue:25-32`)
+### Navigation (`src/frontend/src/components/NavBar.vue`)
 
-Admin-only visibility via `v-if="isAdmin"`:
+No dedicated Health link. The single **Operations** link (with the unified
+operator-queue + notifications badge) leads to `/operations`; the Health tab
+button inside `Operations.vue` is admin-gated (`authStore.role === 'admin'`),
+and non-admin `?tab=health` deep links are coerced to the default tab.
 
-```html
-<router-link v-if="isAdmin" to="/monitoring" ...>
-  Health
-</router-link>
-```
+### Monitoring Panel (`src/frontend/src/components/MonitoringPanel.vue`, 406 lines)
 
-### Monitoring Page (`src/frontend/src/views/Monitoring.vue`)
+Tab-embeddable content extracted from the deleted `views/Monitoring.vue`
+(#1109); rendered by `Operations.vue` via `v-if="activeTab === 'health' && isAdmin"`
+so its 30s auto-refresh polling tears down on tab-leave.
 
-**Template Structure** (lines 1-227):
-- Header with monitoring status badge and controls
+**Template Structure**:
+- Header strip with monitoring status badge ("Monitoring Active/Disabled"), auto-refresh toggle + countdown, Refresh and "Check All" buttons
 - Summary cards (total, healthy, degraded, unhealthy, critical counts)
 - Active alerts section (collapsible, shows recent alerts)
 - Agent health grid with status indicators and issues
 
-**Key State Variables** (lines 253-259):
-```javascript
-const monitoringStore = useMonitoringStore()
-const isAdmin = ref(false)
-const statusFilter = ref('')
-const triggeringCheck = ref(false)
-const checkingAgent = ref(null)
-const autoRefreshEnabled = ref(true)
-const refreshCountdown = ref(30)
-```
+**Key State Variables** (same shape as the old view): `monitoringStore`,
+`statusFilter`, `triggeringCheck`, `checkingAgent`, `autoRefreshEnabled`,
+`refreshCountdown`.
 
 **Key Methods**:
 
-| Method | Line | Description |
-|--------|------|-------------|
-| `refreshAll()` | 294-300 | Fetch status + alerts |
-| `triggerFleetCheck()` | 336-347 | POST to /check-all |
-| `triggerAgentCheck(name)` | 349-358 | POST to /agents/{name}/check |
-| `viewAgentDetail(name)` | 360-362 | Navigate to agent page |
-| `startAutoRefresh()` | 302-316 | 30s polling interval |
+| Method | Description |
+|--------|-------------|
+| `refreshAll()` | Fetch status + alerts |
+| `triggerFleetCheck()` | POST to /check-all |
+| `triggerAgentCheck(name)` | POST to /agents/{name}/check |
+| `viewAgentDetail(name)` | Navigate to agent page |
+| `startAutoRefresh()` | 30s polling interval (torn down on unmount/tab-leave) |
 
 ### Monitoring Store (`src/frontend/src/stores/monitoring.js`)
 
@@ -870,6 +929,7 @@ Monitoring service stopped
 
 ## Related Flows
 
+- **Agent Heartbeat Liveness** (`agent-heartbeat-liveness.md`) - Additive push-based 5s liveness layer (RELIABILITY-004 / #307); this 30s loop stays authoritative, the heartbeat layer annotates `GET /api/monitoring/status` and alerts on missed beats
 - **Agent Lifecycle** (`agent-lifecycle.md`) - Monitoring state when agents start/stop
 - **Notification System** (`notifications.md`) - Alert delivery via NOTIF-001
 - **WebSocket Broadcasting** (`websocket-events.md`) - Real-time event delivery
@@ -881,6 +941,8 @@ Monitoring service stopped
 
 | Date | Changes |
 |------|---------|
+| 2026-06-02 | **#1020 — richer agent `/health` signal** (commit 122d07ed). Agent-server `/health` (`docker/base-image/agent_server/routers/info.py:98-123`) now emits named, contractual fields beyond `{status}`: `active_tasks` (concurrent executions across `/api/chat` + `/api/task`), `last_task_at` (ISO), `consecutive_failures` (reset on success, incremented on failure). Counters live on `AgentState` (`state.py:68-90`, `record_task_start`/`record_task_finish`, lock-guarded) and are wired at both execution chokepoints in `routers/chat.py` (47/58/60 for `/api/chat`, 133/148/150 for `/api/task`). `mailbox_depth` is **deliberately absent** — there is no agent-side mailbox until the actor model (#945); the backend derives queue depth from `CapacityManager`. Backend `check_business_health()` reads `consecutive_failures`/`last_task_at` into `BusinessHealthCheck` (`monitoring_service.py:408-409, 422-423, 486-487`; `db_models.py:854-855`) with a `None` **graceful default for pre-#1020 agent images** so older agents don't break fleet health. `consecutive_failures` feeds the dispatch circuit breaker (#526) and fleet-health (#307). Additive only — existing keys unchanged. New "Richer Agent `/health` Signal (#1020)" section added above; #474/#798 circuit-breaker classification untouched. |
+| 2026-05-30 | **RELIABILITY-004 / #307 — additive push-heartbeat liveness layer** (`heartbeat_service.py`, new). `get_fleet_status()` (`routers/monitoring.py:178`) now merges five `heartbeat_*` fields onto each `AgentHealthSummary` via one batched `heartbeat_status_bulk()` Redis round-trip, inside the existing try/except so a Redis blip degrades rather than 500s. This is a **passive annotation** — it does **not** change `status`; this 30s loop stays authoritative for aggregate health. Heartbeat loss is surfaced actively by the separate watch loop via `monitoring_alerts.alert_heartbeat_lost`/`alert_heartbeat_recovered`. Full flow: [agent-heartbeat-liveness.md](agent-heartbeat-liveness.md). |
 | 2026-05-18 | **#873 — pipe-drop responses classified as HTTP 502 on agent server** (`docker/base-image/agent_server/services/headless_executor.py:856-874`). `BrokenPipeError`/`ConnectionResetError` in `execute_headless` now raise 502 instead of 500, avoiding collision with the 503 auto-switch path in `task_execution_service.py`. From the monitoring side, 502 and 500 are equivalent: both are HTTP responses that call `circuit.record_success()` in `check_network_health()` (agent is TCP-reachable) and are then flagged `UNHEALTHY` by the `status_code >= 500` branch in `aggregate_health()`. No change to `monitoring_service.py` was required. |
 | 2026-05-13 | **#474 Layer 2 — `/health` probe exception classification split** (`services/monitoring_service.py:check_network_health()`, commit d53a2d6b). Layered on top of #798 (below). Two new exception handlers inserted BEFORE the shared `TRANSIENT_TRANSPORT_EXCEPTIONS` handler so they win Python's first-match: (1) `BrokenPipeError` / `ConnectionResetError` → client-side transport drop (upstream MCP-sync cancellation cascading into a pooled keepalive socket); returns `reachable=False` with `error="Connection dropped: <ExceptionName>"` but does **NOT** call `circuit.record_failure()` — the agent's health was never observed, so it must not trip the breaker on healthy agents. (2) `httpx.ReadError` / `httpx.WriteError` / `httpx.RemoteProtocolError` → genuine agent liveness signals on a `/health` probe (partial write then socket drop = event-loop wedge, OOM mid-write, segfault); calls `circuit.record_failure()` and returns `reachable=False` with `error="HTTP transport error on /health: <ExceptionName>"`. This is the documented `/health`-specific divergence from `AgentClient._request()` — on `/api/*` paths #798's tuple-based handler keeps the same exceptions circuit-neutral because the cause space is broader. Regression test: `tests/unit/test_monitoring_health_check_classification.py`. |
 | 2026-05-12 | **Circuit-breaker classification mirrored on the /health probe (#474)**: `check_network_health()` now lazy-imports `CIRCUIT_FAILURE_EXCEPTIONS` / `TRANSIENT_TRANSPORT_EXCEPTIONS` from `services/agent_client.py` and applies the same rule as inline `/api/*` requests. Any HTTP response (200..599) records circuit success so stale failure counters clear as soon as the agent answers. Only `ConnectError`/`ConnectTimeout` increment the failure counter; read-timeouts, pool exhaustion, mid-write broken-pipe/reset, and garbled framing surface as `reachable=False` but don't poison the circuit. `aggregate_health()` adds an explicit `network.status_code >= 500 → UNHEALTHY` branch (`monitoring_service.py:419`) so a wedged-but-listening agent isn't silently HEALTHY under the new rule. |

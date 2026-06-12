@@ -3,6 +3,8 @@ import axios from 'axios'
 import { useAgentsStore } from '../stores/agents'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
+import { useExecutionsStore } from '../stores/executions'
+import { useLoopsStore } from '../stores/loops'
 
 const ws = ref(null)
 const isConnected = ref(false)
@@ -21,6 +23,8 @@ export function useWebSocket() {
   const agentsStore = useAgentsStore()
   const notificationsStore = useNotificationsStore()
   const operatorQueueStore = useOperatorQueueStore()
+  const executionsStore = useExecutionsStore()
+  const loopsStore = useLoopsStore()
 
   const connect = async () => {
     if (ws.value) return
@@ -140,8 +144,21 @@ export function useWebSocket() {
         break
       default:
         // Handle events keyed by 'type' instead of 'event'
-        if (data.type === 'operator_queue_new' || data.type === 'operator_queue_responded' || data.type === 'operator_queue_acknowledged') {
+        if (data.type === 'operator_queue_new' || data.type === 'operator_queue_responded' || data.type === 'operator_queue_acknowledged' || data.type === 'operator_queue_cleared') {
           operatorQueueStore.handleWebSocketEvent(data)
+        }
+        // #1017: bulk dismiss by an operator — refresh badge + loaded list
+        if (data.type === 'notifications_cleared') {
+          notificationsStore.fetchPendingCount()
+          notificationsStore.fetchNotifications()
+        }
+        if (data.type === 'agent_activity') {
+          executionsStore.handleWebSocketEvent(data)
+        }
+        // #1106: loop progress events (broadcast fleet-wide, keyed by type).
+        // The store filters by the agent currently shown in LoopsPanel.
+        if (data.type === 'loop_run_completed' || data.type === 'loop_completed') {
+          loopsStore.handleWebSocketEvent(data)
         }
         break
     }

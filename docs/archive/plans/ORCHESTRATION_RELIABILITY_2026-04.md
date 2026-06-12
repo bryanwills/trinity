@@ -1,3 +1,13 @@
+> # ⚠️ ARCHIVED — 2026-06-05
+>
+> **Superseded by the pull / work-stealing coordination decision.** This was the active execution-reliability plan through **Sprints A–D′ — all shipped** (#95, #226, #285, #286, #132, #56, #305, #260, #271, #264, #291, #306, #428, #430, #524, #525, #526). Its forward-looking *actor-model* destination (per-agent mailbox + agent-authoritative journal) was **replaced** on 2026-06-05 by **pull / work-stealing**: a backend-owned per-agent queue, agents pull when they have free capacity, and the agent journal is **not** the source of truth.
+>
+> **Living docs:** [`TARGET_ARCHITECTURE.md`](../../planning/TARGET_ARCHITECTURE.md) §Coordination Model · **Epic #1045** (umbrella **#1081**). The remaining open work from this plan now lives there — **#429** → single lease-reaper, **#307** → gate→alert (unwired under pull), **#946** → pull pilot (replaces the §"actor model" Phase 2 experiment).
+>
+> Preserved verbatim below as the Sprint A–D′ historical record. **Not maintained** — do not act on its "next steps."
+
+---
+
 # Orchestration & Multi-Agent Reliability Plan
 
 **Date:** 2026-04-13 (revised 2026-04-20, 2026-04-26)
@@ -107,6 +117,8 @@ Before scheduling Phase 2, write one page with two sections:
 2. **Journal format** — what the agent appends to its repo per processed message (`journal.ndjson`? structured `state.yaml` per workflow?).
 
 If both fit cleanly on a postcard, the model is sound and Phase 2 proceeds. If either sprawls, the model isn't ready and the planned path remains the best one available.
+
+**Pre-postcard work**: `ParallelTaskRequest` has 15 fields, 12 of them conditional. Until those are demoted (to session/agent state, envelope headers, or out-of-band storage) or explicitly quarantined, the postcard cannot fit honestly. The demotion sequence is six small PRs documented in `ACTOR_MODEL_TASK_DEMOTION_MAP.md` — execute that first, then #945 becomes a 30-minute writeup of what shipped.
 
 ---
 
@@ -259,7 +271,7 @@ Worst case: new paths break and we fall back to existing paths. Old code gets de
 | # | Title | Why it's here |
 |---|-------|---------------|
 | ~~#524~~ ✅ | ~~Agent-authoritative execution state machine (RELIABILITY-005)~~ | **Shipped (minimal scope, 2026-04-27).** Full projector architecture deferred — too risky without proper restart-recovery and transport design (agents have no Redis access). Shipped instead: (1) CAS guard in `update_execution_status` — SUCCESS always wins, non-success terminal writes blocked if row already terminal; (2) TOCTOU fix in `mark_stale_executions_failed` / `mark_no_session_executions_failed` — inner UPDATE now carries `AND status = 'running'`; (3) `_recover_execution` routed through already-guarded `mark_execution_failed_by_watchdog`; (4) state machine documented in `TaskExecutionStatus` docstring + `PENDING_RETRY` added to enum. Full projector (`ExecutionStateProjector`, agent event emission, `projected_status` shadow column) remains as future work before #429 can retire cleanup phases. |
-| **#525** | **Idempotency keys at trigger boundaries (RELIABILITY-006)** | `Idempotency-Key` header on every producer (chat, task, internal/scheduler, webhooks #291, MCP, event-sub, self-exec). Backend stores `(key → execution_id)` for 24h and short-circuits duplicates. Webhook trigger auto-derives a key from `(token, body_hash)` for naive senders. Scheduler uses `(schedule_id, fire_time)`. **The unified funnel makes duplicates more uniform — this is the missing dedup layer.** |
+| ~~#525~~ ✅ | ~~Idempotency keys at trigger boundaries (RELIABILITY-006)~~ | **Shipped (2026-06-02).** New `idempotency_keys` table (`PRIMARY KEY (scope, key)` = atomic claim) + `services/idempotency_service.py` (`begin`/`complete`/`fail`, fail-open). Enforced at the **router** layer (not solely the funnel — sync `/chat` is inline and webhooks create no execution): `/chat`, `/task` (async+sync, self-task), `/api/internal/execute-task`, `/api/webhooks/{token}` (auto-derives `(token, body_hash)`), `/api/agents/{name}/fan-out`. Scheduler sends `Idempotency-Key: sched:{execution_id}`; MCP `chat_with_agent`/`fan_out` forward a deterministic key over call args. Optional header (absent → no dedup, back-compat); duplicate → original result + `X-Idempotent-Replay: true`, in-flight → 409; `idempotent_replay` audit event; 24h TTL purge in the cleanup sweep. Architectural Invariant #18 added. Deviation: event-subscription dispatch already funnels through `/task`-equivalent paths and is covered transitively; no separate wiring needed. |
 | **#526** | **Per-agent dispatch circuit breaker (RELIABILITY-007)** | Producer-side breaker in front of `SlotService` / `BacklogService`. Opens on rolling failure rate; fast-fails 503 instead of enqueuing into a doomed backlog. Drains existing backlog on trip with `circuit_open` reason. Distinct from #304 (closed — agent-to-agent) and #307 (heartbeat *signal*); this is the **consumer** of that signal. |
 
 ### Architectural shift

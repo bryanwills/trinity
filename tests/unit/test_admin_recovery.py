@@ -69,6 +69,9 @@ def _make_db(conn: sqlite3.Connection) -> None:
 def tmp_db(tmp_path, monkeypatch):
     try:
         import db.connection as connection_mod
+        import db.agents as agents_mod
+        import db.schedules as schedules_mod
+        import db.users as users_mod
     except ImportError:
         pytest.skip("backend venv required")
 
@@ -77,7 +80,22 @@ def tmp_db(tmp_path, monkeypatch):
     _make_db(conn)
     conn.close()
 
-    monkeypatch.setattr(connection_mod, "DB_PATH", str(db_path))
+    # Sibling tests that replace the `db` package in sys.modules can leave
+    # db.agents/db.schedules bound to a different db.connection instance than
+    # a fresh `import db.connection` returns. Patch DB_PATH in the globals of
+    # every get_db_connection the ops classes actually captured, so the patch
+    # holds regardless of session import order.
+    seen: set[int] = set()
+    for fn in (
+        connection_mod.get_db_connection,
+        agents_mod.get_db_connection,
+        schedules_mod.get_db_connection,
+        users_mod.get_db_connection,
+    ):
+        g = fn.__wrapped__.__globals__ if hasattr(fn, "__wrapped__") else fn.__globals__
+        if id(g) not in seen:
+            seen.add(id(g))
+            monkeypatch.setitem(g, "DB_PATH", str(db_path))
     return str(db_path)
 
 

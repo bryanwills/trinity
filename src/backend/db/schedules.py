@@ -8,6 +8,8 @@ import json
 import logging
 import secrets
 import sqlite3
+import statistics
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 
@@ -20,6 +22,42 @@ from models import TaskExecutionStatus
 from utils.helpers import iso_cutoff, utc_now_iso, to_utc_iso, parse_iso_timestamp
 
 logger = logging.getLogger(__name__)
+
+# Cap on rows fed into percentile compute and tool-call aggregation
+# (#868). Counts and the daily timeline always use the unsampled rowset;
+# only the percentile / tool-call pool is bounded. Test-only override is
+# via `monkeypatch.setattr(db.schedules, "_PERCENTILE_ROWSET_CAP", N)`.
+_PERCENTILE_ROWSET_CAP = 5000
+
+# #1107: user-facing grouping of raw `triggered_by` values for the agent
+# Overview "executions by type" chart. Unmapped values fall into "Other"
+# (see `_BUCKET_ORDER`) so a new trigger type stays visible instead of
+# silently vanishing. Locked by /autoplan taste decision (extend buckets to
+# fit real data — `manual` is the dominant real-world value).
+_TRIGGER_BUCKETS = {
+    "chat": "Chat/Tasks", "manual": "Chat/Tasks", "user": "Chat/Tasks",
+    "session": "Chat/Tasks", "self_chat": "Chat/Tasks",
+    "mcp": "MCP",
+    "telegram": "Channels", "slack": "Channels", "whatsapp": "Channels",
+    "public": "Public", "paid": "Public",
+    "schedule": "Scheduled", "webhook": "Scheduled",
+    "loop": "Loops",  # #1150: first-class bucket so loop bursts don't read as cron load
+    "agent": "Agent-to-agent", "fan_out": "Agent-to-agent",
+    "self_task": "Agent-to-agent",
+    "voip": "Voice", "voice": "Voice",
+}
+# Stack / legend order; "Other" last so unmapped triggers are visible.
+_BUCKET_ORDER = [
+    "Chat/Tasks", "MCP", "Channels", "Public",
+    "Scheduled", "Loops", "Agent-to-agent", "Voice", "Other",
+]
+_OTHER_BUCKET = "Other"
+
+
+def _bucket_for_trigger(trigger: Optional[str]) -> str:
+    """Map a raw `triggered_by` value to its user-facing bucket (#1107)."""
+    return _TRIGGER_BUCKETS.get(trigger or "", _OTHER_BUCKET)
+
 
 # #73: chunk size for scoped `IN (...)` lookups. SQLite caps host parameters at
 # SQLITE_MAX_VARIABLE_NUMBER (999 before SQLite 3.32). Keep a safe margin below
@@ -814,6 +852,7 @@ class ScheduleOperations:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        loop_id: str = None,
         subscription_id: str = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
@@ -821,7 +860,7 @@ class ScheduleOperations:
         Args:
             agent_name: Target agent name
             message: Task message
-            triggered_by: Trigger type - "manual", "mcp", "agent", "fan_out"
+            triggered_by: Trigger type - "manual", "mcp", "agent", "fan_out", "loop"
             source_user_id: User ID who triggered (for manual/mcp triggers)
             source_user_email: User email (denormalized for queries)
             source_agent_name: Calling agent name (for agent-to-agent)
@@ -829,6 +868,7 @@ class ScheduleOperations:
             source_mcp_key_name: MCP API key name (denormalized)
             model_used: Model used for this execution (MODEL-001)
             fan_out_id: Parent fan-out operation ID (FANOUT-001)
+            loop_id: Parent loop ID (#740) — iterations of a sequential loop
             subscription_id: Subscription active at record time (SUB-004)
         """
         execution_id = self._generate_id()
@@ -841,8 +881,8 @@ class ScheduleOperations:
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
                     source_user_id, source_user_email, source_agent_name,
                     source_mcp_key_id, source_mcp_key_name, model_used, fan_out_id,
-                    subscription_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    loop_id, subscription_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 "__manual__",  # Special marker for manual/API-triggered tasks
@@ -858,6 +898,7 @@ class ScheduleOperations:
                 source_mcp_key_name,
                 model_used,
                 fan_out_id,
+                loop_id,
                 subscription_id,
             ))
             conn.commit()
@@ -877,6 +918,7 @@ class ScheduleOperations:
                 source_mcp_key_name=source_mcp_key_name,
                 model_used=model_used,
                 fan_out_id=fan_out_id,
+                loop_id=loop_id,
                 subscription_id=subscription_id,
             )
 
@@ -1134,6 +1176,44 @@ class ScheduleOperations:
                 """,
                 (
                     TaskExecutionStatus.CANCELLED,
+                    now,
+                    reason,
+                    agent_name,
+                    TaskExecutionStatus.QUEUED,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
+        """Bulk-FAIL all queued executions for an agent (#526, RELIABILITY-007).
+
+        Called when the per-agent dispatch circuit breaker trips: the queued
+        backlog is doomed (the agent is auth-dead), so fail it out immediately
+        instead of letting each row drain into its own failure after the detect
+        window.
+
+        Mirrors ``expire_stale_queued`` (status → FAILED) — intentionally NOT
+        ``cancel_queued_for_agent`` (which sets CANCELLED). The #526 acceptance
+        criteria require these rows close FAILED so they read as failures, not
+        as user cancellations.
+
+        Returns:
+            Count of rows moved from QUEUED to FAILED.
+        """
+        now = utc_now_iso()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    completed_at = ?,
+                    error = ?
+                WHERE agent_name = ? AND status = ?
+                """,
+                (
+                    TaskExecutionStatus.FAILED,
                     now,
                     reason,
                     agent_name,
@@ -1522,6 +1602,405 @@ class ScheduleOperations:
                 })
 
             return results
+
+    def get_schedule_analytics(
+        self,
+        schedule_id: str,
+        hours: int,
+        agent_name: str,
+    ) -> Optional[Dict]:
+        """Compute per-schedule analytics over a rolling time window.
+
+        Returns the analytics envelope, or `None` when the schedule
+        does not exist, is soft-deleted, or belongs to a different
+        agent than `agent_name`. The router maps `None` → 404, which
+        is the load-bearing tenant-boundary check — `AuthorizedAgent`
+        only validates the URL's agent name, not that the user-supplied
+        `schedule_id` belongs to it.
+
+        Counts and timeline buckets use the unsampled rowset;
+        percentiles and tool-call distribution are computed over the
+        newest `_PERCENTILE_ROWSET_CAP` success rows (`sampled=True`
+        when the cap was hit). Bucketing is UTC — documented in the
+        route's OpenAPI description.
+        """
+        schedule = self.get_schedule(schedule_id)
+        if not schedule or schedule.agent_name != agent_name:
+            return None
+
+        cutoff = iso_cutoff(hours)
+        cap = _PERCENTILE_ROWSET_CAP
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    substr(started_at, 1, 10) AS day,
+                    status,
+                    COUNT(*) AS n,
+                    SUM(COALESCE(cost, 0)) AS cost_sum
+                FROM schedule_executions
+                WHERE schedule_id = ? AND started_at > ?
+                GROUP BY day, status
+                """,
+                (schedule_id, cutoff),
+            )
+            agg_rows = cursor.fetchall()
+
+            # `cap + 1` so we can detect sampling without a separate COUNT.
+            cursor.execute(
+                """
+                SELECT duration_ms, tool_calls
+                FROM schedule_executions
+                WHERE schedule_id = ?
+                  AND started_at > ?
+                  AND status = 'success'
+                  AND duration_ms IS NOT NULL
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (schedule_id, cutoff, cap + 1),
+            )
+            detail_rows = cursor.fetchall()
+
+        counts: Dict[str, int] = defaultdict(int)
+        cost_by_status: Dict[str, float] = defaultdict(float)
+        for row in agg_rows:
+            counts[row["status"]] += int(row["n"] or 0)
+            cost_by_status[row["status"]] += float(row["cost_sum"] or 0.0)
+
+        total_executions = sum(counts.values())
+        success_count = counts.get(TaskExecutionStatus.SUCCESS, 0)
+        failed_count = counts.get(TaskExecutionStatus.FAILED, 0)
+        cancelled_count = counts.get(TaskExecutionStatus.CANCELLED, 0)
+        success_rate = (
+            round(success_count / total_executions, 4) if total_executions else 0.0
+        )
+        cost_total = round(sum(cost_by_status.values()), 4)
+
+        sampled = len(detail_rows) > cap
+        sample_size = cap if sampled else len(detail_rows)
+        capped_rows = detail_rows[:cap]
+        durations = [int(r["duration_ms"]) for r in capped_rows]
+
+        if len(durations) >= 2:
+            # `inclusive` matches "x% of observations were ≤ this value"
+            # for small N; the default `exclusive` shifts p99 noticeably.
+            cuts = statistics.quantiles(durations, n=100, method="inclusive")
+            p50, p95, p99 = int(cuts[49]), int(cuts[94]), int(cuts[98])
+        elif len(durations) == 1:
+            only = int(durations[0])
+            p50 = p95 = p99 = only
+        else:
+            p50 = p95 = p99 = None
+
+        # Top-5 weighted by total wall time (NOT raw count) — avoids
+        # `Read`/`Bash` dominating because they're frequent but cheap.
+        tool_duration: Dict[str, int] = defaultdict(int)
+        tool_call_total = 0
+        for row in capped_rows:
+            raw = row["tool_calls"]
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "get_schedule_analytics: malformed tool_calls JSON "
+                    "skipped (schedule_id=%s): %s",
+                    schedule_id, exc,
+                )
+                continue
+            if not isinstance(parsed, list):
+                continue
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name") or entry.get("tool")
+                if not name:
+                    continue
+                tool_call_total += 1
+                dur = entry.get("duration_ms")
+                if isinstance(dur, (int, float)) and dur > 0:
+                    tool_duration[name] += int(dur)
+                # Entries without a usable duration count toward
+                # total_calls but stay out of the top-5 ranking.
+
+        tool_top5 = [
+            {"name": name, "total_duration_ms": dur_total}
+            for name, dur_total in sorted(
+                tool_duration.items(), key=lambda kv: kv[1], reverse=True
+            )[:5]
+        ]
+
+        timeline_by_day: Dict[str, Dict[str, float]] = defaultdict(
+            lambda: {"success": 0, "failed": 0, "cost": 0.0}
+        )
+        for row in agg_rows:
+            day = row["day"]
+            if not day:
+                continue
+            n = int(row["n"] or 0)
+            cost_sum = float(row["cost_sum"] or 0.0)
+            timeline_by_day[day]["cost"] += cost_sum
+            if row["status"] == TaskExecutionStatus.SUCCESS:
+                timeline_by_day[day]["success"] += n
+            elif row["status"] == TaskExecutionStatus.FAILED:
+                timeline_by_day[day]["failed"] += n
+
+        # Gap-fill so the chart x-axis stays continuous for zero-days.
+        now_utc = datetime.now(timezone.utc).date()
+        start_utc = (datetime.now(timezone.utc) - timedelta(hours=hours)).date()
+        timeline: List[Dict] = []
+        day = start_utc
+        while day <= now_utc:
+            iso = day.isoformat()
+            bucket = timeline_by_day.get(iso, {"success": 0, "failed": 0, "cost": 0.0})
+            timeline.append({
+                "date": iso,
+                "success": int(bucket["success"]),
+                "failed": int(bucket["failed"]),
+                "cost": round(float(bucket["cost"]), 4),
+            })
+            day = day + timedelta(days=1)
+
+        return {
+            "window_hours": hours,
+            "total_executions": total_executions,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "cancelled_count": cancelled_count,
+            "success_rate": success_rate,
+            "duration_ms": {"p50": p50, "p95": p95, "p99": p99},
+            "cost": {"total": cost_total},
+            "tool_calls": {"top": tool_top5, "total_calls": tool_call_total},
+            "timeline": timeline,
+            "sampled": sampled,
+            "sample_size": sample_size,
+        }
+
+    def get_agent_analytics(self, agent_name: str, hours: int) -> Dict:
+        """Compute agent-scoped execution analytics over a rolling window (#1107).
+
+        Generalises `get_schedule_analytics` to agent scope with a
+        `triggered_by` breakdown grouped into user-facing buckets. Powers
+        the Agent Detail "Overview" trend charts.
+
+        Data-source discipline (locked by /autoplan engineering review):
+          - Counts, per-day type stacks, per-day success-rate, per-day
+            duration AVG, and per-day context AVG come from full-set
+            aggregate queries.
+          - Headline duration `avg` and `context_avg` also come from the
+            full set — NEVER from the capped pool, since an average over a
+            sampled subset would be silently wrong on high-traffic agents.
+          - Only the headline duration `p95` uses the newest
+            `_PERCENTILE_ROWSET_CAP` success rows (`sampled=True` when
+            capped).
+          - `success_rate` is terminal-based: success / (success + failed),
+            where failed = status in ('failed', 'error'). Days with zero
+            terminal rows report `success_rate=None` so the chart shows a
+            gap, not a false 0%.
+          - Bucketing is UTC-day; unmapped triggers → "Other".
+
+        Always returns an envelope (zeros / empty when the agent has no
+        executions). Access is gated by `AuthorizedAgent` at the router and
+        the window is validated there, so there is no None/404 path here.
+        """
+        cutoff = iso_cutoff(hours)
+        cap = _PERCENTILE_ROWSET_CAP
+        FAILED_STATES = (TaskExecutionStatus.FAILED, "error")
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Q1: counts + per-day type stacks (full set).
+            cursor.execute(
+                """
+                SELECT substr(started_at, 1, 10) AS day,
+                       status,
+                       triggered_by,
+                       COUNT(*) AS n
+                FROM schedule_executions
+                WHERE agent_name = ? AND started_at > ?
+                GROUP BY day, status, triggered_by
+                """,
+                (agent_name, cutoff),
+            )
+            count_rows = cursor.fetchall()
+
+            # Q2: per-day duration AVG (success only) + context AVG
+            # (NULL-skipped, all statuses). CASE→NULL means AVG skips
+            # non-success durations; AVG(context_used) skips unmeasured rows.
+            cursor.execute(
+                """
+                SELECT substr(started_at, 1, 10) AS day,
+                       AVG(CASE WHEN status = 'success' THEN duration_ms END) AS dur_avg,
+                       AVG(context_used) AS ctx_avg
+                FROM schedule_executions
+                WHERE agent_name = ? AND started_at > ?
+                GROUP BY day
+                """,
+                (agent_name, cutoff),
+            )
+            daily_metric_rows = cursor.fetchall()
+
+            # Q3: overall duration AVG + context AVG (full set, single row).
+            cursor.execute(
+                """
+                SELECT AVG(CASE WHEN status = 'success' THEN duration_ms END) AS dur_avg,
+                       AVG(context_used) AS ctx_avg
+                FROM schedule_executions
+                WHERE agent_name = ? AND started_at > ?
+                """,
+                (agent_name, cutoff),
+            )
+            overall = cursor.fetchone()
+
+            # Q4: capped success-duration pool for the headline p95 only.
+            # `cap + 1` so we can detect sampling without a second COUNT.
+            cursor.execute(
+                """
+                SELECT duration_ms
+                FROM schedule_executions
+                WHERE agent_name = ?
+                  AND started_at > ?
+                  AND status = 'success'
+                  AND duration_ms IS NOT NULL
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (agent_name, cutoff, cap + 1),
+            )
+            dur_rows = cursor.fetchall()
+
+        # --- counts, per-day stacks, per-bucket window totals ---
+        success_count = 0
+        failed_count = 0
+        total_executions = 0
+        bucket_totals: Dict[str, int] = defaultdict(int)
+        day_counts: Dict[str, Dict] = defaultdict(
+            lambda: {
+                "total": 0, "success": 0, "failed": 0,
+                "by_type": defaultdict(int),
+            }
+        )
+        for row in count_rows:
+            day = row["day"]
+            row_status = row["status"]
+            n = int(row["n"] or 0)
+            bucket = _bucket_for_trigger(row["triggered_by"])
+            total_executions += n
+            bucket_totals[bucket] += n
+            if day:
+                d = day_counts[day]
+                d["total"] += n
+                d["by_type"][bucket] += n
+                if row_status == TaskExecutionStatus.SUCCESS:
+                    d["success"] += n
+                elif row_status in FAILED_STATES:
+                    d["failed"] += n
+            if row_status == TaskExecutionStatus.SUCCESS:
+                success_count += n
+            elif row_status in FAILED_STATES:
+                failed_count += n
+
+        terminal_total = success_count + failed_count
+        success_rate = (
+            round(success_count / terminal_total, 4) if terminal_total else 0.0
+        )
+
+        # --- headline p95 (capped pool) ---
+        sampled = len(dur_rows) > cap
+        sample_size = cap if sampled else len(dur_rows)
+        durations = [int(r["duration_ms"]) for r in dur_rows[:cap]]
+        if len(durations) >= 2:
+            cuts = statistics.quantiles(durations, n=100, method="inclusive")
+            p95 = int(cuts[94])
+        elif len(durations) == 1:
+            p95 = int(durations[0])
+        else:
+            p95 = None
+
+        # --- headline avg duration + context (full set, never sampled) ---
+        dur_avg = (
+            int(overall["dur_avg"])
+            if overall and overall["dur_avg"] is not None else None
+        )
+        ctx_avg = (
+            int(overall["ctx_avg"])
+            if overall and overall["ctx_avg"] is not None else None
+        )
+
+        # --- per-day duration / context AVG lookup ---
+        daily_metrics: Dict[str, Dict] = {}
+        for row in daily_metric_rows:
+            daily_metrics[row["day"]] = {
+                "duration_avg_ms": (
+                    int(row["dur_avg"]) if row["dur_avg"] is not None else None
+                ),
+                "context_avg": (
+                    int(row["ctx_avg"]) if row["ctx_avg"] is not None else None
+                ),
+            }
+
+        # --- gap-filled timeline (continuous UTC-day x-axis) ---
+        now_utc = datetime.now(timezone.utc).date()
+        start_utc = (datetime.now(timezone.utc) - timedelta(hours=hours)).date()
+        timeline: List[Dict] = []
+        day = start_utc
+        while day <= now_utc:
+            iso = day.isoformat()
+            c = day_counts.get(iso)
+            m = daily_metrics.get(iso, {})
+            if c:
+                day_terminal = c["success"] + c["failed"]
+                day_sr = (
+                    round(c["success"] / day_terminal, 4)
+                    if day_terminal else None
+                )
+                by_type = {
+                    b: c["by_type"][b]
+                    for b in _BUCKET_ORDER if c["by_type"].get(b)
+                }
+                timeline.append({
+                    "date": iso,
+                    "total": c["total"],
+                    "success": c["success"],
+                    "failed": c["failed"],
+                    "success_rate": day_sr,
+                    "duration_avg_ms": m.get("duration_avg_ms"),
+                    "context_avg": m.get("context_avg"),
+                    "by_type": by_type,
+                })
+            else:
+                timeline.append({
+                    "date": iso, "total": 0, "success": 0, "failed": 0,
+                    "success_rate": None, "duration_avg_ms": None,
+                    "context_avg": None, "by_type": {},
+                })
+            day = day + timedelta(days=1)
+
+        by_type_totals = [
+            {"bucket": b, "total": bucket_totals[b]}
+            for b in _BUCKET_ORDER if bucket_totals.get(b)
+        ]
+        buckets_present = [b for b in _BUCKET_ORDER if bucket_totals.get(b)]
+
+        return {
+            "window_hours": hours,
+            "total_executions": total_executions,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "success_rate": success_rate,
+            "duration_ms": {"avg": dur_avg, "p95": p95},
+            "context_avg": ctx_avg,
+            "by_type": by_type_totals,
+            "buckets": buckets_present,
+            "timeline": timeline,
+            "sampled": sampled,
+            "sample_size": sample_size,
+        }
 
     def get_all_agents_schedule_counts(self) -> Dict[str, Dict[str, int]]:
         """Get schedule counts (total and enabled) for all agents.
@@ -2356,4 +2835,148 @@ class ScheduleOperations:
                 "avg_daily_cost": round(avg_daily_cost, 6),
                 "trend_cost_pct": trend_pct,
                 "daily_breakdown": daily_breakdown,
+            }
+
+    # -------------------------------------------------------------------------
+    # Fleet-level execution queries (EXEC-022 / Issue #18)
+    # -------------------------------------------------------------------------
+
+    def get_fleet_executions(
+        self,
+        agent_names: Optional[List[str]],  # None = admin (no agent filter)
+        *,
+        status: Optional[str] = None,
+        triggered_by: Optional[str] = None,
+        hours: Optional[int] = 24,
+        search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict]:
+        """Cross-fleet execution list for the Unified Executions Dashboard.
+
+        Returns summary rows (no large text fields: response, tool_calls,
+        execution_log). The error column is truncated to 200 chars for the
+        failed-row one-liner.
+
+        agent_names=None → admin path, no agent_name filter applied.
+        agent_names=[]   → non-admin with zero accessible agents, returns [].
+        hours=0 or None  → no time-window filter (all-time).
+        """
+        if agent_names is not None and len(agent_names) == 0:
+            return []
+
+        conditions = []
+        params: List = []
+
+        if agent_names is not None:
+            placeholders = ",".join("?" * len(agent_names))
+            conditions.append(f"agent_name IN ({placeholders})")
+            params.extend(agent_names)
+
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        if triggered_by:
+            conditions.append("triggered_by = ?")
+            params.append(triggered_by)
+
+        if hours:
+            conditions.append("started_at > ?")
+            params.append(iso_cutoff(hours))
+
+        if search:
+            conditions.append("message LIKE ?")
+            params.append(f"%{search}%")
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        params.extend([limit, offset])
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT
+                    id, schedule_id, agent_name, status, started_at, completed_at,
+                    duration_ms, message, triggered_by,
+                    context_used, context_max, cost,
+                    CASE WHEN status IN ('failed', 'error')
+                         THEN SUBSTR(error, 1, 200)
+                         ELSE NULL END AS error_summary,
+                    source_user_id, source_user_email, source_agent_name,
+                    source_mcp_key_id, source_mcp_key_name,
+                    model_used, fan_out_id, business_status, validation_execution_id,
+                    queued_at
+                FROM schedule_executions
+                {where}
+                ORDER BY started_at DESC
+                LIMIT ? OFFSET ?
+            """, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_fleet_execution_stats(
+        self,
+        agent_names: Optional[List[str]],  # None = admin (no agent filter)
+        hours: int = 24,
+    ) -> Dict:
+        """Aggregate stats for the fleet executions stat cards.
+
+        Returns total/success/failed/cost within the time window, plus a
+        current running + queued count (not time-windowed — a run that started
+        before the window is still live).
+        """
+        if agent_names is not None and len(agent_names) == 0:
+            return {
+                "total": 0, "success_count": 0, "failed_count": 0,
+                "total_cost": 0.0, "success_rate": 0.0,
+                "running_count": 0, "queued_count": 0, "hours": hours,
+            }
+
+        agent_params: List = []
+        agent_where = ""
+        if agent_names is not None:
+            placeholders = ",".join("?" * len(agent_names))
+            agent_where = f"WHERE agent_name IN ({placeholders})"
+            agent_params = list(agent_names)
+
+        # Single-pass query: windowed totals via conditional aggregation +
+        # live running/queued counts without a time filter, all in one scan.
+        # time_cond = "1" when hours=0 (all-time) so CASE expressions are unconditional.
+        if hours:
+            time_cond = "started_at > ?"
+            time_params: List = [iso_cutoff(hours)] * 4  # used in 4 CASE expressions
+        else:
+            time_cond = "1"
+            time_params = []
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT
+                    SUM(CASE WHEN {time_cond} THEN 1 ELSE 0 END) AS total,
+                    SUM(CASE WHEN {time_cond} AND status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN {time_cond} AND status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed_count,
+                    SUM(CASE WHEN {time_cond} THEN COALESCE(cost, 0) ELSE 0 END) AS total_cost,
+                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
+                    SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count
+                FROM schedule_executions
+                {agent_where}
+            """, time_params + agent_params)
+            row = cursor.fetchone()
+            total = row["total"] or 0
+            success_count = row["success_count"] or 0
+            failed_count = row["failed_count"] or 0
+            total_cost = row["total_cost"] or 0.0
+            terminal = success_count + failed_count
+            success_rate = round(success_count / terminal * 100, 1) if terminal > 0 else 0.0
+
+            return {
+                "total": total,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "total_cost": round(total_cost, 4),
+                "success_rate": success_rate,
+                "running_count": row["running_count"] or 0,
+                "queued_count": row["queued_count"] or 0,
+                "hours": hours,
             }

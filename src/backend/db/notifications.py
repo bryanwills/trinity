@@ -253,6 +253,50 @@ class NotificationOperations:
 
         return self.get_notification(notification_id)
 
+    def dismiss_all(
+        self,
+        dismissed_by: str,
+        agent_name: Optional[str] = None,
+        accessible_agent_names: Optional[set] = None,
+    ) -> int:
+        """Dismiss all non-dismissed notifications in one statement (#1017).
+
+        Targets pending AND acknowledged rows — a button named "Clear All"
+        must clear the visible feed, which shows both.
+
+        accessible_agent_names: None = no filter; empty set = no-op (a
+        zero-agent user must not touch anything); non-empty = SQL IN filter.
+
+        Returns the number of notifications dismissed.
+        """
+        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+            return 0
+
+        now = utc_now_iso()
+        query = """
+            UPDATE agent_notifications
+            SET status = 'dismissed',
+                acknowledged_at = ?,
+                acknowledged_by = ?
+            WHERE status IN ('pending', 'acknowledged')
+        """
+        params: list = [now, dismissed_by]
+
+        if accessible_agent_names is not None:
+            placeholders = ",".join(["?"] * len(accessible_agent_names))
+            query += f" AND agent_name IN ({placeholders})"
+            params.extend(sorted(accessible_agent_names))
+
+        if agent_name:
+            query += " AND agent_name = ?"
+            params.append(agent_name)
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.rowcount
+
     def delete_agent_notifications(self, agent_name: str) -> int:
         """
         Delete all notifications for an agent.
@@ -274,23 +318,36 @@ class NotificationOperations:
 
     def count_pending_notifications(
         self,
-        agent_name: Optional[str] = None
+        agent_name: Optional[str] = None,
+        agent_names: Optional[List[str]] = None
     ) -> int:
         """
         Count pending notifications.
 
         Args:
-            agent_name: Optional filter by agent
+            agent_name: Optional filter by a single agent
+            agent_names: Optional filter by a set of agents (fleet-wide count
+                scoped to the caller's accessible agents). An empty list means
+                "no accessible agents" → 0 (not "all agents").
 
         Returns:
             Count of pending notifications
         """
+        # Empty accessible set → nothing to count (avoid invalid `IN ()` SQL).
+        if agent_names is not None and len(agent_names) == 0:
+            return 0
+
         query = "SELECT COUNT(*) FROM agent_notifications WHERE status = 'pending'"
-        params = []
+        params: List = []
 
         if agent_name:
             query += " AND agent_name = ?"
             params.append(agent_name)
+
+        if agent_names:
+            placeholders = ",".join("?" for _ in agent_names)
+            query += f" AND agent_name IN ({placeholders})"
+            params.extend(agent_names)
 
         with get_db_connection() as conn:
             cursor = conn.cursor()

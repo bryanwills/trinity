@@ -71,25 +71,12 @@
 
           <!-- Tabs -->
           <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']">
-            <div class="border-b border-gray-200 dark:border-gray-700 overflow-x-auto overflow-y-hidden">
-              <nav class="-mb-px flex whitespace-nowrap">
-                <button
-                  v-for="tab in visibleTabs"
-                  :key="tab.id"
-                  @click="activeTab = tab.id"
-                  :class="[
-                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
-                    activeTab === tab.id
-                      ? 'border-action-primary-500 text-action-primary-600 dark:text-action-primary-400'
-                      : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600'
-                  ]"
-                >
-                  {{ tab.label }}
-                  <span v-if="tab.badge" class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none">
-                    {{ tab.badge }}
-                  </span>
-                </button>
-              </nav>
+            <!-- #1114: tabs overflow into a "More ▾" dropdown instead of horizontal scroll -->
+            <OverflowTabs :tabs="visibleTabs" v-model="activeTab" />
+
+            <!-- Overview Tab Content (#1107 — default landing tab) -->
+            <div v-if="activeTab === 'overview'" class="p-6">
+              <OverviewPanel :agent="agent" @navigate-tab="handleOverviewNavigate" @open-task="handleOpenTask" />
             </div>
 
             <!-- Info Tab Content -->
@@ -161,6 +148,11 @@
               <SchedulesPanel :agent-name="agent.name" :initial-message="schedulePrefillMessage" />
             </div>
 
+            <!-- Loops Tab Content (#1106 / #740 Phase 2) -->
+            <div v-if="activeTab === 'loops'">
+              <LoopsPanel :agent-name="agent.name" :agent-status="agent.status" />
+            </div>
+
             <!-- Playbooks Tab Content -->
             <div v-if="activeTab === 'playbooks'" class="p-6">
               <PlaybooksPanel
@@ -188,6 +180,12 @@
             <!-- Shared Folders Tab Content -->
             <div v-if="activeTab === 'folders'" class="p-6">
               <FoldersPanel :agent-name="agent.name" :agent-status="agent.status" :can-share="agent.can_share" />
+            </div>
+
+            <!-- Settings Tab Content (#1108) — sectioned home for per-agent
+                 config; Guardrails (GUARD-001 UI, #967) is section #1 -->
+            <div v-if="activeTab === 'settings' && agent.can_share">
+              <SettingsPanel :agent-name="agent.name" :notify="showNotification" />
             </div>
 
           </div>
@@ -258,12 +256,15 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import GitConflictModal from '../components/GitConflictModal.vue'
 
 // Panel Components (existing)
+import OverviewPanel from '../components/OverviewPanel.vue'
 import SchedulesPanel from '../components/SchedulesPanel.vue'
+import LoopsPanel from '../components/LoopsPanel.vue'
 import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
+import SettingsPanel from '../components/settings/SettingsPanel.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
@@ -280,6 +281,7 @@ import PlaybooksPanel from '../components/PlaybooksPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import SessionPanel from '../components/SessionPanel.vue'  // SESSION_TAB_2026-04 Phase 3
 import NeverminedPanel from '../components/NeverminedPanel.vue'
+import OverflowTabs from '../components/OverflowTabs.vue'  // #1114: tab overflow dropdown
 
 // Import composables
 import { useNotification } from '../composables'
@@ -301,7 +303,17 @@ const sessionsStore = useSessionsStore()  // SESSION_TAB_2026-04 Phase 3
 const agent = ref(null)
 const loading = ref(true)
 const error = ref('')
-const activeTab = ref('tasks')
+const activeTab = ref('overview')  // #1107: Overview is the default landing tab
+// Tabs reachable via ?tab= deep-link (Timeline / EXEC-023 navigation).
+// Single source — referenced in onMounted + onActivated (#1107: dedupe + overview).
+const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
+// Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
+const TAB_ALIASES = { guardrails: 'settings' }
+// Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
+function resolveDeepLinkTab(requested) {
+  const resolved = TAB_ALIASES[requested] || requested
+  return DEEP_LINK_TABS.includes(resolved) ? resolved : null
+}
 // Tabs that need a full-viewport flex layout (input pinned to bottom).
 // Chat + Session both render ChatMessages which depends on flex-1 grow.
 const isFullscreenTab = computed(() => activeTab.value === 'chat' || activeTab.value === 'session')
@@ -550,24 +562,68 @@ const {
 } = useAgentSettings(agent, agentsStore, showNotification)
 
 // Save resource limits and restart agent if needed
+// #1126: poll the agent's real status until it reaches one of `targets`, or
+// timeout. Returns true if reached. Tolerates transient fetch errors mid-stop.
+async function waitForAgentStatus(targets, timeoutMs = 30000, intervalMs = 1000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const a = await agentsStore.fetchAgent(agent.value.name)
+      if (a) {
+        agent.value = a
+        if (targets.includes(a.status)) return true
+      }
+    } catch (_) {
+      // transient (container mid-teardown) — keep polling
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+  }
+  return false
+}
+
 async function saveResourceLimits() {
-  // Check if values actually changed
+  // Check if values actually changed. Compare against the effective (current_*)
+  // values; an empty override means "inherit", which equals current.
   const newMemory = resourceLimits.value.memory || resourceLimits.value.current_memory
   const newCpu = resourceLimits.value.cpu || resourceLimits.value.current_cpu
   const oldMemory = resourceLimits.value.current_memory
   const oldCpu = resourceLimits.value.current_cpu
   const valuesChanged = newMemory !== oldMemory || newCpu !== oldCpu
 
-  await updateResourceLimits()
+  // #1126: don't restart if the save didn't actually persist.
+  const saved = await updateResourceLimits()
+  if (!saved) return  // composable already surfaced the error
   showResourceModal.value = false
 
-  // If values changed and agent is running, restart it
+  // If values changed and agent is running, restart it to apply the new limits.
   if (valuesChanged && agent.value?.status === 'running') {
     showNotification('Restarting agent to apply new resource limits...', 'info')
-    await stopAgent()
-    // Wait a moment for container to fully stop
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    await startAgent()
+    try {
+      await stopAgent()
+      // #1126: gate the start on the container actually being stopped rather
+      // than a fixed 1s sleep (insufficient under load → "sometimes works").
+      const stopped = await waitForAgentStatus(['stopped', 'exited', 'created'])
+      if (!stopped) {
+        showNotification(
+          'Agent did not stop within 30s — not restarting automatically. Start it manually to apply the new limits.',
+          'error',
+        )
+        return
+      }
+      await startAgent()
+      // Refresh effective values so the header/dialog reflect the applied limits.
+      await loadAgent()
+      await loadResourceLimits()
+      showNotification('Agent restarted with new resource limits.', 'success')
+    } catch (err) {
+      showNotification(
+        `Restart failed: ${err?.message || err}. The agent may be stopped — start it manually.`,
+        'error',
+      )
+    }
+  } else {
+    // No restart needed — still refresh the effective values shown in the UI.
+    await loadResourceLimits()
   }
 }
 
@@ -585,8 +641,9 @@ const {
 const visibleTabs = computed(() => {
   const isSystem = agent.value?.is_system
 
-  // Primary tabs - most frequently used
+  // Primary tabs - most frequently used. Overview leads (#1107).
   const tabs = [
+    { id: 'overview', label: 'Overview' },
     { id: 'tasks', label: 'Tasks' },
     { id: 'chat', label: 'Chat' }
   ]
@@ -604,6 +661,7 @@ const visibleTabs = computed(() => {
 
   tabs.push(
     { id: 'schedules', label: 'Schedules' },
+    { id: 'loops', label: 'Loops' },
     { id: 'playbooks', label: 'Playbooks' },
     { id: 'credentials', label: 'Credentials' },
     { id: 'nevermined', label: 'Payments' }
@@ -626,6 +684,11 @@ const visibleTabs = computed(() => {
   // Folders - hide for system agent
   if (agent.value?.can_share && !isSystem) {
     tabs.push({ id: 'folders', label: 'Folders' })
+  }
+
+  // Settings - owner-only (#1108); sectioned config home, Guardrails is section #1
+  if (agent.value?.can_share && !isSystem) {
+    tabs.push({ id: 'settings', label: 'Settings' })
   }
 
   // Info at the end (reference/metadata)
@@ -916,7 +979,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     nextTick(() => {
       const validTabIds = visibleTabs.value.map(t => t.id)
       if (!validTabIds.includes(activeTab.value)) {
-        activeTab.value = 'tasks'
+        activeTab.value = 'overview'
       }
     })
     startAllPolling()
@@ -1001,10 +1064,9 @@ onMounted(async () => {
 
   // Handle tab query param (from Timeline click navigation)
   if (route.query.tab) {
-    const requestedTab = route.query.tab
-    const validTabs = ['tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
-    if (validTabs.includes(requestedTab)) {
-      activeTab.value = requestedTab
+    const resolvedTab = resolveDeepLinkTab(route.query.tab)
+    if (resolvedTab) {
+      activeTab.value = resolvedTab
     }
   }
 })
@@ -1026,10 +1088,9 @@ onActivated(async () => {
   // Handle tab query param (EXEC-023: Continue as Chat navigation)
   // Must also check here since onMounted doesn't fire for cached components
   if (route.query.tab) {
-    const requestedTab = route.query.tab
-    const validTabs = ['tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
-    if (validTabs.includes(requestedTab)) {
-      activeTab.value = requestedTab
+    const resolvedTab = resolveDeepLinkTab(route.query.tab)
+    if (resolvedTab) {
+      activeTab.value = resolvedTab
     }
   }
 
@@ -1055,6 +1116,19 @@ onUnmounted(() => {
   stopAllPolling()
   stopEmotionCycling()
 })
+
+// Overview tab (#1107): navigate to another tab, or open a specific execution
+// in the Tasks tab (deep-link via ?execution= which TasksPanel consumes).
+const handleOverviewNavigate = (tabId) => {
+  if (visibleTabs.value.some(t => t.id === tabId)) {
+    activeTab.value = tabId
+  }
+}
+
+const handleOpenTask = (executionId) => {
+  activeTab.value = 'tasks'
+  router.replace({ query: { ...route.query, execution: executionId } })
+}
 
 // Handle item click from Info tab - switch to Tasks tab with prefilled message
 const handleInfoItemClick = ({ type, text }) => {

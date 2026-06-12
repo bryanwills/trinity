@@ -557,6 +557,52 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Operator queue notification on validation failure
 - **Flow**: `docs/memory/feature-flows/business-validation.md`
 
+### 10.10 Idempotency Keys at Trigger Boundaries (RELIABILITY-006)
+- **Status**: ✅ Implemented (2026-06-02)
+- **Requirement ID**: RELIABILITY-006
+- **GitHub Issue**: #525
+- **Description**: An `Idempotency-Key` contract at every execution-creating trigger boundary. The same key within a 24h window produces exactly one execution; duplicates short-circuit with the original result (`HTTP 200/202 + X-Idempotent-Replay: true`) instead of dispatching a second execution. Closes the producer-boundary dedup gap that the unified funnel made more acute — webhook re-deliveries, MCP client retries, and scheduler→backend network blips no longer create phantom executions.
+- **Key Features**:
+  - New `idempotency_keys` table — `PRIMARY KEY (scope, idempotency_key)` gives the atomic claim; `(execution_id, status, response_snapshot, created_at)` carry the replay payload. Cross-process safe (uvicorn workers + standalone scheduler share one DB file).
+  - Enforcement at each **router boundary** (not solely the service) because sync `/chat` runs an inline path and `/api/webhooks/{token}` creates no execution: `/chat`, `/task` (async+sync, self-task), `/api/internal/execute-task`, `/api/webhooks/{token}`, `/api/agents/{name}/fan-out`.
+  - Webhook auto-derives a key from `(token, body_hash)` when none supplied — covers naive senders that retry without idempotency awareness.
+  - Scheduler sends a deterministic `Idempotency-Key: sched:{execution_id}` so a transient backend 5xx + resend resolves to the same key; intentional #271 retries (fresh execution_id) are not suppressed.
+  - MCP `chat_with_agent` / `fan_out` forward a deterministic key over the call args so a transport retry dedupes.
+  - Header is OPTIONAL on chat/task/MCP (absent → no dedup, full back-compat); upfront at-capacity rejections release the claim so the caller can retry; in-flight duplicate → 409.
+  - Audit event `idempotent_replay` on every replay (duplicate-storms observable); 24h TTL purge folded into the cleanup-service retention sweep.
+- **Architectural Invariant**: #18 — every new trigger type must accept an `Idempotency-Key` before merge.
+
+### 10.11 Dispatch Circuit Breaker (RELIABILITY-007)
+- **Status**: ✅ Implemented (2026-05-30); default-OFF opt-in canary
+- **Requirement ID**: RELIABILITY-007
+- **GitHub Issue**: #526
+- **Description**: Per-agent **producer-side** circuit breaker at the dispatch layer. When an agent is *auth-dead* (reachable but answering HTTP 503 → execution `error_code == AUTH`), the breaker fast-fails NEW executions with HTTP 503 instead of poisoning the persistent backlog with doomed tasks, fails the doomed backlog immediately, and self-heals via a half-open probe. Distinct from and namespace-isolated from the transport-reachability breaker (#631) — the two never contaminate each other's counter.
+- **Key Features**:
+  - New `services/dispatch_breaker.py` — consecutive-failure state machine (`closed → open → half-open(probe) → closed`) in Redis `agent:dispatch:{name}` via atomic Lua (threshold 3, base cooldown 30s → 300s exponential backoff, one-probe-at-a-time `SET NX EX` lock); fail-open on Redis down, never raises
+  - **AUTH-only counting** (D10): TIMEOUT / AGENT_ERROR never count, to avoid false trips on long/bad-prompt tasks
+  - **No-enqueue invariant** (D2 + F1): `CapacityManager.acquire(breaker_enabled=…)` raises `CircuitOpen` *before* the overflow branch; a half-open probe is admitted only into a free slot (never enqueued) so the invariant spans the half-open window
+  - Drain-on-trip: `task_execution_service` records outcomes at the terminals and on `→open` backgrounds `db.fail_queued_for_agent` (QUEUED→FAILED) + clear in-memory queue + audit; 60s `run_maintenance` breaker-aware backstop re-fails still-open-breaker backlog if an inline drain is lost (~60s worst case, not 24h)
+  - Shared Redis plumbing extracted to top-level `redis_breaker_util.py` (fail-open client, Lua `ScriptCache`, decode helpers) reused by both breakers
+  - Per-agent `agent_ownership.circuit_breaker_enabled` opt-in column (default OFF) + global `DISPATCH_BREAKER_ENABLED` env master switch — both must be on to engage
+  - Operator API: `GET/PUT /api/agents/{name}/circuit-breaker` (read = authorized, config = owner-only + audit); `reset` (admin) clears BOTH breakers; unified block embedded in `GET /api/agents/{name}` and agent-health detail; `circuit_breakers` field on `/api/agents/slots` (pipelined HGETALL, no SCAN)
+  - Frontend: distinct ⚡ "circuit open" danger badge in `AgentHeader` (detail page) and `AgentNode` (dashboard graph)
+  - Exposes `record_failure("missed_heartbeat")` as the #307 heartbeat seam
+- **Flow**: `docs/memory/feature-flows/dispatch-circuit-breaker.md`, `docs/memory/feature-flows/capacity-management.md`, `docs/memory/feature-flows/task-execution-service.md`
+
+### 10.12 Unified Executions Dashboard (EXEC-022)
+- **Status**: ✅ Implemented (2026-05-15)
+- **Requirement ID**: EXEC-022
+- **GitHub Issue**: #18
+- **Description**: Fleet-level execution history dashboard giving operators a single view across all agent task runs, with filtering, live stat cards, and real-time updates.
+- **Key Features**:
+  - `GET /api/executions` — paginated execution list (status/trigger/hours/agent/search filters, offset pagination, LIMIT 50)
+  - `GET /api/executions/stats` — single-pass conditional aggregation: total, success_count, failed_count, total_cost (windowed by `hours`), running_count and queued_count (always live)
+  - Access control: admins see all agents, non-admins see only accessible agents via shared `accessible_agent_names()` helper
+  - Frontend `/executions` page: 4 stat cards, running-now strip, filter bar, load-more list with per-row status tints and stop/navigate actions
+  - NavBar running-count badge (yellow when >0)
+  - Pinia store with 30s polling + `agent_activity` WebSocket refresh guard
+- **Flow**: `docs/memory/feature-flows/executions-dashboard.md`
+
 ---
 
 ## 11. GitHub Integration
@@ -699,6 +745,18 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - 3 MCP tools: `get_fleet_health`, `get_agent_health`, `trigger_health_check`
 - **Status Levels**: healthy → degraded → unhealthy → critical → unknown
 - **Flow**: `docs/memory/feature-flows/agent-monitoring.md`
+
+### 12.8a Richer Agent `/health` Signal (#1020)
+- **Status**: ✅ Implemented (2026-06-02)
+- **GitHub Issue**: #1020
+- **Description**: Promote the agent container's `/health` from `{status}` + ad-hoc diagnostics to a named, contractual signal the platform acts on — an incremental step toward `TARGET_ARCHITECTURE.md` §Agent Runtime.
+- **Key Features**:
+  - New top-level fields: `active_tasks` (concurrent executions across `/api/chat` + `/api/task`), `last_task_at` (ISO), `consecutive_failures` (reset on success, incremented on failure).
+  - Counters tracked in `agent_server/state.py` (`record_task_start`/`record_task_finish`), wired at both execution chokepoints in `agent_server/routers/chat.py`. Thread-safe (concurrent tasks).
+  - `consecutive_failures` is the signal the dispatch circuit breaker (#526) consumes; `last_task_at` powers liveness; both feed the heartbeat push (#307).
+  - Backend `monitoring_service.py` reads `consecutive_failures`/`last_task_at` into `BusinessHealthCheck` (graceful `None` default for pre-#1020 agent images).
+  - `mailbox_depth` intentionally NOT emitted — no agent-side mailbox until the actor model (#945); backend derives queue depth from `CapacityManager`.
+  - Back-compat: existing `/health` keys unchanged; new keys additive.
 
 ### 12.9 Cleanup Service for Stuck Resources
 - **Status**: ✅ Implemented (Updated 2026-03-25, Issue #129)
@@ -2638,6 +2696,183 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   - Backend-side change to return `execution_id` as a streaming
     response header on long calls — would obsolete the heuristic
     lookup but requires a `chat_with_agent` API contract change.
+## 38. Sequential Agent Loops (#740)
+
+### 38.1 `run_agent_loop` MCP Tool + Backend Loop Service (#740 — Phase 1)
+- **Status**: 🚧 In Progress
+- **Implements**: Issue #740
+- **Description**: Server-side primitive for sequential bounded
+  repetition of agent tasks. Complements `chat_with_agent` (single
+  turn) and `fan_out` (parallel batch) with a third execution
+  pattern: run a task N times in order, each iteration optionally
+  using the previous response. Caller fires once, gets a `loop_id`,
+  and disconnects — loop state lives in the backend.
+- **Modes**:
+  - **Fixed** (`stop_signal` unset): runs exactly `max_runs` times.
+  - **Until** (`stop_signal` set, recommended sentinel `[[DONE]]`):
+    stops early when any iteration's response contains the signal.
+- **Endpoints**:
+  - `POST /api/agents/{name}/loops` — start a loop. Returns
+    `{loop_id, status: "queued", agent_name, max_runs}` immediately
+    (fire-and-disconnect). Body: `message` (template, supports
+    `{{run}}` 1-indexed and `{{previous_response}}` truncated to the
+    last 2000 chars), `max_runs` (1–100, required), `stop_signal`,
+    `delay_seconds` (between runs, default 0), `timeout_per_run`
+    (defaults to agent's configured `execution_timeout_seconds`),
+    `model`, `allowed_tools`.
+  - `GET /api/loops/{loop_id}` — status + per-run summaries + last
+    full response.
+  - `POST /api/loops/{loop_id}/stop` — graceful stop. Sets
+    `should_stop`; the current iteration finishes, the loop exits.
+    Returns `{status: "stopping" | "already_done"}`.
+- **MCP tools**: `run_agent_loop`, `get_loop_status`, `stop_loop`.
+  Permission rules match `chat_with_agent` (owner/admin/shared or
+  explicit `agent_permissions` for agent-scoped keys).
+- **Execution model**: each iteration goes through the standard
+  `task_execution_service.execute_task()` path → `capacity_manager`
+  admit/slot → execute → release. Each iteration is recorded in
+  `schedule_executions` with `triggered_by="loop"` and `loop_id` set
+  so the dashboard/timeline shows iterations as normal execution
+  rows tagged with their loop. Sequential: iteration N+1 does not
+  start until iteration N's row reaches a terminal status.
+- **Template substitution**: applied before each iteration.
+  `{{run}}` → `"1"`, `"2"`, … `{{previous_response}}` → empty on
+  iteration 1, otherwise the previous iteration's response trimmed
+  to the trailing 2000 chars.
+- **Stop signal check**: substring match (`stop_signal in response`)
+  applied to the full response after each iteration. Recommended
+  sentinel `[[DONE]]` is documentation only — the loop honors any
+  user-supplied string.
+- **Terminal states + stop reasons**:
+  - `completed` / `max_runs_reached` — fixed mode hit `max_runs`,
+    or until mode hit `max_runs` without seeing the signal.
+  - `completed` / `stop_signal_matched` — until mode saw the signal.
+  - `stopped` / `user_stopped` — `POST /loops/{id}/stop` triggered.
+  - `failed` / `error` — an iteration's task execution returned a
+    non-success terminal status; loop aborts at the failed iteration.
+  - `interrupted` / `interrupted` — backend restart while running.
+- **Restart recovery**: the cleanup-service startup hook re-marks
+  any `agent_loops` row in `running` status as `interrupted` with
+  `stop_reason="interrupted"`. Loops do not auto-resume —
+  callers re-issue if needed.
+- **WebSocket events**: `loop_run_completed` per iteration (carries
+  `run_number`, `execution_id`, `cost`, `duration_ms`),
+  `loop_completed` once when the loop exits any terminal state.
+- **Storage**: two new tables in main SQLite DB.
+  - `agent_loops` (id, agent_name, message_template, max_runs,
+    stop_signal, delay_seconds, timeout_per_run, model,
+    allowed_tools JSON, status, runs_completed, stop_reason,
+    last_response, started_by_user_id, started_by_user_email,
+    source_agent_name, source_mcp_key_id, source_mcp_key_name,
+    created_at, started_at, completed_at).
+  - `agent_loop_runs` (id, loop_id, run_number, execution_id,
+    status, response, cost, duration_ms, started_at, completed_at)
+    — one row per iteration; `execution_id` joins back to
+    `schedule_executions`.
+  - `schedule_executions.loop_id TEXT` column added for the
+    timeline-tag join.
+- **Out of scope (Phase 1)**: dedicated dashboard surface for loops
+  (current timeline is sufficient — iterations appear as normal
+  rows; a follow-up PR may add a collapse-group affordance);
+  auto-resume after restart; cross-agent loops (`agent` parameter
+  is `"self"` only for v1, matching `fan_out`).
+
+---
+
+## 39. VoIP Telephony (VOIP-001)
+
+### 39.1 Outbound Phone Calls over Gemini Live (#1056 — Phase 1)
+- **Status**: 🚧 In Progress
+- **Implements**: Issue #1056 (Phase 1 — outbound)
+- **Description**: An agent places an outbound phone call to a user and
+  holds a real-time, interruptible voice conversation powered by the
+  existing Gemini Live voice bridge. A phone call is just a **different
+  transport feeding the same Gemini queues** — `services/gemini_voice.py`
+  is **not modified**. Ships as a regular OSS feature (no entitlement
+  gating), gated behind a feature flag that is **OFF by default**.
+- **Feature flag (default OFF)**: `voip_available` is exposed by
+  `GET /api/settings/feature-flags` as
+  `VOIP_ENABLED and bool(GEMINI_API_KEY)`. `VOIP_ENABLED` defaults to
+  `false` (mirrors `workspace_available` opt-in, #860). All VoIP
+  endpoints 404 when the flag is off. The feature is additionally
+  per-agent-gated: it only functions once a `voip_bindings` row exists.
+- **Transport**: Twilio Programmable Voice + bidirectional Media Streams
+  (`<Connect><Stream>`), delivering raw G.711 μ-law 8kHz audio over a
+  WebSocket directly into the existing Gemini queues. Explicitly **not**
+  Twilio ConversationRelay (does its own STT/TTS for text LLMs) and
+  **not** Pipecat/LiveKit (would re-implement the owned bridge).
+- **Per-agent Twilio-voice credentials**: dedicated `voip_bindings`
+  table (`account_sid`, AES-256-GCM-encrypted `auth_token`, `from_number`,
+  `webhook_secret`, `enabled`, `daily_call_cap`), **separate from
+  `whatsapp_bindings`** (voice and messaging are different Twilio
+  products). Each agent owner brings their own Twilio account — outbound
+  PSTN spend is on the owner's account, not the platform operator's.
+- **Audio conversion** (stdlib `audioop`, all codec work in the adapter):
+  inbound μ-law 8kHz → PCM16 16kHz (`ulaw2lin` → `ratecv(8k→16k)`);
+  outbound PCM16 24kHz → μ-law 8kHz (`ratecv(24k→8k)` direct decimation
+  → `lin2ulaw`), re-chunked to 160-byte/20ms frames, base64 for Twilio
+  JSON. `audioop.ratecv` **state is carried per-direction per-connection**
+  (no per-chunk reset → no boundary clicks). `audioop-lts` is pinned for
+  Python ≥ 3.13 (stdlib `audioop` removed in 3.13).
+- **Interruption**: relies on Gemini Live's native barge-in. The adapter
+  flushes Twilio's buffer via a **`clear`** event + drops its local
+  accumulator when the user speaks while the agent is mid-utterance, so
+  buffered audio does not play over the caller.
+- **Outbound trigger**:
+  - `POST /api/agents/{name}/voip/call` (JWT/MCP, `AuthorizedAgent`) and
+    the MCP tool `call_user`. Body: `{to_number, context?,
+    process_transcript?}`.
+  - The trigger creates a `chat_session` (owner identity), mints a
+    single-use WSS ticket, stages session intent (agent, user, system
+    prompt, chat_session_id, `process_transcript`) in Redis keyed by a
+    high-entropy `call_id`, then calls Twilio
+    `calls.create(to, from_, twiml="<Connect><Stream url='wss://…/api/voip/voice/{call_id}?ticket=…'/></Connect>")`.
+  - **Abuse controls** (Phase 1): rate-limited per `(owner, destination)`
+    via `services/rate_limiter.py`; a durable per-agent **daily call cap**
+    (`voip_call_logs` count); optional `Idempotency-Key` (Invariant #18).
+    A formal opt-in destination allowlist is deferred to Phase 2.
+- **Cross-worker safety**: the trigger does **not** call
+  `connect_and_stream`; it only stages intent in Redis. The WS handler —
+  running on whichever worker Twilio's Media Streams socket actually hits —
+  reads the staged intent, calls `voice_service.create_session(...)` then
+  `connect_and_stream(...)`, so the live Gemini connection lives on the
+  correct worker.
+- **Two-id namespace**: `call_id` (chosen at trigger time; in the WSS URL
+  + Redis intent key + ticket binding) is distinct from the Gemini
+  `VoiceSession.session_id` (`vs_…`, minted at WS-connect inside the
+  unmodified `create_session`). They are never conflated.
+- **WSS auth**: the Media Streams socket (Twilio cannot send a JWT) is
+  gated by a single-use, call-bound ticket via
+  `services/ws_ticket_service.py`. `mint_ticket` gains an optional
+  `ttl_seconds` param (VoIP mints at 180s to cover PSTN dial+ring, vs the
+  30s browser default) and binds the ticket with `scope="voip:{call_id}"`,
+  verified in the handler. Staged intent is consumed exactly once via
+  Redis `GETDEL`.
+- **Transcript persistence**: the call transcript is persisted to
+  `chat_messages` with `source="voice"` via the existing `_save_transcript`
+  path, guarded by a Redis SETNX sentinel so a double-teardown saves
+  exactly once.
+- **Post-call processing (default ON)**: after teardown, the full
+  transcript is dispatched as a single turn to the **main agent** through
+  `task_execution_service.execute_task(triggered_by="voip")` so the agent
+  (with its real skills/memory/MCP) digests the call and takes follow-up
+  actions. Per-call opt-out via `process_transcript=false`; skipped when
+  the transcript is empty (no-answer / instant hangup); once-guarded.
+- **Config**: `VOIP_ENABLED` (default `false`),
+  `VOIP_MAX_CALL_DURATION` (default 600s — VoIP-specific, not the
+  inherited 300s `VOICE_MAX_DURATION`), `VOIP_DEFAULT_DAILY_CALL_CAP`
+  (default 50), `VOIP_TICKET_TTL_SECONDS` (default 180),
+  `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW`.
+- **Three surfaces in sync (Invariant #13)**: backend router
+  (`routers/voip.py`) + MCP tool (`src/mcp-server/src/tools/voip.ts`).
+  No agent-server mirror (the bridge is backend-only).
+- **Out of scope (Phase 1)**: inbound calls ("you call the agent" —
+  Phase 2: Twilio voice webhook + `X-Twilio-Signature` + inbound
+  number→agent resolution on the same table; an `inbound_number` column
+  is shipped up-front so Phase 2 is additive); opt-in destination
+  allowlist (Phase 2); UI config surface, schedule-action trigger, and
+  call cost/duration observability (Phase 3). Real PSTN path is
+  manual-verify (needs a live Twilio voice number).
 
 ---
 

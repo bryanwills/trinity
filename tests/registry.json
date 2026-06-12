@@ -1,6 +1,34 @@
 {
   "test_files": [
     {
+      "file": "unit/test_voip_audio.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip", "audio"],
+      "description": "Audio codec round-trip + stateful ratecv continuity (anti-click) + 160-byte framing for the Twilio↔Gemini bridge (#1056). Skips where audioop/audioop-lts is unavailable."
+    },
+    {
+      "file": "unit/test_voip_db.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip", "database"],
+      "description": "voip_bindings CRUD + AuthToken AES-256-GCM encryption, call-log lifecycle, durable daily-cap count, and the _migrate_voip_tables migration (#1056)."
+    },
+    {
+      "file": "unit/test_voip_service.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip"],
+      "description": "VoIP service helpers: E.164 validation, ws(s):// base + TwiML build (XML-escaped), and place_outbound_call abuse-control gates (flag/binding/cap/rate, mocked Twilio) (#1056)."
+    },
+    {
+      "file": "unit/test_1073_voip_media_stream_ticket.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip"],
+      "description": "Regression for #1073: Media Streams WS reads the auth ticket from the start frame's customParameters (<Parameter>), not the query string Twilio drops; accept()-then-authenticate ordering, start-frame parse, scope/intent rejection, and query-string fallback."
+    },
+    {
       "file": "test_agent_rename.py",
       "feature": "RENAME-001",
       "added": "2026-03-01",
@@ -590,6 +618,41 @@
         "backend",
         "agent-server"
       ]
+    },
+    {
+      "file": "unit/test_agent_analytics.py",
+      "feature": "#1107",
+      "added": "2026-06-09",
+      "categories": [
+        "backend",
+        "unit",
+        "analytics",
+        "overview"
+      ],
+      "description": "Agent-scoped execution analytics (#1107): triggered_by bucketing into user-facing buckets (incl. Loops, #1150) + Other fallback, terminal-based success rate, full-set avg vs sampled p95 correctness, NULL-skipping context avg, gap-filled timeline."
+    },
+    {
+      "file": "test_ops_clear_all.py",
+      "feature": "#1017",
+      "added": "2026-06-11",
+      "categories": [
+        "backend",
+        "api",
+        "operator-queue",
+        "notifications"
+      ],
+      "description": "Bulk Clear All endpoints for the Operations page (#1017): bulk-cancel (ids-scoped), clear-resolved (terminal-row delete, responded kept), notifications dismiss-all; respond-race conflict marker; tri-state accessible-set scoping."
+    },
+    {
+      "file": "unit/test_fleet_executions.py",
+      "feature": "#18",
+      "added": "2026-06-11",
+      "categories": [
+        "backend",
+        "unit",
+        "executions"
+      ],
+      "description": "Fleet executions list/stats (EXEC-022): _narrow_to_agent access gate, status/trigger/search/hours SQL filters, windowed stats; plus the #1150 trigger-filter allowlist drift guard (ExecutionsPanel dropdown subset of _VALID_TRIGGERS)."
     }
   ]
 }

@@ -87,7 +87,7 @@ class ParallelTaskRequest(BaseModel):
     model: Optional[str] = None  # Model override: sonnet, opus, haiku, or full model name
     allowed_tools: Optional[List[str]] = None  # Tool restrictions (--allowedTools)
     system_prompt: Optional[str] = None  # Additional instructions (--append-system-prompt)
-    timeout_seconds: Optional[int] = None  # Execution timeout (None = use agent's config, default 15 min)
+    timeout_seconds: Optional[int] = None  # DEPRECATED (#1068, demotion PR 1): per-task override. Agent execution_timeout_seconds (#665) / schedule cap (#913) is authoritative; honored-but-clamped to the agent cap for now, to be removed after one release of soak. None = use agent's config.
     max_turns: Optional[int] = None  # Maximum agentic turns (--max-turns) for runaway prevention
     async_mode: Optional[bool] = False  # If true, return immediately with execution_id (fire-and-forget)
     save_to_session: Optional[bool] = False  # If true, persist messages to chat_sessions (for authenticated Chat tab)
@@ -364,6 +364,7 @@ class DeployLocalResponse(BaseModel):
     versioning: Optional[VersioningInfo] = None
     credentials_imported: Optional[Dict[str, str]] = None  # Files found in archive
     credentials_injected: Optional[int] = None  # Count of credentials injected
+    warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
 
@@ -484,6 +485,71 @@ class AgentDefaultResourcesUpdate(BaseModel):
     memory: Optional[str] = None
 
 
+class AgentDefaultAccessPolicyUpdate(BaseModel):
+    """Body for PUT /api/settings/agent-defaults/access-policy (#1129)."""
+    require_email: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# Fleet Executions (EXEC-022 / Issue #18)
+# ---------------------------------------------------------------------------
+
+class FleetExecutionSummary(BaseModel):
+    """Lightweight execution row for the Unified Executions Dashboard list.
+
+    Excludes large fields (response, tool_calls, execution_log).
+    error_summary is a 200-char truncation for failed-row one-liners.
+    """
+    id: str
+    schedule_id: str
+    agent_name: str
+    status: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    duration_ms: Optional[int] = None
+    message: str
+    triggered_by: str
+    context_used: Optional[int] = None
+    context_max: Optional[int] = None
+    cost: Optional[float] = None
+    error_summary: Optional[str] = None
+    source_user_id: Optional[int] = None
+    source_user_email: Optional[str] = None
+    source_agent_name: Optional[str] = None
+    source_mcp_key_id: Optional[str] = None
+    source_mcp_key_name: Optional[str] = None
+    model_used: Optional[str] = None
+    fan_out_id: Optional[str] = None
+    business_status: Optional[str] = None
+    validation_execution_id: Optional[str] = None
+    queued_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+        json_encoders = {datetime: lambda v: to_utc_iso(v) if v else None}
+
+
+class FleetExecutionStats(BaseModel):
+    """Aggregate stats for the Unified Executions Dashboard stat cards."""
+    total: int
+    success_count: int
+    failed_count: int
+    running_count: int
+    queued_count: int
+    total_cost: float
+    success_rate: float
+    hours: int  # 0 = all-time
+
+
+class CircuitBreakerConfigUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/circuit-breaker (RELIABILITY-007, #526).
+
+    Per-agent opt-in for the dispatch breaker. Gated again by the global
+    DISPATCH_BREAKER_ENABLED master switch — both must be on to engage.
+    """
+    enabled: bool
+
+
 # =============================================================================
 # Soft-Delete Admin Recovery (#834 Phase 1c)
 # =============================================================================
@@ -510,3 +576,140 @@ class SoftDeletedSchedule(BaseModel):
     enabled: bool
     deleted_at: str
     purge_eta: Optional[str]
+
+
+# =============================================================================
+# Schedule Analytics (#868)
+# =============================================================================
+#
+# Per-schedule distributions over `schedule_executions`. Per-agent rollup
+# and per-chat-session analytics deferred to #18 and a follow-up issue
+# respectively — see #868 issue body "Out of Scope" section for the
+# decision context.
+
+
+class DurationPercentiles(BaseModel):
+    """Duration percentiles in milliseconds. All null when the schedule
+    has fewer than 1 successful execution in the window."""
+    p50: Optional[int] = None
+    p95: Optional[int] = None
+    p99: Optional[int] = None
+
+
+class CostTotals(BaseModel):
+    """Cost totals in USD for the analytics window."""
+    total: float = 0.0
+
+
+class ToolCallEntry(BaseModel):
+    """One row of the top-N tool-call distribution."""
+    name: str
+    total_duration_ms: int
+
+
+class ToolCallSummary(BaseModel):
+    """Tool-call distribution weighted by total wall time per tool.
+
+    Top-N is intentionally weighted by `sum(duration_ms)` rather than
+    raw count — raw count is dominated by `Read` / `Bash` on every
+    agent and has low signal-to-noise. Locked by /autoplan strategy
+    finding #6.
+    """
+    top: List[ToolCallEntry] = []
+    total_calls: int = 0
+
+
+class TimelineEntry(BaseModel):
+    """One UTC-day bucket on the analytics timeline. Zero-filled for
+    days that had no executions (Python-side gap fill) so chart
+    libraries render a continuous x-axis."""
+    date: str
+    success: int
+    failed: int
+    cost: float
+
+
+class ScheduleAnalyticsResponse(BaseModel):
+    """Response envelope for GET /api/agents/{name}/schedules/{schedule_id}/analytics.
+
+    `sampled` reports whether the percentile / tool-call pool was
+    capped (currently 5000 newest success rows). Counts and timeline
+    are always unsampled. UTC day boundaries.
+    """
+    window_hours: int
+    total_executions: int
+    success_count: int
+    failed_count: int
+    cancelled_count: int
+    success_rate: float
+    duration_ms: DurationPercentiles
+    cost: CostTotals
+    tool_calls: ToolCallSummary
+    timeline: List[TimelineEntry]
+    sampled: bool = False
+    sample_size: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Agent-scoped Overview analytics (#1107) — generalises the #868 per-schedule
+# analytics to agent scope with a `triggered_by` type breakdown. Backs the
+# Agent Detail "Overview" trend charts.
+# ---------------------------------------------------------------------------
+
+
+class DurationStats(BaseModel):
+    """Overall duration stats for the window (milliseconds). `avg` is the
+    SQL mean over the *full* success rowset; `p95` is computed over the
+    newest capped pool. Both null when the agent has no successful runs
+    with a duration in the window."""
+    avg: Optional[int] = None
+    p95: Optional[int] = None
+
+
+class AgentTypeTotal(BaseModel):
+    """Per-bucket execution total for the window. `bucket` is a user-facing
+    grouping of the raw `triggered_by` values (Chat/Tasks, MCP, Channels,
+    Public, Scheduled, Agent-to-agent, Voice, Other)."""
+    bucket: str
+    total: int
+
+
+class AgentAnalyticsTimelinePoint(BaseModel):
+    """One UTC-day bucket for the Overview charts. `success_rate`,
+    `duration_avg_ms`, and `context_avg` are null on days with no
+    qualifying rows so the chart renders a gap rather than a false zero.
+    `by_type` maps present buckets → that day's count (drives the stacked
+    bars)."""
+    date: str
+    total: int
+    success: int
+    failed: int
+    success_rate: Optional[float] = None
+    duration_avg_ms: Optional[int] = None
+    context_avg: Optional[int] = None
+    by_type: Dict[str, int] = {}
+
+
+class AgentAnalyticsResponse(BaseModel):
+    """Response envelope for GET /api/agents/{name}/analytics (#1107).
+
+    Deterministic, DB-sourced agent activity over a rolling window.
+    `by_type` groups raw `triggered_by` into user-facing buckets (with an
+    "Other" catch-all so a new trigger type never silently vanishes);
+    `buckets` is the ordered legend / stack order for the chart.
+    `success_rate` is terminal-based (success / (success + failed)).
+    `sampled` reports whether the p95 pool was capped — `avg` is always
+    full-set, never sampled. UTC day boundaries.
+    """
+    window_hours: int
+    total_executions: int
+    success_count: int
+    failed_count: int
+    success_rate: float
+    duration_ms: DurationStats
+    context_avg: Optional[int] = None
+    by_type: List[AgentTypeTotal] = []
+    buckets: List[str] = []
+    timeline: List[AgentAnalyticsTimelinePoint] = []
+    sampled: bool = False
+    sample_size: int = 0
