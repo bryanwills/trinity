@@ -1,8 +1,8 @@
 # Feature Flow: Subscription Auto-Switch (SUB-003)
 
 > **Requirement**: `docs/requirements/SUB-003-subscription-auto-switch.md`
-> **Issue**: #153, threshold + scope update #441
-> **Status**: Implemented (2026-03-21), updated 2026-04-25 (#441)
+> **Issue**: #153, threshold + scope update #441, hot-reload #1089
+> **Status**: Implemented (2026-03-21), updated 2026-04-25 (#441), 2026-06-13 (#1089 — switch hot-reloads instead of recreating the container)
 
 ## Overview
 
@@ -34,10 +34,25 @@ Find best alternative subscription (fewest agents, not rate-limited in last 2h)
     ↓
 No alternative? → return None (log warning)
     ↓ Found
-Switch: DB update + container restart + log activity + send notification
+Switch: DB update + token HOT-RELOAD (not container recreate, #1089) + log activity + send notification
     ↓
 Return switch result → caller surfaces 429/503 with auto_switch info + retry hint
 ```
+
+## Token Application: Hot-Reload, not Recreate (#1089)
+
+The switch step (and the manual `PUT /api/subscriptions/agents/{name}` sub→sub
+path, and the `POST /api/subscriptions` key-rollover upsert) applies the new
+token via `_hot_reload_subscription_token(agent_name)` — a POST to the
+agent-server `POST /api/credentials/reload-token` that mutates the running
+container's `CLAUDE_CODE_OAUTH_TOKEN` env. The **next** Claude subprocess uses
+the new token while **in-flight** turns finish on the old one, so a rotation no
+longer kills every parallel execution (#1037). Falls back to the previous
+`_restart_agent` recreate on a 404 (old base image), transport failure, or a
+missing token. Durability across a plain restart is handled by the
+`/var/lib/trinity/oauth-token` writable-layer override that `startup.sh` reads
+before launching the agent server. Canonical home: architecture.md
+§"Subscription Token Rotation via Hot-Reload".
 
 ## Trigger Surface
 
@@ -69,7 +84,9 @@ import from `backend.services`. Keep the two in sync when editing either.
 | Router | `src/backend/routers/chat.py` | 429 interception in chat proxy + background tasks |
 | Frontend | `src/frontend/src/views/Settings.vue` | Toggle in Subscriptions section |
 | Tests | `tests/test_subscription_auto_switch.py` | Smoke tests |
-| Tests | `tests/unit/test_subscription_auto_switch_pingpong.py` | Unit regression for #444 ping-pong prevention; `TestRateLimitAging` (#476) pins 2h-window correctness |
+| Tests | `tests/unit/test_subscription_auto_switch_pingpong.py` | Unit regression for #444 ping-pong prevention; `TestRateLimitAging` (#476) pins 2h-window correctness; `TestHotReloadSwitch` + `TestKeyRolloverFanOut` (#1089) pin the hot-reload helper, auto-switch wire-in, and key-rollover fan-out |
+| Tests | `tests/unit/test_subscription_reassign_hotreload.py` | #1089 — manual sub→sub hot-reload under the lock (no `container_stop`), mode-change still recreates, register/upsert key-rollover fan-out |
+| Tests | `tests/unit/test_reload_token_endpoint.py` | #1089 — agent-server `POST /api/credentials/reload-token`: sets env, writes the `/var/lib/trinity/oauth-token` override (0600), no `.env` write, `remove_api_key` pops `ANTHROPIC_API_KEY`, empty token → 400 |
 | Tests | `tests/unit/test_subscription_auto_switch_no_cred_import.py` | Chain-level regression for #606 — pins `_restart_agent → start_agent_internal → inject_assigned_credentials` reaches the `lifecycle.py:155` `subscription_mode` short-circuit and never re-enters file-based credential import |
 | Tests | `tests/unit/test_iso_cutoff.py` | Format parity between `iso_cutoff(N)` and `utc_now_iso()` (#476) |
 | Util | `src/backend/utils/helpers.py::iso_cutoff` | Canonical cutoff helper for ISO-Z TEXT comparisons (#476) |
