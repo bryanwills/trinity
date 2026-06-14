@@ -24,11 +24,18 @@ ENV VERSION=${VERSION} \
     GIT_BRANCH=${GIT_BRANCH} \
     BUILD_DATE=${BUILD_DATE}
 
+# cryptography is pinned explicitly: the 49.x line's bundled OpenSSL triggers a
+# SIGILL (illegal instruction) when loaded in the same process as grpcio's
+# BoringSSL (pulled in transitively by the OTLP gRPC exporter) on
+# python:3.13-slim. Each imports fine alone; loaded together they crash on
+# `import main`. 44.x is the last compatible line — verified by booting the
+# backend end-to-end. Do not unpin without re-verifying startup.
 RUN pip install --no-cache-dir \
     fastapi==0.115.6 \
     uvicorn[standard]==0.37.0 \
     "pydantic[email]>=2.10.4,<3" \
     python-jose[cryptography]==3.3.0 \
+    cryptography==44.0.1 \
     passlib[bcrypt]==1.7.4 \
     bcrypt==4.2.1 \
     python-multipart==0.0.20 \
