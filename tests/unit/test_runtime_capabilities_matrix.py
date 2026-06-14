@@ -43,3 +43,16 @@ def test_codex_matches_gemini_shape_for_resume_and_cost():
     assert caps.session_tab_resume is False   # MVP: Session tab stays Claude/Gemini
     assert caps.mcp_support is True
     assert caps.cost_reporting == "estimated"
+
+
+def test_capabilities_to_dict_is_serializable_for_callers():
+    """to_dict() is what the backend/frontend serialize to gate UI — every flag
+    must round-trip as a plain JSON-friendly dict."""
+    caps = CodexRuntime.capabilities()
+    d = caps.to_dict()
+    assert d == {
+        "chat_continuity": True,
+        "session_tab_resume": False,
+        "mcp_support": True,
+        "cost_reporting": "estimated",
+    }
