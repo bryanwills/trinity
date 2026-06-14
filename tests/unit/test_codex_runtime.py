@@ -587,3 +587,803 @@ def test_is_read_only_malformed_fails_open_and_logs(tmp_path, monkeypatch, caplo
     caplog.set_level(logging.WARNING, logger="agent_server.services.codex_runtime")
     assert codex_runtime._is_read_only() is False
     assert any("malformed" in r.getMessage() for r in caplog.records)
+
+
+def test_is_read_only_unreadable_fails_open_and_logs(tmp_path, monkeypatch, caplog):
+    """A present-but-unreadable config (e.g. it is a directory → OSError, not
+    FileNotFoundError) fails OPEN and LOGS — parity with the malformed path."""
+    cfg = tmp_path / "ro_is_a_dir.json"
+    cfg.mkdir()  # reading a directory as a file raises OSError (not FileNotFound)
+    monkeypatch.setattr(codex_runtime, "_READ_ONLY_CONFIG", cfg)
+    caplog.set_level(logging.WARNING, logger="agent_server.services.codex_runtime")
+    assert codex_runtime._is_read_only() is False
+    assert any("unreadable" in r.getMessage() for r in caplog.records)
+
+
+# ===========================================================================
+# Added coverage (#1187 follow-up): pure helpers, getters, parser branches,
+# the execute() chat path, and the _execute_codex orchestration body — all
+# previously exercised only indirectly or not at all.
+# ===========================================================================
+
+import threading  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from agent_server.services.codex_runtime import (  # noqa: E402
+    _compose_prompt,
+    _read_and_consume_result_file,
+    _resolve_pricing,
+    _safe_unlink,
+)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_pricing — longest-prefix match (the documented "gpt-5.1-codex-2025-xx
+# resolves to the codex rate" behavior, distinct from exact-key and default).
+# ---------------------------------------------------------------------------
+
+def test_resolve_pricing_longest_prefix_match():
+    """A versioned/suffixed model name resolves to its base model's rate via the
+    longest-prefix branch, NOT the default fallback."""
+    rates = _resolve_pricing("gpt-5.1-codex-2025-11-01")
+    assert rates is codex_runtime.CODEX_PRICING["gpt-5.1-codex"]
+
+
+def test_resolve_pricing_prefers_longest_prefix():
+    """When several keys are prefixes, the LONGEST wins ('gpt-5-mini-2025' →
+    the mini rate, not the broader 'gpt-5' rate)."""
+    rates = _resolve_pricing("gpt-5-mini-2025-xx")
+    assert rates is codex_runtime.CODEX_PRICING["gpt-5-mini"]
+
+
+def test_resolve_pricing_none_and_unknown_use_default():
+    assert _resolve_pricing(None) is codex_runtime.CODEX_PRICING["default"]
+    assert _resolve_pricing("anthropic-claude") is codex_runtime.CODEX_PRICING["default"]
+
+
+# ---------------------------------------------------------------------------
+# _compose_prompt — Codex exec has no system-prompt flag, so the effective
+# platform prompt is PREPENDED with a "---" separator; no system prompt passes
+# the user message through unchanged.
+# ---------------------------------------------------------------------------
+
+def test_compose_prompt_prepends_system_prompt():
+    out = _compose_prompt("PLATFORM RULES", "do the thing")
+    assert out == "PLATFORM RULES\n\n---\n\ndo the thing"
+
+
+def test_compose_prompt_passthrough_without_system_prompt():
+    assert _compose_prompt(None, "just the user message") == "just the user message"
+    assert _compose_prompt("", "user msg") == "user msg"
+
+
+# ---------------------------------------------------------------------------
+# _read_and_consume_result_file — reads the -o file; missing file → None.
+# NOTE the read does NOT delete (deletion is the caller's finally).
+# ---------------------------------------------------------------------------
+
+def test_read_result_file_reads_content(tmp_path):
+    f = tmp_path / "out.txt"
+    f.write_text("the durable answer")
+    assert _read_and_consume_result_file(str(f)) == "the durable answer"
+    # The reader itself must not delete — finally owns deletion.
+    assert f.exists()
+
+
+def test_read_result_file_missing_returns_none(tmp_path):
+    assert _read_and_consume_result_file(str(tmp_path / "nope.txt")) is None
+
+
+def test_safe_unlink_removes_and_tolerates_missing(tmp_path):
+    f = tmp_path / "gone.txt"
+    f.write_text("x")
+    _safe_unlink(str(f))
+    assert not f.exists()
+    # Second unlink (already gone) must not raise.
+    _safe_unlink(str(f))
+
+
+# ---------------------------------------------------------------------------
+# _surface_unmapped_guardrails — Codex exec has no per-tool CLI toggle in the
+# MVP, so disallowed tools are SURFACED (logged), never silently dropped.
+# ---------------------------------------------------------------------------
+
+def test_surface_unmapped_guardrails_logs_disallowed(monkeypatch, caplog):
+    monkeypatch.setattr(
+        codex_runtime, "_load_guardrails", lambda: {"disallowed_tools": ["Bash", "Write"]}
+    )
+    caplog.set_level(logging.WARNING, logger="agent_server.services.codex_runtime")
+    # Must not raise — surfacing is best-effort.
+    codex_runtime._surface_unmapped_guardrails(allowed_tools=None)
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "Bash" in msg and "Write" in msg
+
+
+def test_surface_unmapped_guardrails_logs_allowed_tools(monkeypatch, caplog):
+    monkeypatch.setattr(codex_runtime, "_load_guardrails", lambda: {})
+    caplog.set_level(logging.INFO, logger="agent_server.services.codex_runtime")
+    codex_runtime._surface_unmapped_guardrails(allowed_tools=["Read", "Grep"])
+    assert any("allowed_tools" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _load_openai_api_key — process env wins; otherwise parse .env; nothing
+# anywhere → None (drives the upstream "key not configured" 503).
+# ---------------------------------------------------------------------------
+
+def test_load_api_key_process_env_wins(tmp_path, monkeypatch):
+    """The container env var is the fast path — used before .env is even read."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    # Point _AGENT_HOME at an empty dir so a stray real .env can't interfere.
+    monkeypatch.setattr(codex_runtime, "_AGENT_HOME", str(tmp_path))
+    assert codex_runtime._load_openai_api_key() == "sk-from-env"
+
+
+def test_load_api_key_skips_blank_and_comment_lines(tmp_path, monkeypatch):
+    _write_env(
+        tmp_path,
+        monkeypatch,
+        "# a comment\n\nNOISE_WITHOUT_EQUALS\nOPENAI_API_KEY=sk-after-noise\n",
+    )
+    assert codex_runtime._load_openai_api_key() == "sk-after-noise"
+
+
+def test_load_api_key_none_when_absent_everywhere(tmp_path, monkeypatch):
+    """No env var and no .env file → None (not a crash, not a sentinel)."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.setattr(codex_runtime, "_AGENT_HOME", str(tmp_path))  # no .env here
+    assert codex_runtime._load_openai_api_key() is None
+
+
+# ---------------------------------------------------------------------------
+# Trivial-but-load-bearing getters + is_available probe.
+# ---------------------------------------------------------------------------
+
+def test_get_default_model_and_context_window():
+    rt = CodexRuntime()
+    assert rt.get_default_model() == "gpt-5.1-codex"
+    assert rt.get_context_window() == codex_runtime.CODEX_CONTEXT_WINDOW
+    # Model arg is cosmetic for the window — always the GPT-5 input window.
+    assert rt.get_context_window("gpt-5-nano") == codex_runtime.CODEX_CONTEXT_WINDOW
+
+
+def test_is_available_true_when_version_succeeds(monkeypatch):
+    class _OK:
+        returncode = 0
+
+    monkeypatch.setattr(codex_runtime.subprocess, "run", lambda *a, **k: _OK())
+    assert CodexRuntime().is_available() is True
+
+
+def test_is_available_false_on_nonzero_and_exception(monkeypatch):
+    class _Fail:
+        returncode = 1
+
+    monkeypatch.setattr(codex_runtime.subprocess, "run", lambda *a, **k: _Fail())
+    assert CodexRuntime().is_available() is False
+
+    def _boom(*a, **k):
+        raise FileNotFoundError("codex not installed")
+
+    monkeypatch.setattr(codex_runtime.subprocess, "run", _boom)
+    assert CodexRuntime().is_available() is False
+
+
+def test_configure_mcp_delegates_to_trinity_writer(tmp_path, monkeypatch):
+    """configure_mcp() routes to the shared Codex config writer, which writes
+    $CODEX_HOME/config.toml."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    rt = CodexRuntime()
+    assert rt.configure_mcp({"github": {"command": "npx"}}) is True
+    assert (tmp_path / "config.toml").exists()
+
+
+# ---------------------------------------------------------------------------
+# parse_codex_jsonl — additional event/item shapes not covered by the base set:
+# file_change + mcp_tool_call items, the mcp "server.tool" display name, started
+# →completed dedup, tool failure, top-level + item-level error events, and the
+# blank-line skip.
+# ---------------------------------------------------------------------------
+
+def test_parser_mcp_and_file_change_tools():
+    events = [
+        {"type": "thread.started", "thread_id": "thr_m"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "mcp_1",
+                "type": "mcp_tool_call",
+                "server": "trinity",
+                "tool": "list_agents",
+                "arguments": {"q": "x"},
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "fc_1",
+                "type": "file_change",
+                "changes": [{"path": "a.py", "kind": "modify"}],
+                "status": "completed",
+            },
+        },
+    ]
+    response, log, metadata, raw = parse_codex_jsonl(_events_to_lines(events))
+    tool_uses = {e.tool for e in log if e.type == "tool_use"}
+    # mcp_tool_call with a server renders "server.tool".
+    assert "trinity.list_agents" in tool_uses
+    assert "FileChange" in tool_uses
+    assert metadata.tool_count == 2
+
+
+def test_parser_tool_started_then_completed_dedup():
+    """An item.started followed by item.completed for the SAME tool id yields a
+    single tool_use (dedup), plus one tool_result."""
+    events = [
+        {"type": "thread.started", "thread_id": "thr_d"},
+        {
+            "type": "item.started",
+            "item": {"id": "cmd_dup", "type": "command_execution", "command": "ls"},
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "cmd_dup",
+                "type": "command_execution",
+                "command": "ls",
+                "exit_code": 0,
+                "status": "completed",
+                "aggregated_output": "ok",
+            },
+        },
+    ]
+    response, log, metadata, raw = parse_codex_jsonl(_events_to_lines(events))
+    tool_uses = [e for e in log if e.type == "tool_use"]
+    tool_results = [e for e in log if e.type == "tool_result"]
+    assert len(tool_uses) == 1  # not 2 — the started/completed pair is deduped
+    assert len(tool_results) == 1
+    assert tool_results[0].success is True
+
+
+def test_parser_tool_failure_marks_result_unsuccessful():
+    events = [
+        {"type": "thread.started", "thread_id": "thr_f"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "cmd_bad",
+                "type": "command_execution",
+                "command": "false",
+                "exit_code": 1,
+                "status": "failed",
+            },
+        },
+    ]
+    _, log, _, _ = parse_codex_jsonl(_events_to_lines(events))
+    results = [e for e in log if e.type == "tool_result"]
+    assert results and results[0].success is False
+
+
+def test_parser_top_level_error_event():
+    events = [
+        {"type": "thread.started", "thread_id": "thr_e"},
+        {"type": "error", "message": "stream aborted"},
+    ]
+    _, _, metadata, _ = parse_codex_jsonl(_events_to_lines(events))
+    assert metadata.error_message == "stream aborted"
+
+
+def test_parser_item_level_error():
+    events = [
+        {"type": "thread.started", "thread_id": "thr_ie"},
+        {"type": "item.completed", "item": {"id": "x", "type": "error", "message": "boom"}},
+    ]
+    _, _, metadata, _ = parse_codex_jsonl(_events_to_lines(events))
+    assert metadata.error_message == "boom"
+
+
+def test_parser_skips_blank_lines():
+    lines = ["", "   ", json.dumps({"type": "thread.started", "thread_id": "thr_b"})]
+    _, _, metadata, raw = parse_codex_jsonl(lines)
+    assert metadata.session_id == "thr_b"
+    assert len(raw) == 1  # blank lines never reach raw_messages
+
+
+# ---------------------------------------------------------------------------
+# execute() — the interactive chat path (mirrors the execute_headless error
+# mapping, plus continuity, the fresh-session reset, and the session rollups).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_execute_unavailable_raises_503(monkeypatch):
+    rt = CodexRuntime()
+    monkeypatch.setattr(rt, "is_available", lambda: False)
+    with pytest.raises(HTTPException) as exc_info:
+        await rt.execute("hi")
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_execute_pipe_drop_is_502(available_runtime, monkeypatch):
+    async def _raise_pipe(**_kw):
+        raise ConnectionResetError("peer reset")
+
+    monkeypatch.setattr(available_runtime, "_execute_codex", _raise_pipe)
+    with pytest.raises(HTTPException) as exc_info:
+        await available_runtime.execute("hi")
+    assert exc_info.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_execute_generic_failure_is_500(available_runtime, monkeypatch):
+    async def _raise_runtime(**_kw):
+        raise RuntimeError("unrelated")
+
+    monkeypatch.setattr(available_runtime, "_execute_codex", _raise_runtime)
+    with pytest.raises(HTTPException) as exc_info:
+        await available_runtime.execute("hi")
+    assert exc_info.value.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_execute_continuity_uses_cached_thread_id(available_runtime, monkeypatch):
+    """A continue_session turn with a prior thread id resumes it."""
+    captured = {}
+
+    async def _fake(**kw):
+        captured.update(kw)
+        return ("r", [], ExecutionMetadata(), [], "thr_next")
+
+    monkeypatch.setattr(available_runtime, "_execute_codex", _fake)
+    monkeypatch.setattr(codex_runtime.agent_state, "session_started", True)
+    available_runtime._chat_thread_id = "thr_prev"
+
+    await available_runtime.execute("hello", continue_session=True)
+    assert captured.get("resume_thread_id") == "thr_prev"
+    # The returned thread id is cached for the NEXT turn.
+    assert available_runtime._chat_thread_id == "thr_next"
+
+
+@pytest.mark.asyncio
+async def test_execute_fresh_session_does_not_resume(available_runtime, monkeypatch):
+    """Without continue_session the turn runs fresh (resume_thread_id None) and
+    marks the session started."""
+    captured = {}
+
+    async def _fake(**kw):
+        captured.update(kw)
+        return ("r", [], ExecutionMetadata(), [], None)
+
+    monkeypatch.setattr(available_runtime, "_execute_codex", _fake)
+    available_runtime._chat_thread_id = "thr_stale"
+    await available_runtime.execute("hello", continue_session=False)
+    assert captured.get("resume_thread_id") is None
+    assert codex_runtime.agent_state.session_started is True
+
+
+@pytest.mark.asyncio
+async def test_execute_updates_session_rollups(available_runtime, monkeypatch):
+    """A successful chat turn folds cost/tokens/context into agent_state."""
+    meta = ExecutionMetadata()
+    meta.cost_usd = 0.05
+    meta.output_tokens = 340
+    meta.input_tokens = 9_000
+    meta.context_window = codex_runtime.CODEX_CONTEXT_WINDOW
+
+    async def _fake(**_kw):
+        return ("answer", [], meta, [], "thr_roll")
+
+    monkeypatch.setattr(available_runtime, "_execute_codex", _fake)
+    # Force the context-tokens high-water comparison to take the update branch.
+    monkeypatch.setattr(codex_runtime.agent_state, "session_context_tokens", 0)
+    before_cost = codex_runtime.agent_state.session_total_cost
+    before_out = codex_runtime.agent_state.session_total_output_tokens
+
+    response, _, _, _ = await available_runtime.execute("hi")
+    assert response == "answer"
+    assert codex_runtime.agent_state.session_total_cost == pytest.approx(before_cost + 0.05)
+    assert codex_runtime.agent_state.session_total_output_tokens == before_out + 340
+    assert codex_runtime.agent_state.session_context_tokens == 9_000
+    assert codex_runtime.agent_state.session_context_window == codex_runtime.CODEX_CONTEXT_WINDOW
+
+
+# ---------------------------------------------------------------------------
+# _execute_codex — the orchestration body, end-to-end, with subprocess.Popen
+# stubbed. Never spawns the real codex CLI; the fake writes the -o result file
+# and emits a JSONL event stream the real reader threads + parser consume.
+# ---------------------------------------------------------------------------
+
+class _FakePipe:
+    """Minimal stdout/stderr stand-in: readline() yields each line then ''."""
+
+    def __init__(self, lines):
+        self._it = iter(lines)
+
+    def readline(self):
+        return next(self._it, "")
+
+    def close(self):
+        pass
+
+
+class _FakeRegistry:
+    def __init__(self):
+        self.registered = []
+        self.unregistered = []
+
+    def register(self, execution_id, process, metadata=None):
+        self.registered.append(execution_id)
+
+    def unregister(self, execution_id):
+        self.unregistered.append(execution_id)
+
+    def publish_log_entry(self, execution_id, event):
+        pass
+
+
+def _install_fake_codex(
+    monkeypatch,
+    *,
+    result_text,
+    stdout_events,
+    returncode=0,
+    extra_raw_lines=(),
+    wait_exc=None,
+):
+    """Wire codex_runtime so _execute_codex runs its real body against a fake
+    subprocess. Returns the registry so the caller can assert register/unregister.
+
+    ``extra_raw_lines`` are appended to stdout verbatim (un-JSON-encoded) to
+    exercise the reader's malformed-line tolerance. ``wait_exc``, when set, is
+    raised by ``process.wait`` to exercise the subprocess-timeout path.
+    """
+    monkeypatch.setattr(codex_runtime, "_load_openai_api_key", lambda: "sk-test")
+    monkeypatch.setattr(codex_runtime, "_is_read_only", lambda: False)
+    monkeypatch.setattr(codex_runtime, "_load_guardrails", lambda: {})
+    # Neutralize OS-level process-group operations — there is no real pgid.
+    monkeypatch.setattr(codex_runtime, "_capture_pgid", lambda proc: None)
+    monkeypatch.setattr(codex_runtime, "_terminate_process_group", lambda *a, **k: None)
+    monkeypatch.setattr(codex_runtime, "_safe_close_pipes", lambda *a, **k: None)
+
+    def _drain(process, t_out, t_err, grace=5, pgid=None, execution_tag=None):
+        # Join the reader threads so parsed state is settled before we read it.
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+
+    monkeypatch.setattr(codex_runtime, "_drain_bounded", _drain)
+
+    registry = _FakeRegistry()
+    monkeypatch.setattr(codex_runtime, "get_process_registry", lambda: registry)
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.pid = 4242
+            self.returncode = returncode
+            # The real codex writes the -o file; emulate that for the happy path.
+            if result_text is not None:
+                oidx = cmd.index("-o")
+                Path(cmd[oidx + 1]).write_text(result_text)
+            self.stdout = _FakePipe(
+                [json.dumps(e) + "\n" for e in stdout_events] + list(extra_raw_lines)
+            )
+            self.stderr = _FakePipe([])
+
+        def wait(self, timeout=None):
+            if wait_exc is not None:
+                raise wait_exc
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(codex_runtime.subprocess, "Popen", _FakePopen)
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_body_happy_path(tmp_path, monkeypatch):
+    """The -o file is the authoritative response; tokens/cost/session_id come
+    from the JSONL stream; the result file is unlinked and the registry is
+    register/unregister-balanced."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    events = [
+        {"type": "thread.started", "thread_id": "thr_live_42"},
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 1200,
+                "cached_input_tokens": 200,
+                "output_tokens": 340,
+            },
+        },
+    ]
+    registry = _install_fake_codex(
+        monkeypatch, result_text="FINAL ANSWER FROM -o FILE", stdout_events=events
+    )
+
+    rt = CodexRuntime()
+    response, log, metadata, raw, session_id = await rt._execute_codex(
+        prompt="do it",
+        model="gpt-5.1-codex",
+        system_prompt="PLATFORM",
+        resume_thread_id=None,
+        timeout_seconds=30,
+        allowed_tools=None,
+        execution_id="exec_body_1",
+        concurrent_reader=True,
+    )
+
+    assert response == "FINAL ANSWER FROM -o FILE"
+    assert metadata.input_tokens == 1200
+    assert metadata.output_tokens == 340
+    assert metadata.cache_read_tokens == 200
+    assert metadata.cost_usd and metadata.cost_usd > 0
+    assert metadata.status == "success"
+    assert session_id == "thr_live_42"
+    # finally: result file consumed, registry balanced.
+    assert not (tmp_path / "codex" / "exec_body_1-last.txt").exists()
+    assert registry.registered == ["exec_body_1"]
+    assert registry.unregistered == ["exec_body_1"]
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_body_nonzero_exit_classifies_failure(tmp_path, monkeypatch):
+    """A non-zero exit routes through _classify_codex_failure → HTTPException,
+    and the result file is still cleaned up in finally."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    registry = _install_fake_codex(
+        monkeypatch,
+        result_text=None,  # codex wrote nothing
+        stdout_events=[{"type": "thread.started", "thread_id": "thr_x"}],
+        returncode=1,
+    )
+    rt = CodexRuntime()
+    with pytest.raises(HTTPException) as exc_info:
+        await rt._execute_codex(
+            prompt="boom",
+            model=None,
+            system_prompt=None,
+            resume_thread_id=None,
+            timeout_seconds=30,
+            allowed_tools=None,
+            execution_id="exec_body_2",
+            concurrent_reader=False,
+        )
+    # Generic failure (no auth/rate markers) → 500, never 503.
+    assert exc_info.value.status_code == 500
+    assert registry.unregistered == ["exec_body_2"]
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_body_missing_key_is_503(tmp_path, monkeypatch):
+    """No API key resolvable → 503 before any subprocess is spawned."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(codex_runtime, "_load_openai_api_key", lambda: None)
+    rt = CodexRuntime()
+    with pytest.raises(HTTPException) as exc_info:
+        await rt._execute_codex(
+            prompt="x",
+            model=None,
+            system_prompt=None,
+            resume_thread_id=None,
+            timeout_seconds=30,
+            allowed_tools=None,
+            execution_id="exec_body_3",
+            concurrent_reader=False,
+        )
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_execute_headless_happy_path_through_real_body(tmp_path, monkeypatch):
+    """execute_headless() drives the real _execute_codex body (concurrent reader)
+    and returns the -o response + thread id."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(CodexRuntime, "is_available", lambda self: True)
+    _install_fake_codex(
+        monkeypatch,
+        result_text="HEADLESS RESULT",
+        stdout_events=[
+            {"type": "thread.started", "thread_id": "thr_headless"},
+            {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 2}},
+        ],
+    )
+    rt = CodexRuntime()
+    response, log, metadata, session_id = await rt.execute_headless(
+        prompt="task", execution_id="exec_hl_1", timeout_seconds=30
+    )
+    assert response == "HEADLESS RESULT"
+    assert session_id == "thr_headless"
+
+
+@pytest.mark.asyncio
+async def test_execute_headless_warns_on_images_and_max_turns(available_runtime, monkeypatch, caplog):
+    """images are unsupported (warned + ignored) and max_turns has no CLI flag
+    (info-logged), but neither aborts the run."""
+    captured = {}
+
+    async def _fake(**kw):
+        captured.update(kw)
+        return ("ok", [], ExecutionMetadata(), [], "thr")
+
+    monkeypatch.setattr(available_runtime, "_execute_codex", _fake)
+    caplog.set_level(logging.INFO, logger="agent_server.services.codex_runtime")
+    await available_runtime.execute_headless(
+        prompt="t", images=[{"data": "x"}], max_turns=5
+    )
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "images are not supported" in text
+    assert "max_turns" in text
+
+
+# ---------------------------------------------------------------------------
+# CODEX_HOME resolution — explicit env wins; else under $TMPDIR; else the home
+# default. Kept out of the git-tracked repo so codex state never dirties sync.
+# ---------------------------------------------------------------------------
+
+def test_codex_home_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", "/somewhere/codex-home")
+    assert codex_runtime._codex_home() == "/somewhere/codex-home"
+
+
+def test_codex_home_falls_back_to_tmpdir(monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("TMPDIR", "/scratch/tmp")
+    assert codex_runtime._codex_home() == "/scratch/tmp/codex"
+
+
+def test_codex_home_falls_back_to_agent_home_tmp(monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    # _AGENT_HOME/.tmp/codex when neither env is set.
+    assert codex_runtime._codex_home().endswith("/.tmp/codex")
+
+
+def test_ensure_codex_home_creates_dir(tmp_path, monkeypatch):
+    target = tmp_path / "ch"
+    monkeypatch.setenv("CODEX_HOME", str(target))
+    assert codex_runtime._ensure_codex_home() == str(target)
+    assert target.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Parser/tracking resilience: an item with no resolvable type is skipped; a
+# failure inside best-effort activity tracking never breaks parsing.
+# ---------------------------------------------------------------------------
+
+def test_parser_item_without_type_is_skipped():
+    events = [
+        {"type": "thread.started", "thread_id": "thr_nt"},
+        {"type": "item.completed", "item": {"id": "x"}},  # no 'type' / details.type
+        {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+    ]
+    _, log, metadata, _ = parse_codex_jsonl(_events_to_lines(events))
+    assert metadata.tool_count == 0
+    assert not log
+
+
+def test_parser_survives_activity_tracking_exceptions(monkeypatch):
+    """start/complete_tool_execution are best-effort — a raise inside them is
+    swallowed and the tool log entries are still recorded."""
+
+    def _boom(*a, **k):
+        raise RuntimeError("activity sink down")
+
+    monkeypatch.setattr(codex_runtime, "start_tool_execution", _boom)
+    monkeypatch.setattr(codex_runtime, "complete_tool_execution", _boom)
+    events = [
+        {"type": "thread.started", "thread_id": "thr_at"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "cmd_at",
+                "type": "command_execution",
+                "command": "ls",
+                "exit_code": 0,
+                "status": "completed",
+                "aggregated_output": "ok",
+            },
+        },
+    ]
+    _, log, _, _ = parse_codex_jsonl(_events_to_lines(events))  # must not raise
+    assert any(e.type == "tool_use" for e in log)
+    assert any(e.type == "tool_result" for e in log)
+
+
+# ---------------------------------------------------------------------------
+# _execute_codex — additional body branches: malformed stdout lines are
+# tolerated; an empty -o file with no JSONL parts yields a sentinel response;
+# a subprocess wall-clock timeout maps to 504.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_execute_codex_body_tolerates_malformed_stdout(tmp_path, monkeypatch):
+    """A non-JSON line and a non-dict JSON line on stdout are skipped; the run
+    still completes off the -o file."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _install_fake_codex(
+        monkeypatch,
+        result_text="STILL FINE",
+        stdout_events=[{"type": "thread.started", "thread_id": "thr_mal"}],
+        extra_raw_lines=["this is not json\n", "12345\n"],  # garbage + non-dict
+    )
+    rt = CodexRuntime()
+    response, _, _, _, _ = await rt._execute_codex(
+        prompt="p", model=None, system_prompt=None, resume_thread_id=None,
+        timeout_seconds=30, allowed_tools=None, execution_id="exec_mal",
+        concurrent_reader=False,
+    )
+    assert response == "STILL FINE"
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_body_empty_response_sentinel(tmp_path, monkeypatch):
+    """Empty -o file + no agent_message parts + no tools → '(No response from
+    Codex)' rather than an empty string."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _install_fake_codex(
+        monkeypatch,
+        result_text="",  # codex produced an empty result file
+        stdout_events=[
+            {"type": "thread.started", "thread_id": "thr_empty"},
+            {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 0}},
+        ],
+    )
+    rt = CodexRuntime()
+    response, _, _, _, _ = await rt._execute_codex(
+        prompt="p", model=None, system_prompt=None, resume_thread_id=None,
+        timeout_seconds=30, allowed_tools=None, execution_id="exec_empty",
+        concurrent_reader=False,
+    )
+    assert response == "(No response from Codex)"
+
+
+@pytest.mark.asyncio
+async def test_execute_codex_body_subprocess_timeout_is_504(tmp_path, monkeypatch):
+    """A subprocess wall-clock timeout (process.wait raises TimeoutExpired) maps
+    to HTTP 504 and still unregisters the execution."""
+    import subprocess as _sp
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    registry = _install_fake_codex(
+        monkeypatch,
+        result_text=None,
+        stdout_events=[{"type": "thread.started", "thread_id": "thr_to"}],
+        wait_exc=_sp.TimeoutExpired(cmd="codex", timeout=1),
+    )
+    rt = CodexRuntime()
+    with pytest.raises(HTTPException) as exc_info:
+        await rt._execute_codex(
+            prompt="p", model=None, system_prompt=None, resume_thread_id=None,
+            timeout_seconds=1, allowed_tools=None, execution_id="exec_to",
+            concurrent_reader=False,
+        )
+    assert exc_info.value.status_code == 504
+    assert registry.unregistered == ["exec_to"]
+
+
+@pytest.mark.asyncio
+async def test_execute_chat_timeout_maps_to_504(available_runtime, monkeypatch):
+    """execute() maps a bare TimeoutError from the body to HTTP 504."""
+
+    async def _raise_timeout(**_kw):
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(available_runtime, "_execute_codex", _raise_timeout)
+    with pytest.raises(HTTPException) as exc_info:
+        await available_runtime.execute("hi")
+    assert exc_info.value.status_code == 504
+
+
+@pytest.mark.asyncio
+async def test_execute_headless_timeout_maps_to_504(available_runtime, monkeypatch):
+    async def _raise_timeout(**_kw):
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(available_runtime, "_execute_codex", _raise_timeout)
+    with pytest.raises(HTTPException) as exc_info:
+        await available_runtime.execute_headless(prompt="hi")
+    assert exc_info.value.status_code == 504
