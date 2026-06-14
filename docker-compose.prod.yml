@@ -93,6 +93,14 @@ services:
       - PUBLIC_CHAT_URL=${PUBLIC_CHAT_URL:-}
       # Frontend URL for post-OAuth redirects
       - FRONTEND_URL=${FRONTEND_URL:-}
+      # Backend's own public origin — used to build OAuth redirect URIs
+      # ({BACKEND_URL}/api/oauth/{provider}/callback, read by config.py). Mirrors
+      # docker-compose.yml; without this line the .env value is inert in prod (the
+      # #1039 packaging-gap class) and OAuth callbacks fall back to localhost — set
+      # this to your public backend URL. The scheduler reads BACKEND_URL too but
+      # keeps its own internal default (http://backend:8000); intentionally not
+      # wired here so it still reaches the backend over the Docker network.
+      - BACKEND_URL=${BACKEND_URL:-http://localhost:8000}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # Configurable database backend (#300, experimental) — mirrors

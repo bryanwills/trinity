@@ -83,6 +83,13 @@ services:
       # Public access / OAuth callbacks
       - PUBLIC_CHAT_URL=${PUBLIC_CHAT_URL:-}
       - FRONTEND_URL=${FRONTEND_URL:-}
+      # Backend's own public origin — used to build OAuth redirect URIs
+      # ({BACKEND_URL}/api/oauth/{provider}/callback, read by config.py). Without
+      # this line the .env value is inert (the #1039 packaging-gap class) and
+      # callbacks fall back to the localhost default. The scheduler reads BACKEND_URL
+      # too but keeps its own internal default (http://backend:8000); intentionally
+      # not wired here so it still reaches the backend over the Docker network.
+      - BACKEND_URL=${BACKEND_URL:-http://localhost:8000}
       # CORS (comma-separated extra origins)
       - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
       # Slack channel adapter
