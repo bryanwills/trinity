@@ -90,7 +90,9 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 - **In Dev**: PR squash-merged to `dev` — `status-in-dev` label, awaiting the next release cut (dev → main)
 - **Done**: Release PR merged to `main`, issue auto-closed via `Closes #N`
 
-**Full details**: `.claude/DEVELOPMENT_WORKFLOW.md`
+**Two trackers (open-core).** Issues route by type: `type-bug`/`type-refactor`/`type-docs` → public `abilityai/trinity`; `type-feature`/`type-epic` → private `abilityai/trinity-enterprise`. Tracker ≠ code repo — core code still lands as a public-repo PR. Query/picking skills union both trackers.
+
+**Full details**: `.claude/DEVELOPMENT_WORKFLOW.md` (→ Repository Routing)
 
 ---
 
@@ -108,7 +110,7 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 - No creating documentation files unless explicitly requested
 
 ### 3. Follow the Roadmap
-- Check **GitHub Issues** for current priorities (`/roadmap` or `gh issue list`) — labels are the single source of truth
+- Check **GitHub Issues** for current priorities (`/roadmap` or `gh issue list`) — labels are the single source of truth. `/roadmap` unions both trackers (public bugs + private features/epics); a raw `gh issue list` sees only one repo — pass `--repo abilityai/trinity-enterprise` for feature/epic work
 - Work P0 issues first, then P1 (`type-bug` before `type-feature`, then newest issue number first), then P2/P3
 - Assign yourself and update `status-*` labels as you progress (see SDLC above)
 - Close issues when complete
@@ -155,7 +157,7 @@ Long-running multi-stage work inside agents (perception → synthesis → publis
 | `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design + active orchestration direction** — pull / work-stealing coordination (Epic #1045, umbrella #1081). Use when evaluating tradeoffs and prioritizing work; consult before touching `task_execution_service`, `capacity_manager`, `slot_service`, `backlog_service`, `dispatch_breaker`, or `cleanup_service`. |
 | `docs/memory/feature-flows.md` | Index of vertical slice docs |
 | `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` | **Archived (historical)** — completed Sprint A–D′ execution-reliability plan (all shipped). Superseded 2026-06-05 by the pull-coordination direction in `TARGET_ARCHITECTURE.md`. Read for background on the slot/backlog/cleanup machinery. |
-| GitHub Issues | Prioritized task queue — labels are authoritative: priority (P0-P3), type, `theme-*`, `complexity-*`; status via `status-*` labels + open/closed; epics are `type-epic` issues with native sub-issues. No project board. |
+| GitHub Issues | Prioritized task queue — labels are authoritative: priority (P0-P3), type, `theme-*`, `complexity-*`; status via `status-*` labels + open/closed; epics are `type-epic` issues with native sub-issues. No project board. **Two trackers:** bugs/refactor/docs in public `abilityai/trinity`, features/epics in private `abilityai/trinity-enterprise` (see `.claude/DEVELOPMENT_WORKFLOW.md` → Repository Routing). |
 
 ---
 
@@ -343,7 +345,7 @@ The **[abilities](https://github.com/abilityai/abilities)** repo is the canonica
 - **Orchestration Reliability Plan (archived)**: `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` ← Sprint A–D′ historical record; superseded by `docs/planning/TARGET_ARCHITECTURE.md` (pull coordination) as the active execution-stack direction
 - **Full Architecture**: @docs/memory/architecture.md
 - **All Requirements**: `.claude/memory/requirements.md`
-- **Current Roadmap**: https://github.com/abilityai/trinity/issues
+- **Current Roadmap**: https://github.com/abilityai/trinity/issues (public bugs) + private `abilityai/trinity-enterprise` (features/epics) — use `/roadmap` to see both
 - **Recent Changes**: `git log --oneline --since="2 weeks ago"`
 - **Agent Guide**: `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
 - **Agent Network Demo**: `docs/AGENT_NETWORK_DEMO.md`
