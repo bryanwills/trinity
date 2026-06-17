@@ -144,6 +144,10 @@ services:
       - ./config/process-docs:/app/config/process-docs:ro
       - agent-configs:/agent-configs
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
+      # Read-only access to Vector's logs so log_archive_service.py (reads
+      # /data/logs) can run in prod. Mirrors docker-compose.yml; without it the
+      # forwarded LOG_* knobs are inert (LOG_DIR not found) — the #1039 class.
+      - trinity-logs:/data/logs:ro
     depends_on:
       redis:
         condition: service_healthy
