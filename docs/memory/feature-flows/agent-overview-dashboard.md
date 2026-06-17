@@ -47,7 +47,9 @@ deliberately does **not** re-render any header element; where it references one
 - `components/StackedBarChart.vue` — executions-by-type, **CSS/flexbox** stacked
   bars (NOT uPlot bars — chosen for correct-by-construction per-segment
   tooltips, theme-aware colors, no cumulative-stacking math). One column/day,
-  ≤8 buckets, hover shows the per-bucket breakdown, legend with window totals.
+  ≤9 buckets, hover shows the per-bucket breakdown, legend with window totals.
+  Buckets missing from the `colors` prop render slate (`#94a3b8`) rather than
+  invisible — covers a stale cached bundle against a newer backend (#1150).
 - `components/TrendLineChart.vue` — uPlot line/area with axes + cursor. Dark-mode
   aware (axis/grid strokes re-resolved on theme toggle). uPlot's built-in legend
   is **disabled** (it reflows the layout on hover → labels jump); replaced by a
@@ -118,7 +120,8 @@ Raw `triggered_by` → user-facing buckets, in Python (not a SQL `CASE`):
 | MCP | mcp |
 | Channels | telegram, slack, whatsapp |
 | Public | public, paid |
-| Scheduled | schedule, webhook, loop |
+| Scheduled | schedule, webhook |
+| Loops | loop (#1150 — distinct fuchsia accent so loop bursts don't read as cron load) |
 | Agent-to-agent | agent, fan_out, self_task |
 | Voice | voip, voice |
 | **Other** | anything unmapped (catch-all — a new trigger type never vanishes) |
@@ -133,6 +136,11 @@ are derived client-side from `…/history?check_type=network` and are inherently
 "last 7 days" even on a 14/30d window. Reliability-over-time for the full window
 is the success-rate chart (from `schedule_executions`, retained ~90d) — a
 deliberately separate source so the execution charts aren't clipped.
+
+When there is no `agent_health_checks` history at all (e.g. the Monitoring
+Service was never enabled), the trend block's `v-else` renders a one-line empty
+state — "No health data available — the monitoring service may be off." —
+instead of a silently empty section (fix 6df68c96, 2026-06-10).
 
 ## Info tab redesign
 
