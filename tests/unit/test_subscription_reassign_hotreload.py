@@ -32,6 +32,27 @@ from unittest.mock import MagicMock
 import pytest
 
 
+def _live_auto_switch():
+    """Return the live ``services.subscription_auto_switch`` object the endpoint
+    actually calls into, resolved via ``sys.modules`` — NOT the ``services``
+    package attribute.
+
+    ``routers/subscriptions.py`` reaches the hot-reload helpers through a
+    function-local ``from services.subscription_auto_switch import (...)``, which
+    binds from ``sys.modules["services.subscription_auto_switch"]``. A plain
+    ``import services.subscription_auto_switch as x`` instead binds ``x`` from the
+    ``services`` *package attribute*. The conftest's autouse #762 fixture restores
+    ``sys.modules["services"]`` before/after every test, and under some
+    pytest-randomly orderings (seed 99999) the package attribute and the
+    ``sys.modules`` submodule entry drift to two different module objects. Patching
+    the package-attribute object then misses the one the endpoint calls, so the
+    real helper runs and the test flakes (#1089). Resolving via ``sys.modules``
+    keeps the fixture's patch in lockstep with the endpoint regardless of order.
+    """
+    import services.subscription_auto_switch  # noqa: F401 — ensure it is imported
+    return sys.modules["services.subscription_auto_switch"]
+
+
 @pytest.fixture
 def owner_user():
     u = MagicMock()
@@ -89,7 +110,7 @@ def manual_env(monkeypatch):
     agent_service.start_agent_internal = _start
     monkeypatch.setitem(sys.modules, "services.agent_service", agent_service)
 
-    import services.subscription_auto_switch as auto_switch
+    auto_switch = _live_auto_switch()
 
     hot_calls: list = []
 
@@ -166,7 +187,7 @@ class TestManualReassignHotReload:
         lock lets a concurrent auto-switch change the assignment between the read
         and the assign, so the recreate-vs-hot-reload branch could be chosen
         against a stale `old_sub_id`."""
-        import services.subscription_auto_switch as auto_switch
+        auto_switch = _live_auto_switch()
 
         order: list[str] = []
 
@@ -234,7 +255,7 @@ def register_env(monkeypatch):
     # register_subscription 503s without an encryption key configured.
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "0" * 64)
 
-    import services.subscription_auto_switch as auto_switch
+    auto_switch = _live_auto_switch()
 
     fanout_calls: list = []
 
