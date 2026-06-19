@@ -841,11 +841,15 @@ async def agent_heartbeat(agent_name: str, payload: HeartbeatPayload, request: R
 _MAX_CALLBACK_RESPONSE_CHARS = 4_000_000
 _MAX_CALLBACK_LOG_BYTES = 16_000_000
 
-# Terminal statuses — a callback against an already-terminal row is an
-# idempotent replay (the row was finalized inline or by an earlier callback).
-_TERMINAL_STATUSES = frozenset({
+# Authoritative terminals a callback must NOT overwrite — short-circuit as an
+# idempotent replay. FAILED is deliberately EXCLUDED: a row FAILED by the lease
+# reaper (LEASE_EXPIRED) must still let a genuinely-late SUCCESS callback through
+# to `apply_result`, whose CAS lets SUCCESS overwrite a non-cancelled terminal
+# (#378 / Codex #2 — "not guarded against"). A duplicate FAILED callback on an
+# already-FAILED row is harmless: the non-success CAS blocks it (won=False) so no
+# side-effect re-runs. SUCCESS/CANCELLED/SKIPPED are final and replay-safe to ACK.
+_AUTHORITATIVE_TERMINALS = frozenset({
     TaskExecutionStatus.SUCCESS,
-    TaskExecutionStatus.FAILED,
     TaskExecutionStatus.CANCELLED,
     TaskExecutionStatus.SKIPPED,
 })
@@ -911,11 +915,17 @@ async def agent_execution_result(
         # 404 (not 403) — don't leak existence of another agent's execution id.
         raise HTTPException(status_code=404, detail="Execution not found")
 
-    # ---- Idempotent replay: already-terminal row is a no-op ACK -------------
-    if execution.status in _TERMINAL_STATUSES:
+    # ---- Idempotent replay: an authoritative terminal is a no-op ACK --------
+    # (FAILED falls through — a late SUCCESS may still correct a reaper
+    # LEASE_EXPIRED via the CAS; a duplicate FAILED is CAS-blocked downstream.)
+    if execution.status in _AUTHORITATIVE_TERMINALS:
         return {"ok": True, "replayed": True, "status": execution.status}
 
     # ---- Durable async-marker gate (fail-closed cross-path guard) ----------
+    # RUNNING-sync / interactive rows (marker 'dispatched' / real-uuid / NULL) and
+    # any non-async FAILED row are rejected — the callback only finalizes rows it
+    # owns. A reaper-FAILED async row keeps its 'dispatched_async' marker, so a
+    # late SUCCESS still passes here.
     if execution.claude_session_id != _ASYNC_DISPATCH_MARKER:
         raise HTTPException(
             status_code=409,

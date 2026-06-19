@@ -177,13 +177,34 @@ def _call_with_execution(execution):
 # Idempotent replay (200) — already-terminal row
 # --------------------------------------------------------------------------
 class TestReplay:
-    @pytest.mark.parametrize("term", ["success", "failed", "cancelled", "skipped"])
-    def test_terminal_row_is_replayed_noop(self, term):
+    @pytest.mark.parametrize("term", ["success", "cancelled", "skipped"])
+    def test_authoritative_terminal_is_replayed_noop(self, term):
+        """SUCCESS/CANCELLED/SKIPPED are final — short-circuit as a replay ACK."""
         resp, apply_mock, _ = _call_with_execution(_execution(status=term))
         assert isinstance(resp, dict)
         assert resp["ok"] is True and resp["replayed"] is True
         assert resp["status"] == term
         apply_mock.assert_not_awaited()  # no re-finalization
+
+    def test_failed_async_row_falls_through_to_apply_result(self):
+        """Codex #2: a reaper-FAILED async row keeps its marker, so a genuinely
+        late SUCCESS callback must reach apply_result (CAS lets it overwrite).
+        FAILED is NOT short-circuited as a replay."""
+        resp, apply_mock, _ = _call_with_execution(
+            _execution(status="failed", claude_session_id="dispatched_async")
+        )
+        assert isinstance(resp, dict)
+        assert resp["ok"] is True
+        apply_mock.assert_awaited_once()  # fall-through, CAS decides
+
+    def test_failed_sync_row_without_marker_409(self):
+        """A FAILED row lacking the async marker (a sync execution) is still
+        rejected — the cross-path guard holds for terminal rows too."""
+        exc, apply_mock, _ = _call_with_execution(
+            _execution(status="failed", claude_session_id="dispatched")
+        )
+        assert _status(exc) == 409
+        apply_mock.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------
