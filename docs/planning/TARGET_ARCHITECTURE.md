@@ -491,6 +491,18 @@ These are architectural decisions not yet resolved. They should be answered befo
 
 6. **Workflow-scoped capability tokens** (issue #948): the §Security and Trust addition — ephemeral tokens scoped to a `correlation_id` so a compromised agent's blast radius is bounded to its active workflows rather than its permanent permission set. Layered on top of `agent_permissions`, not a replacement. Sequencing depends on the #946 decision gate.
 
+### Ideas from external architecture review (2026-06-15)
+
+Captured from a CTO review of this document. **Ideas, not decisions** — recorded here so they aren't lost; each needs adjudication before it influences the build.
+
+- **Readers-writer task classes.** Classify every queued task as `read_only` or `modifying`; run `modifying` tasks strictly serially per agent and `read_only` tasks in parallel. This is a *structurally different* attack on the side-effect problem than effect-scoped keys (#1084) — serialize the writer instead of deduplicating the effect — and could compose with it. Open: who declares the class (caller / kind / template), how it is *enforced* rather than trusted (PreToolUse guard + read-only filesystem overlay), the throughput cost of serializing the mutating path (most valuable agent work mutates), and lock granularity (per-agent vs. per-resource). Folds naturally into the atomic claim. *(Already tracked separately in the backlog.)*
+
+- **Idle-agent suspend / resume.** At 200 agents, idle containers holding RAM is a real cost the current design ignores. Stop a container after an idle timeout (queue depth 0, nothing running) and wake it on the next enqueue. Fits the pull model for free — a suspended agent is simply one that isn't pulling — and pairs with read-replicas (#927): a read-only replica can serve Q&A while the writer is suspended. Optional CRIU/Firecracker checkpoint preserves in-memory daemons across suspend.
+
+- **Transactional outbox for the event bus.** With PostgreSQL as the source of truth and Redis Streams as the bus, committing a state change and publishing its event are two operations — a crash between them diverges the bus from the database (classic dual-write). Fix: write the domain change *and* an `outbox` row in one Postgres transaction; a small LISTEN/NOTIFY relay publishes outbox rows to Redis. Strengthens Principle #2 (one source of truth) and Invariant #10; no new infrastructure (Postgres + Redis already present).
+
+- **Sequencing note.** The result-capture hook already described in §Agent Runtime ("Result reporting, not journal-as-truth") is implementable on the *current* stack — it needs neither pull nor PostgreSQL. The three ideas above depend on the PostgreSQL/pull foundation.
+
 ## Tracking Issues
 
 Critical-path work toward this architecture is tracked in GitHub:
