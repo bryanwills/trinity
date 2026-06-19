@@ -898,8 +898,8 @@ class DatabaseManager:
                                                           context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
                                                           compact_metadata, retry_count)
 
-    def mark_execution_dispatched(self, execution_id: str) -> bool:
-        return self._schedule_ops.mark_execution_dispatched(execution_id)
+    def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
+        return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)
 
     def get_schedule_executions(self, schedule_id: str, limit: int = 50):
         return self._schedule_ops.get_schedule_executions(schedule_id, limit)
@@ -1103,6 +1103,9 @@ class DatabaseManager:
     def get_activity(self, activity_id: str):
         return self._activity_ops.get_activity(activity_id)
 
+    def get_open_activity_id_for_execution(self, execution_id: str):
+        return self._activity_ops.get_open_activity_id_for_execution(execution_id)
+
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
 
@@ -1123,9 +1126,11 @@ class DatabaseManager:
         """Get all schedule executions currently in 'running' status."""
         return self._schedule_ops.get_running_executions()
 
-    def mark_stale_executions_failed(self, timeout_minutes: int = 30):
+    def mark_stale_executions_failed(self, timeout_minutes: int = 30, agent_timeouts=None, buffer_seconds: int = 0):
         """Mark executions stuck in 'running' past threshold as failed."""
-        return self._schedule_ops.mark_stale_executions_failed(timeout_minutes)
+        return self._schedule_ops.mark_stale_executions_failed(
+            timeout_minutes, agent_timeouts=agent_timeouts, buffer_seconds=buffer_seconds
+        )
 
     def mark_no_session_executions_failed(self, timeout_seconds: int = 60):
         """Mark running executions with no claude_session_id as failed (Issue #106)."""
