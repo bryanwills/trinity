@@ -1,9 +1,11 @@
-# In-App Bug Reporting (#1116)
+# In-App Bug Reporting & Feature Requests (#1116)
 
-> Users report bugs from the floating **Help widget** without the deployed
-> instance holding any GitHub credentials. The report is routed through a
-> hosted, credential-holding intake service that files it as a GitHub issue in
-> `abilityai/trinity`.
+> Users report **bugs** and submit **feature requests** from the floating
+> **Help widget** without the deployed instance holding any GitHub credentials.
+> The report is routed through a hosted, credential-holding intake service that
+> files it as a labelled GitHub issue in `abilityai/trinity` and emails the
+> Trinity team. Reporters may optionally leave a contact email for follow-up
+> (kept private — see below).
 
 ## Why a hosted intake
 
@@ -23,22 +25,29 @@ forever. (The intake service itself lives **outside this repo** in
 ## Flow
 
 ```
-HelpChatWidget "Report a bug" tab
-  → form (title + description, required, char-capped)
+HelpChatWidget tabs: Ask · Bug · Feature
+  → form (title + description required; optional contact email)
   → client builds diagnostics + CLIENT-SIDE SCRUB (utils/scrub.js)
   → REVIEW screen (see-before-send): scrubbed preview + public-repo warning
-  → POST {title, description, install_id, diagnostics} → intake Worker
-       Worker: guards → SERVER-SIDE re-scrub → soft per-install cap → dedupe
-               → create GitHub issue (labels type-bug, source:in-app)
-       ← { ok, issue_url, issue_number, deduped }
+  → POST {type, title, description, email?, install_id, diagnostics} → intake Worker
+       Worker: guards → SERVER-SIDE re-scrub → soft per-install cap → dedupe (type+content)
+               → create GitHub issue (type-bug | type-feature, + source:in-app)
+               → email the team via Resend (reply-to = reporter email if given)
+       ← { ok, type, issue_url, issue_number, deduped }
   → success state with issue link
 ```
 
+`type` is `bug` (default) or `feature`; bugs get `type-bug`, feature requests
+`type-feature` (both + `source:in-app`), for human triage / post-processing.
+
 ## Frontend (in this repo)
 
-- `src/components/HelpChatWidget.vue` — adds a **"Report a bug"** tab alongside
-  the existing Q&A (no second floating button). Stages: `form → review →
-  success`. The review stage is the explicit opt-in confirm and renders exactly
+- `src/components/HelpChatWidget.vue` — adds **"Bug"** and **"Feature"** tabs
+  alongside the existing Q&A "Ask" (no second floating button); both share one
+  form keyed on `mode`, with type-aware copy. Stages: `form → review → success`.
+  Form takes title, description, and an **optional contact email** (not scrubbed;
+  shown in the review behind a "private — not published" note). The review stage
+  is the explicit opt-in confirm (verified: no auto-submit) and renders exactly
   what will be sent. Returned `issue_url` is link-rendered only if it matches
   `https://github.com/` (href-injection guard). Gated by `bugReportingEnabled`.
 - `src/utils/consoleBuffer.js` — capped ring buffer (60 entries) of recent
@@ -71,8 +80,28 @@ Defense-in-depth: Cloudflare edge DDoS (native) + a per-IP Rate Limiting Rule;
 Worker method/`Content-Type`/256 KB body guards; KV soft per-`install_id` daily
 cap; content-hash dedupe (a flapping client gets the existing issue URL back, no
 duplicates); **second server-side scrub** (never trusts the client); optional
-Turnstile. Scrubber has 14 unit tests; verified live end-to-end against
-`abilityai/trinity` (filing, all secret classes scrubbed, dedupe, 400 guard).
+Turnstile.
+
+**Report kind:** `type` selects the label — `bug` → `type-bug`, `feature` →
+`type-feature` (both + `source:in-app`). Dedupe is keyed on `(type, scrubbed
+content)`.
+
+**Optional contact email:** rides only the private team notification (as its
+`reply-to`) and is **never** written to the public issue — the body just notes
+"a contact email was provided." It is exempt from the email-masking scrub since
+the submitter intends to share it.
+
+**Team notification (Resend):** on each NEW issue (not dedupe hits) the Worker
+fires a best-effort email via Resend (`ctx.waitUntil`, non-blocking; a failure
+never fails the report) to `NOTIFY_EMAIL_TO` from the Resend-verified
+`NOTIFY_EMAIL_FROM` (`noreply@abilityai.dev`) — type, title, scrubbed
+description, diagnostics, issue link, `reply-to` = reporter email when given.
+`RESEND_API_KEY` is a Worker secret; absent → email silently skipped.
+
+20 unit tests (scrubber + email/issue-body builders); verified live end-to-end
+against `abilityai/trinity` (bug + feature filing, correct labels, secret
+scrubbing, submitter email kept out of the public body, dedupe, 400 guards,
+Resend delivery).
 
 ## Security notes (public repo)
 

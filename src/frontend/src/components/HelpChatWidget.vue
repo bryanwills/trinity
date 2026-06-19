@@ -167,7 +167,9 @@
           <!-- Stage: form -->
           <template v-if="bugStage === 'form'">
             <p class="text-xs text-gray-500 dark:text-gray-400">
-              Found something broken? Describe it below. We'll attach diagnostics you can review before anything is sent.
+              {{ mode === 'feature'
+                ? "Have an idea? Describe the feature you'd like. We'll attach diagnostics you can review before anything is sent."
+                : "Found something broken? Describe it below. We'll attach diagnostics you can review before anything is sent." }}
             </p>
             <div>
               <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Title</label>
@@ -175,21 +177,34 @@
                 v-model="bugTitle"
                 type="text"
                 :maxlength="MAX_TITLE"
-                placeholder="Short summary of the problem"
+                :placeholder="mode === 'feature' ? 'Short summary of your idea' : 'Short summary of the problem'"
                 class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:ring-2 focus:ring-action-primary-500 focus:border-transparent text-sm"
               />
               <div class="text-right text-[11px] text-gray-400 mt-0.5">{{ bugTitle.length }}/{{ MAX_TITLE }}</div>
             </div>
             <div>
-              <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">What happened?</label>
+              <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">{{ mode === 'feature' ? 'What would you like?' : 'What happened?' }}</label>
               <textarea
                 v-model="bugDescription"
                 rows="5"
                 :maxlength="MAX_DESC"
-                placeholder="Steps to reproduce, what you expected, what happened instead…"
+                :placeholder="mode === 'feature' ? 'What should it do, and why would it help?' : 'Steps to reproduce, what you expected, what happened instead…'"
                 class="w-full resize-none border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:ring-2 focus:ring-action-primary-500 focus:border-transparent text-sm"
               ></textarea>
               <div class="text-right text-[11px] text-gray-400 mt-0.5">{{ bugDescription.length }}/{{ MAX_DESC }}</div>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Your email <span class="font-normal text-gray-400">(optional)</span>
+              </label>
+              <input
+                v-model="bugEmail"
+                type="email"
+                maxlength="254"
+                placeholder="you@example.com"
+                class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:ring-2 focus:ring-action-primary-500 focus:border-transparent text-sm"
+              />
+              <p class="text-[11px] text-gray-400 mt-0.5">So we can follow up. Shared privately with the team — never posted in the public issue.</p>
             </div>
             <p v-if="bugFormError" class="text-xs text-status-danger-600 dark:text-status-danger-400">{{ bugFormError }}</p>
             <button
@@ -208,12 +223,21 @@
             </div>
 
             <div>
+              <div class="text-xs font-medium text-gray-700 dark:text-gray-300">Type</div>
+              <div class="text-gray-900 dark:text-gray-100">{{ mode === 'feature' ? '✨ Feature request' : '🐛 Bug report' }}</div>
+            </div>
+            <div>
               <div class="text-xs font-medium text-gray-700 dark:text-gray-300">Title</div>
               <div class="text-gray-900 dark:text-gray-100 break-words">{{ pendingPayload.title }}</div>
             </div>
             <div>
               <div class="text-xs font-medium text-gray-700 dark:text-gray-300">Description</div>
               <div class="text-gray-900 dark:text-gray-100 whitespace-pre-wrap break-words">{{ pendingPayload.description }}</div>
+            </div>
+            <div v-if="pendingPayload.email">
+              <div class="text-xs font-medium text-gray-700 dark:text-gray-300">Contact email</div>
+              <div class="text-gray-900 dark:text-gray-100 break-all">{{ pendingPayload.email }}</div>
+              <p class="text-[11px] text-gray-400 mt-0.5">Sent privately to the team for follow-up — not added to the public issue.</p>
             </div>
 
             <details class="rounded-lg border border-gray-200 dark:border-gray-700">
@@ -258,7 +282,7 @@
                 </svg>
               </div>
               <h3 class="text-sm font-medium text-gray-900 dark:text-white">
-                {{ bugDeduped ? 'Matches an existing report' : 'Thanks — report filed!' }}
+                {{ bugDeduped ? 'Matches an existing report' : (mode === 'feature' ? 'Thanks — feature request filed!' : 'Thanks — report filed!') }}
               </h3>
               <a
                 v-if="bugResult"
@@ -304,7 +328,8 @@ const MAX_DESC = 4000
 
 const tabs = [
   { id: 'ask', label: 'Ask' },
-  { id: 'bug', label: 'Report a bug' },
+  { id: 'bug', label: 'Bug' },
+  { id: 'feature', label: 'Feature' },
 ]
 
 const isOpen = ref(false)
@@ -321,6 +346,7 @@ const lastUserMessage = ref('')
 // --- Bug-report state ---
 const bugTitle = ref('')
 const bugDescription = ref('')
+const bugEmail = ref('')
 const bugStage = ref('form') // form | review | success
 const bugFormError = ref('')
 const bugError = ref('')
@@ -470,12 +496,21 @@ async function reviewReport() {
     bugFormError.value = 'Both a title and a description are required.'
     return
   }
+  const contactEmail = bugEmail.value.trim()
+  if (contactEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(contactEmail)) {
+    bugFormError.value = "That email doesn't look valid — fix it or leave it blank."
+    return
+  }
   try { await loadBuildInfo() } catch { /* build info is best-effort */ }
   const consoleLines = scrubLines(getConsoleBuffer(50))
   pendingPayload.value = {
+    type: mode.value === 'feature' ? 'feature' : 'bug',
     title: scrub(bugTitle.value.trim()).slice(0, MAX_TITLE),
     description: scrub(bugDescription.value.trim()).slice(0, MAX_DESC),
     install_id: getInstallId(),
+    // Contact email is intentionally NOT scrubbed; the server keeps it out of
+    // the public issue and uses it only for the private team notification.
+    ...(contactEmail ? { email: contactEmail } : {}),
     diagnostics: {
       app_version: buildInfo.value?.version || 'unknown',
       git_commit: buildInfo.value?.git_commit || 'unknown',
@@ -529,6 +564,7 @@ async function submitReport() {
 function resetBug() {
   bugTitle.value = ''
   bugDescription.value = ''
+  bugEmail.value = ''
   pendingPayload.value = null
   bugResult.value = ''
   bugDeduped.value = false
