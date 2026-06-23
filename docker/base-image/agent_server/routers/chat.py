@@ -8,14 +8,15 @@ import asyncio
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
 
 from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
 from ..services.claude_code import get_execution_lock
 from ..services.runtime_adapter import get_runtime
 from ..services.process_registry import get_process_registry
+from ..services import result_callback
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -125,6 +126,18 @@ async def execute_task(request: ParallelTaskRequest):
         logger.info(f"[Task] Resuming session {request.resume_session_id}: {request.message[:50]}...")
     else:
         logger.info(f"[Task] Executing parallel task: {request.message[:50]}...")
+
+    # #1083 fire-and-forget: when the backend requests async AND this is the
+    # Claude runtime, accept with 202 and run the turn in a detached task that
+    # reports the terminal to the backend's result-callback endpoint. The detached
+    # task owns its own record_task_start/finish. try_spawn_async returns False
+    # (→ synchronous handling below) for non-Claude runtimes, a missing
+    # execution_id, or absent callback creds — the non-202 fallback.
+    if result_callback.try_spawn_async(request):
+        return JSONResponse(
+            status_code=202,
+            content={"execution_id": request.execution_id, "status": "accepted"},
+        )
 
     # Execute via runtime adapter in headless mode (no lock, no --continue)
     runtime = get_runtime()
@@ -439,42 +452,3 @@ async def stream_execution_log(execution_id: str):
             "X-Accel-Buffering": "no"
         }
     )
-
-
-# ============================================================================
-# WebSocket Endpoints
-# ============================================================================
-
-@router.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket):
-    """WebSocket endpoint for streaming chat (internal use)"""
-    await websocket.accept()
-    try:
-        while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-
-            # Add user message
-            agent_state.add_message("user", message["content"])
-
-            # Send response via runtime adapter
-            runtime = get_runtime()
-            # Use model from message if provided, otherwise use current_model from state
-            effective_model = message.get("model") or agent_state.current_model
-            response_text, execution_log, metadata, raw_messages = await runtime.execute(
-                prompt=message["content"],
-                model=effective_model,
-                continue_session=True,
-                stream=True
-            )
-            agent_state.add_message("assistant", response_text)
-
-            await websocket.send_json({
-                "type": "message",
-                "role": "assistant",
-                "content": response_text,
-                "execution_log": raw_messages,  # Full Claude Code stream-json format
-                "metadata": metadata.model_dump()
-            })
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")

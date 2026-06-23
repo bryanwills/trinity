@@ -26,59 +26,21 @@ from .config import config
 from .models import Schedule, ScheduleExecution, ExecutionStatus, SchedulerStatus, ProcessSchedule
 from .database import SchedulerDatabase
 from .locking import get_lock_manager, LockManager
+# Shared SUB-003 auth-class classifier (#1088). The scheduler uses it for
+# log-labelling ONLY — the call sites below just pick a logger.error wording.
+# Aliased to the historical `_is_auth_failure` name so those call sites stay
+# unchanged. Source of truth: src/backend/services/failure_classifier.py,
+# mirrored byte-identically at src/scheduler/failure_classifier.py.
+from .failure_classifier import is_auth_failure as _is_auth_failure
 
 logger = logging.getLogger(__name__)
 
 
-# Substrings indicating an auth-class subscription failure. Mirrors
-# `src/backend/services/subscription_auto_switch.py::AUTH_INDICATORS` —
-# the scheduler runs in a separate container and cannot import from
-# backend.services, so this list is duplicated by necessity. Keep the
-# two in sync when editing either side.
-_AUTH_INDICATORS = [
-    "credit balance",
-    "unauthorized",
-    "authentication",
-    "credentials",
-    "forbidden",
-    "401",
-    "403",
-    "oauth",
-    "token expired",
-    "not authenticated",
-]
-
-# #904: see `subscription_auto_switch.NON_AUTH_KILL_MARKERS` — same list,
-# duplicated here because the scheduler runs in a separate container and
-# can't import from backend.services. Keep in sync.
-_NON_AUTH_KILL_MARKERS = [
-    "sigkill",
-    "sigterm",
-    "sigint",
-    "exit code -9",
-    "exit code -15",
-    "exit code -2",
-    "exit code 137",
-    "exit code 143",
-    "exit code 130",
-    "terminated by",
-    "killed by",
-    "out of memory",
-    "oom",
-    "memory cgroup",
-]
-
-
-def _is_auth_failure(error_msg: str) -> bool:
-    """Return True if `error_msg` matches any AUTH_INDICATORS substring AND
-    does not contain an unambiguous signal-kill / OOM / timeout marker
-    (#904)."""
-    if not error_msg:
-        return False
-    error_lower = error_msg.lower()
-    if any(marker in error_lower for marker in _NON_AUTH_KILL_MARKERS):
-        return False
-    return any(ind in error_lower for ind in _AUTH_INDICATORS)
+def _describe_exception(e: BaseException) -> str:
+    """Never let a blank/whitespace-stringifying exception (e.g. httpx timeouts,
+    whose str() is '') be persisted as an empty `error` (#1022). Falls back to
+    the type name. .strip() so whitespace-only messages also trip the fallback."""
+    return str(e).strip() or f"{type(e).__name__} (no detail)"
 
 
 # #913: Polling-deadline fallback when the schedule's timeout_seconds is
@@ -926,7 +888,9 @@ class SchedulerService:
                 })
 
         except Exception as e:
-            error_msg = str(e)
+            # #1022: never persist a blank error — the cron path's only handler
+            # is generic, so a blank-stringifying dispatch timeout lands here.
+            error_msg = _describe_exception(e)
             logger.error(f"Schedule {schedule.name} execution failed: {error_msg}")
 
             # SCHED-ASYNC-001: Check current status before overwriting.
@@ -989,11 +953,15 @@ class SchedulerService:
                 response = await client.post(
                     f"{config.backend_url}/api/internal/agents/{agent_name}/pre-check",
                     headers=headers,
-                    timeout=70.0,  # agent-side timeout is 60s, give us headroom
+                    # #1022: configurable (agent-side hook is 60s; default 70s headroom)
+                    timeout=config.pre_check_timeout,
                 )
         except Exception as e:
+            # #1022: show the timeout type instead of the empty parens a blank
+            # httpx exception would log.
             logger.warning(
-                f"[pre-check] backend call for {agent_name} failed ({e}) — fail-open"
+                f"[pre-check] backend call for {agent_name} failed "
+                f"({_describe_exception(e)}) — fail-open"
             )
             return None
 
@@ -1047,7 +1015,8 @@ class SchedulerService:
         Execute a task via the backend's internal TaskExecutionService endpoint.
 
         Uses async fire-and-forget dispatch with DB polling (SCHED-ASYNC-001):
-        1. POST with async_mode=True and 30s timeout (dispatch only)
+        1. POST with async_mode=True and the configured dispatch deadline
+           (config.dispatch_timeout, default 30s — dispatch only)
         2. If backend accepts, poll DB every poll_interval seconds until done
         3. Backward compatible: if backend returns sync result, use it directly
 
@@ -1084,16 +1053,30 @@ class SchedulerService:
         if execution_id:
             payload["execution_id"] = execution_id
 
-        # Step 1: Dispatch with short timeout (30s max for the HTTP round-trip)
-        dispatch_timeout = 30.0
+        # Step 1: Dispatch with the configured deadline (#1022 — was a 30s
+        # literal). The async endpoint normally returns ~instantly; reaching
+        # this ceiling means the backend did not RESPOND in time, NOT that the
+        # task was rejected (the bg task may already be running — outcome
+        # unknown; see the D4 follow-up).
+        dispatch_timeout = config.dispatch_timeout
 
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{config.backend_url}/api/internal/execute-task",
-                headers=headers,
-                json=payload,
-                timeout=dispatch_timeout,
-            )
+            try:
+                response = await client.post(
+                    f"{config.backend_url}/api/internal/execute-task",
+                    headers=headers,
+                    json=payload,
+                    timeout=dispatch_timeout,
+                )
+            except httpx.TimeoutException as e:
+                # Outcome UNKNOWN: the backend may have accepted+started the task
+                # before the timeout (orphan; see D4 follow-up). Name the
+                # threshold + subtype so the persisted `error` is never blank
+                # (httpx timeouts str() to '' — the #1022 silent-failure root).
+                raise Exception(
+                    f"dispatch to /api/internal/execute-task timed out after "
+                    f"{dispatch_timeout}s ({type(e).__name__}) — outcome unknown"
+                ) from e
 
             if response.status_code != 200:
                 error_text = response.text[:500] if response.text else f"HTTP {response.status_code}"
@@ -1461,7 +1444,7 @@ class SchedulerService:
             self.db.update_execution_status(
                 execution_id=retry_execution.id,
                 status=ExecutionStatus.FAILED,
-                error=str(e)[:2000]
+                error=_describe_exception(e)[:2000]  # #1022: never blank
             )
 
     def _recover_pending_retries(self):
@@ -1880,7 +1863,10 @@ class SchedulerService:
             })
 
         except Exception as e:
-            error_msg = str(e)
+            # #1022 defense-in-depth: process-schedule timeouts already have a
+            # dedicated non-empty handler above; this only sees other blank
+            # exceptions, normalized here for consistency.
+            error_msg = _describe_exception(e)
             logger.error(f"Process schedule {schedule.process_name} execution failed: {error_msg}")
 
             self.db.update_process_schedule_execution(

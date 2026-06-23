@@ -10,6 +10,36 @@ from urllib.parse import urlparse
 # Can also be set via system_settings table (key: "email_auth_enabled", value: "true"/"false")
 EMAIL_AUTH_ENABLED = os.getenv("EMAIL_AUTH_ENABLED", "true").lower() == "true"
 
+# Public self-signup gate (trinity-enterprise#10). When OFF (the secure
+# default), the unauthenticated POST /api/access/request endpoint returns 403 —
+# it does NOT auto-whitelist arbitrary emails. Operators who want frictionless
+# CLI onboarding (`trinity:connect`) opt in explicitly via this env var or the
+# system_settings key "public_access_requests_enabled". Does not affect login
+# code requests for already-whitelisted emails (separate endpoint).
+PUBLIC_ACCESS_REQUESTS_ENABLED = os.getenv("PUBLIC_ACCESS_REQUESTS_ENABLED", "false").lower() == "true"
+
+# Operator intake (trinity-enterprise#38). At first-run setup the operator may
+# opt in to "occasionally receive important security & product updates"; when
+# they do, their email + company are submitted once to an Ability.ai-operated
+# hosted intake endpoint (a sibling endpoint on the same Cloudflare-fronted
+# intake app as the #1116 in-app bug reporter). This is identifiable, explicit
+# opt-in contact capture — NOT anonymous telemetry — so it only fires on an
+# affirmative consent checkbox. Fire-and-forget and once-per-install: a blocked
+# or failed POST never delays or breaks setup.
+#
+# OPERATOR_INTAKE_ENABLED=false (or the cross-tool DO_NOT_TRACK=1 convention)
+# fully disables the outbound submission for air-gapped / privacy-strict
+# deployments — the consent box still appears but nothing ever leaves the box.
+OPERATOR_INTAKE_ENABLED = (
+    os.getenv("OPERATOR_INTAKE_ENABLED", "true").lower() == "true"
+    and os.getenv("DO_NOT_TRACK", "0") not in ("1", "true", "True")
+)
+# Stable Cloudflare-fronted vanity domain (same app as #1116's /v1/report-bug);
+# /v1/ versions the contract so the backing Worker can be replaced forever.
+OPERATOR_INTAKE_URL = os.getenv(
+    "OPERATOR_INTAKE_URL", "https://intake.abilityai.dev/v1/operator-intake"
+)
+
 # JWT Settings
 # SECURITY: SECRET_KEY must be set via environment variable in production
 # Generate with: openssl rand -hex 32
@@ -111,6 +141,36 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", 
 # agent_ownership.circuit_breaker_enabled (also default OFF). Both must be on
 # for the breaker to engage — a true opt-in canary (D7/D11).
 DISPATCH_BREAKER_ENABLED = os.getenv("DISPATCH_BREAKER_ENABLED", "false").lower() == "true"
+
+# Fire-and-Forget Dispatch — global master switch (#1083).
+# When ON, eligible autonomous turns are dispatched to the agent with a 202
+# accept and finalized via the result-callback endpoint, so a wedged turn
+# holds zero backend coroutine/slot beyond its lease. Default OFF; flipping
+# early is safe because a non-202 agent response (old image / non-Claude
+# runtime) falls back to today's synchronous handling.
+DISPATCH_ASYNC = os.getenv("DISPATCH_ASYNC", "false").lower() == "true"
+
+# Triggers eligible for async dispatch (#1083 v1). ONLY {schedule, webhook}:
+# these reach execute_task through the scheduler's async-poll path with no
+# synchronous result consumer. `loop`/`fan_out` consume result.response and
+# MUST stay sync; `event` POSTs the agent directly (bypassing execute_task).
+ASYNC_DISPATCH_ELIGIBLE_TRIGGERS = frozenset({"schedule", "webhook"})
+
+# Pull-pilot routing for agent→agent MCP chat (#946, Phase 2 PoC for Epic
+# #1045 / umbrella #1081). When ON, an agent→agent (scope='agent', non-self)
+# `chat_with_agent` sequential call is routed by the MCP server through the
+# durable async `/task` path instead of the synchronous held `/chat` call;
+# the caller receives an immediate `{accepted|queued, execution_id}` receipt
+# and polls `get_execution_result`. scope='user', self-tasks, and flag-OFF keep
+# today's synchronous `/chat` unchanged. Default OFF — a flag flip / MCP routing
+# revert is the whole rollback. The actual routing gate lives MCP-side
+# (`MCP_AGENT_CHAT_PULL_ENABLED` read in the MCP server at startup, mirroring
+# `MCP_REQUIRE_API_KEY`); this backend declaration is the canonical registry
+# entry and is surfaced via GET /api/settings/feature-flags
+# (`mcp_agent_chat_pull_enabled`) for operator observability during the soak.
+# Both services read the SAME env key, so a normal single-`.env` deployment
+# can't drift.
+MCP_AGENT_CHAT_PULL_ENABLED = os.getenv("MCP_AGENT_CHAT_PULL_ENABLED", "false").lower() == "true"
 
 # Voice Chat Configuration (VOICE-001)
 VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"

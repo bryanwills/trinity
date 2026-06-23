@@ -16,6 +16,7 @@ from typing import NamedTuple, NoReturn, Optional
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.activity_service import activity_service
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
@@ -610,6 +611,15 @@ async def _run_chat_and_finalize(
         if request.model:
             payload["model"] = request.model
         # Inject platform instructions + execution context (#171) into every chat request.
+        # Resolve the agent runtime (best-effort, never raises) so the MCP-tool
+        # naming in the platform prompt matches the harness (#1187 F-MCP). Lazy +
+        # guarded import so a re-import under a stubbed services.docker_service
+        # (unit tests) can't break dispatch; Claude default on any failure.
+        try:
+            from services.docker_service import get_agent_runtime
+            agent_runtime = get_agent_runtime(name)
+        except Exception:
+            agent_runtime = "claude-code"
         try:
             exec_ctx = ExecutionContext(
                 agent_name=name,
@@ -623,10 +633,11 @@ async def _run_chat_and_finalize(
             payload["system_prompt"] = compose_system_prompt(
                 execution_context=exec_ctx,
                 include_execution_context=is_execution_context_enabled(),
+                runtime=agent_runtime,
             )
         except Exception as e:
             logger.warning(f"[Chat] execution context build failed, falling back: {e}")
-            payload["system_prompt"] = get_platform_system_prompt()
+            payload["system_prompt"] = get_platform_system_prompt(runtime=agent_runtime)
         # Pass execution ID so agent registers process under the same ID (enables termination)
         if task_execution_id:
             payload["execution_id"] = task_execution_id
@@ -1577,6 +1588,11 @@ async def execute_parallel_task(
             # enqueue, so nothing was backlogged. Close the pre-created row
             # FAILED(circuit_open) and return 503.
             logger.warning(f"[Task Async] Agent '{name}' dispatch circuit open, rejecting")
+            # #946: nothing dispatched — release the idempotency claim so the
+            # caller can retry with the same key once the breaker recovers,
+            # mirroring /chat (line 242) and the CapacityFull branch above.
+            # Without this the in_flight row blocks same-key retries for 24h.
+            idempotency_service.fail(idem)
             _raise_circuit_open_503(name, execution_id, e)
 
         if cap_result.state == "queued_persistent":
@@ -1693,6 +1709,9 @@ async def execute_parallel_task(
         # #526: dispatch breaker open — raised before the queue_persistent
         # enqueue. Close the pre-created row FAILED(circuit_open) and 503.
         logger.warning(f"[Task Sync] Agent '{name}' dispatch circuit open, rejecting")
+        # #946: release the idempotency claim so the same-key retry isn't
+        # blocked for 24h, mirroring /chat (line 242) and CapacityFull above.
+        idempotency_service.fail(idem)
         _raise_circuit_open_503(name, execution_id, e)
 
     sync_slot_acquired = sync_cap_result.state == "admitted"
@@ -1876,7 +1895,7 @@ async def get_agent_chat_history(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/chat/history",
                 timeout=10.0
@@ -1909,7 +1928,7 @@ async def reset_agent_chat_history(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.delete(
                 f"http://agent-{name}:8000/api/chat/history",
                 timeout=10.0
@@ -1950,7 +1969,7 @@ async def get_agent_chat_session(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/chat/session",
                 timeout=10.0
@@ -1992,7 +2011,7 @@ async def get_agent_activity(
         }
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/activity",
                 timeout=10.0
@@ -2031,7 +2050,7 @@ async def get_agent_activity_detail(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/activity/{tool_id}",
                 timeout=10.0
@@ -2064,7 +2083,7 @@ async def clear_agent_activity(
         }
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.delete(
                 f"http://agent-{name}:8000/api/activity",
                 timeout=10.0
@@ -2099,7 +2118,7 @@ async def get_agent_model(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/model",
                 timeout=10.0
@@ -2133,7 +2152,7 @@ async def set_agent_model(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.put(
                 f"http://agent-{name}:8000/api/model",
                 json={"model": request.model},
@@ -2361,7 +2380,7 @@ async def terminate_agent_execution(
 
     try:
         # Proxy termination request to agent container
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with agent_httpx_client(name, timeout=15.0) as client:
             response = await client.post(
                 f"http://agent-{name}:8000/api/executions/{execution_id}/terminate"
             )
@@ -2448,7 +2467,7 @@ async def get_agent_running_executions(
         return {"executions": []}
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with agent_httpx_client(name, timeout=10.0) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/executions/running"
             )
@@ -2494,7 +2513,7 @@ async def stream_execution_log(
             # Connect timeout prevents hanging if agent is unresponsive,
             # but read timeout is None since SSE streams are long-lived
             timeout = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with agent_httpx_client(name, timeout=timeout) as client:
                 async with client.stream("GET", agent_url) as response:
                     if response.status_code == 404:
                         # Execution not found on agent (race condition: task not started yet)

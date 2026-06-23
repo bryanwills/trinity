@@ -23,6 +23,7 @@ from services.docker_service import (
 from services.docker_utils import container_reload, container_start, containers_run
 from services.settings_service import get_anthropic_api_key
 from services.agent_service.lifecycle import FULL_CAPABILITIES, AGENT_TMPFS_MOUNT, AGENT_DEFAULT_TMPDIR
+from services.agent_service.capabilities import normalize_cpu, normalize_memory
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -243,9 +244,10 @@ class SystemAgentService:
             volumes=volumes,
             environment=env_vars,
             labels=labels,
-            mem_limit=resources.get("memory", "8g"),
+            # #1197: normalize/validate before Docker (int(cpu) NanoCpus / mem_limit).
+            mem_limit=normalize_memory(resources.get("memory"), "8g"),
             # #1126: nano_cpus (Linux CFS quota), NOT cpu_count (Windows-only → NanoCpus=0).
-            nano_cpus=int(resources.get("cpu", "4")) * 1_000_000_000,
+            nano_cpus=int(normalize_cpu(resources.get("cpu"), "4")) * 1_000_000_000,
             restart_policy={"Name": "unless-stopped"},  # Auto-restart on failure
             # Always apply AppArmor for additional sandboxing
             security_opt=['apparmor:docker-default'],
@@ -272,15 +274,16 @@ class SystemAgentService:
 
     def _set_system_scope(self, key_id: str):
         """Update MCP key to have system scope (bypasses permissions)."""
-        from db.connection import get_db_connection
+        from sqlalchemy import update
+        from db.engine import get_engine
+        from db.tables import mcp_api_keys
 
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE mcp_api_keys SET scope = ? WHERE id = ?",
-                ("system", key_id)
+        with get_engine().begin() as conn:
+            conn.execute(
+                update(mcp_api_keys)
+                .where(mcp_api_keys.c.id == key_id)
+                .values(scope="system")
             )
-            conn.commit()
 
 
 # Global service instance
